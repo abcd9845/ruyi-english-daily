@@ -31,7 +31,7 @@ summary{cursor:pointer;font-weight:600;color:var(--warn)}a{color:var(--accent)}f
   <span class="pill">约 25–35 分钟</span>
   <span class="pill">可提交归档</span>
   <div class="bar"><i id="bar"></i></div>
-  <div class="meta" id="savedHint" style="margin-top:8px">填写自动保存在本机；提交后老师可收到并归档</div>
+  <div class="meta" id="savedHint" style="margin-top:8px">边写边自动保存草稿（本机）；中途退出再打开还能接着写；提交后老师可收到并归档</div>
 </header>
 <section class="card">
   <h2>怎么用</h2>
@@ -137,6 +137,28 @@ async function submit(){if((familyCode.value||'').trim()!==FAMILY_OK){submitStat
 document.querySelectorAll('input,textarea').forEach(el=>{el.addEventListener('input',save);el.addEventListener('change',save);});
 btnCheck.onclick=checkForms;btnSubmit.onclick=submit;btnClear.onclick=()=>{if(confirm('清空今日填写？')){localStorage.removeItem(DAY_KEY);location.reload();}};
 load();
+
+// stronger draft persistence: leave / background / crash-ish
+function forceSave(){ try { save(); } catch(e) {} }
+window.addEventListener('pagehide', forceSave);
+window.addEventListener('beforeunload', forceSave);
+document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') forceSave(); });
+setInterval(forceSave, 10000);
+// banner if draft already present
+(function(){
+  try {
+    var raw = localStorage.getItem(DAY_KEY);
+    if (!raw) return;
+    var data = JSON.parse(raw);
+    var has = false;
+    Object.keys(data).forEach(function(k){ if (k==='familyCode'||k==='chk1'||k==='chk2'||k==='chk3') return; if ((data[k]||'').toString().trim()) has = true; });
+    if (has) {
+      savedHint.textContent = '已恢复上次草稿 · 可继续写，不会白写';
+      savedHint.style.color = '#0f766e';
+    }
+  } catch(e) {}
+})();
+
 </script>
 </body>
 </html>

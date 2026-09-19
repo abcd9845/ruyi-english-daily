@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>如意英语 · 错题本与数据分析</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans SC",sans-serif;margin:0;background:#f6f3ee;color:#1c1917;line-height:1.55;padding:16px}
+.wrap{max-width:900px;margin:0 auto}
+.card{background:#fff;border-radius:16px;padding:16px;box-shadow:0 8px 24px rgba(0,0,0,.06);margin-bottom:12px}
+h1{font-size:1.3rem;margin:0 0 8px}h2{font-size:1.05rem;color:#0f766e;margin:0 0 10px}
+.muted{color:#78716c;font-size:.9rem}a{color:#0f766e}
+table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{border:1px solid #e7e5e4;padding:8px;text-align:left;vertical-align:top}
+th{background:#f5f5f4}code{background:#f5f5f4;padding:2px 6px;border-radius:6px}
+.pill{display:inline-block;background:#ccfbf1;color:#0f766e;border-radius:999px;padding:3px 10px;font-size:.78rem;font-weight:600;margin-right:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>如意英语 · 错题本与数据分析</h1>
+    <p class="muted">更新时间：2026-09-19 08:03（Asia/Shanghai）</p>
+    <p>
+      <span class="pill">来源：数据库</span>
+      <span class="pill">不是翻网页</span>
+      <a href="../">今日练习</a> · <a href="../days/">往日归档</a>
+    </p>
+    <p class="muted">数据链路：网页提交 → 题库 SQLite（practice_submissions / practice_item_results）→ 本页分析。能力档来自已同步的 ability_points。</p>
+  </div>
+
+  <div class="card">
+    <h2>快速结论（出题用）</h2>
+    <p>按能力档复现优先，明日微焦点优先考虑：</p>
+    <ol><li>句型转换/连词成句/作文语序</li><li>词形变化：三单、复数、所有格、派生词</li><li>助动词 do/does/did 与时态输出</li><li>固定短语与短语迁移</li><li>作文完整度与句子质量</li></ol>
+    <p class="muted">正式提交积累后，会叠加「最近错题频率」重排，不只看历史能力档。</p>
+  </div>
+
+  <div class="card">
+    <h2>能力档 Top（英语）</h2>
+    <table>
+      <tr><th>能力点</th><th>P级</th><th>状态</th><th>复现</th></tr>
+      <tr><td>句型转换/连词成句/作文语序</td><td>P1</td><td>高频复现</td><td>16.0</td></tr><tr><td>词形变化：三单、复数、所有格、派生词</td><td>P1</td><td>高频复现</td><td>15.0</td></tr><tr><td>助动词 do/does/did 与时态输出</td><td>P1</td><td>高频复现</td><td>10.0</td></tr><tr><td>固定短语与短语迁移</td><td>P2</td><td>继续观察</td><td>10.0</td></tr><tr><td>作文完整度与句子质量</td><td>P1</td><td>高频复现</td><td>9.0</td></tr><tr><td>初中｜中译英句子结构与自然搭配</td><td>P2</td><td>继续观察</td><td>7.0</td></tr><tr><td>阅读细节定位/表格信息/NOT题</td><td>P1</td><td>继续观察</td><td>7.0</td></tr><tr><td>初中｜词汇语境匹配与近义辨析</td><td>P1</td><td>继续观察</td><td>6.0</td></tr><tr><td>初中｜时态、主谓一致与非谓语形式</td><td>P1</td><td>继续观察</td><td>6.0</td></tr><tr><td>名词复数/不可数名词</td><td>P2</td><td>继续观察</td><td>6.0</td></tr><tr><td>情景交际识别</td><td>P2</td><td>本轮上调</td><td>5.0</td></tr><tr><td>现在进行时：be + doing 与提问结构</td><td>P1</td><td>继续观察</td><td>4.0</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>提交记录</h2>
+    <table>
+      <tr><th>ID</th><th>day_key</th><th>提交时间</th><th>wrong_ids</th></tr>
+      <tr><td>1</td><td>ruyi-en-2026-09-19</td><td>2026-09-19T15:25:00+08:00</td><td>[]</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>分项正确率（已入库自动判分题）</h2>
+    <table>
+      <tr><th>题块</th><th>对</th><th>错</th><th>开放题/未判</th></tr>
+      <tr><td>transform</td><td>1</td><td>0</td><td>0</td></tr><tr><td>forms</td><td>1</td><td>0</td><td>0</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>错题本（自动判错）</h2>
+    <table>
+      <tr><th>题号</th><th>题块</th><th>题目</th><th>她的作答</th></tr>
+      <tr><td colspan="4">暂无自动判错记录（等正式提交后出现；中译英/作文需老师批改后入库）</td></tr>
+    </table>
+    <p class="muted">中译英 / 作文：提交后由爆米花批改，再把错因写回库，会出现在这里。</p>
+  </div>
+
+  <div class="card">
+    <h2>家长一眼看懂</h2>
+    <ul>
+      <li>错题<strong>存在数据库</strong>，不靠打开网页一张张翻。</li>
+      <li>每天提交后刷新本页，就能看错题本 + 简析。</li>
+      <li>明日新卷 = 能力档弱项 + 近几天错题，不是随机刷题。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

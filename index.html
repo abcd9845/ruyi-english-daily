@@ -24,6 +24,33 @@ summary{cursor:pointer;font-weight:600;color:var(--warn)}a{color:var(--accent)}f
 </style>
 </head>
 <body>
+
+<div id="gate" style="position:fixed;inset:0;background:#f6f3ee;z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:22px;max-width:360px;width:100%;box-shadow:0 8px 24px rgba(0,0,0,.08)">
+    <h2 style="margin:0 0 8px;font-size:1.15rem">家庭专用</h2>
+    <p style="color:#78716c;font-size:.9rem;margin:0 0 12px">输入家庭码后才能查看练习/错题分析。</p>
+    <input id="gateInput" type="password" placeholder="家庭码" style="width:100%;font-size:16px;padding:11px 12px;border:1.5px solid #e7e5e4;border-radius:12px;box-sizing:border-box"/>
+    <button id="gateBtn" type="button" style="margin-top:12px;width:100%;border:none;border-radius:999px;padding:12px;background:#0f766e;color:#fff;font-weight:600;font-size:.95rem">进入</button>
+    <p id="gateErr" style="color:#b91c1c;font-size:.85rem;min-height:1.2em"></p>
+  </div>
+</div>
+<script>
+(function(){
+  var KEY='ruyi-en-gate-ok';
+  var CODE='ruyi2026';
+  var gate=document.getElementById('gate');
+  if(sessionStorage.getItem(KEY)==='1'){ if(gate) gate.remove(); return; }
+  function ok(){
+    var v=(document.getElementById('gateInput').value||'').trim();
+    if(v!==CODE){ document.getElementById('gateErr').textContent='家庭码不对'; return; }
+    sessionStorage.setItem(KEY,'1');
+    gate.remove();
+  }
+  document.getElementById('gateBtn').onclick=ok;
+  document.getElementById('gateInput').addEventListener('keydown',function(e){ if(e.key==='Enter') ok(); });
+})();
+</script>
+
 <div class="wrap">
 <header>
   <h1>如意 · 英语每日一练</h1>

@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>如意 · 数学 P1 专项｜绝对值·单项式·有理数</title>
+<style>
+:root{--bg:#f6f3ee;--card:#fff;--ink:#1c1917;--muted:#78716c;--accent:#0f766e;--accent-soft:#ccfbf1;--line:#e7e5e4;--warn:#b45309;--ok:#15803d;--bad:#b91c1c;--radius:16px;--shadow:0 8px 24px rgba(28,25,23,.06)}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans SC",sans-serif;background:radial-gradient(1200px 600px at 10% -10%,#d1fae5 0%,transparent 50%),radial-gradient(900px 500px at 100% 0%,#fde68a 0%,transparent 40%),var(--bg);color:var(--ink);line-height:1.55;padding:16px 14px 88px}
+.wrap{max-width:720px;margin:0 auto}header,.card{background:var(--card);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);margin-bottom:12px}
+h1{font-size:1.28rem;margin:0 0 6px}h2{font-size:1.05rem;margin:0 0 10px;color:var(--accent)}h3{font-size:.98rem;margin:14px 0 8px;color:var(--ink)}
+.meta{color:var(--muted);font-size:.9rem}.pill{display:inline-block;background:var(--accent-soft);color:var(--accent);font-size:.78rem;font-weight:600;padding:4px 10px;border-radius:999px;margin:10px 6px 0 0}
+.hint{color:var(--muted);font-size:.88rem;margin:0 0 12px}.q{margin-bottom:16px}.q>.stem{display:block;font-size:.95rem;margin-bottom:8px;font-weight:500}
+.math{font-family:"Times New Roman",Times,"Noto Serif SC",serif;font-size:1.05em}
+.opts{display:flex;flex-direction:column;gap:6px}
+.opts label{display:flex;gap:8px;align-items:flex-start;padding:10px 12px;border:1.5px solid var(--line);border-radius:12px;background:#fafaf9;cursor:pointer;font-size:.92rem}
+.opts label:has(input:checked){border-color:var(--accent);background:#f0fdfa}
+.opts input{margin-top:3px;flex-shrink:0}
+input[type=text],textarea{width:100%;border:1.5px solid var(--line);border-radius:12px;padding:11px 12px;font-size:16px;font-family:inherit;background:#fafaf9}
+input:focus,textarea:focus{outline:none;border-color:var(--accent);background:#fff}textarea{min-height:80px;resize:vertical}
+.dual{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.triple{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+@media(max-width:480px){.triple{grid-template-columns:1fr 1fr}}
+.sublabel{font-size:.82rem;color:var(--muted);margin:6px 0 4px;display:block}
+.numline{background:#fafaf9;border:1px dashed var(--line);border-radius:12px;padding:10px 12px;font-size:.88rem;color:var(--muted);margin:0 0 10px;overflow-x:auto;white-space:pre;font-family:ui-monospace,Menlo,monospace}
+button{appearance:none;border:none;border-radius:999px;padding:12px 18px;font-size:.95rem;font-weight:600;cursor:pointer}
+.btn-primary{background:var(--accent);color:#fff}.btn-ghost{background:#f5f5f4;color:var(--ink)}.btn-submit{background:#b45309;color:#fff}
+.sticky{position:sticky;bottom:10px;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:999px;padding:8px;display:flex;gap:8px;justify-content:center;box-shadow:var(--shadow);z-index:5;flex-wrap:wrap}
+.sticky button{flex:1;min-width:100px;max-width:180px}
+.fb{margin-top:6px;font-size:.86rem}.ok{color:var(--ok)}.bad{color:var(--bad)}.soft{color:var(--muted)}
+.bar{height:8px;background:var(--line);border-radius:999px;overflow:hidden;margin-top:12px}.bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#14b8a6,#0f766e);transition:width .2s}
+a{color:var(--accent)}footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
+.warnbox{background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:10px 12px;font-size:.86rem;color:#9a3412;margin:0 0 12px}
+</style>
+</head>
+<body>
+
+<div id="gate" style="position:fixed;inset:0;background:#f6f3ee;z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:22px;max-width:360px;width:100%;box-shadow:0 8px 24px rgba(0,0,0,.08)">
+    <h2 style="margin:0 0 8px;font-size:1.15rem">家庭专用</h2>
+    <p style="color:#78716c;font-size:.9rem;margin:0 0 12px">输入家庭码后才能查看练习/错题分析。</p>
+    <input id="gateInput" type="password" placeholder="家庭码" style="width:100%;font-size:16px;padding:11px 12px;border:1.5px solid #e7e5e4;border-radius:12px;box-sizing:border-box"/>
+    <button id="gateBtn" type="button" style="margin-top:12px;width:100%;border:none;border-radius:999px;padding:12px;background:#0f766e;color:#fff;font-weight:600;font-size:.95rem">进入</button>
+    <p id="gateErr" style="color:#b91c1c;font-size:.85rem;min-height:1.2em"></p>
+  </div>
+</div>
+<script>
+(function(){
+  var KEY='ruyi-en-gate-ok';
+  var CODE='ruyi2026';
+  var gate=document.getElementById('gate');
+  if(sessionStorage.getItem(KEY)==='1'){ if(gate) gate.remove(); return; }
+  function ok(){
+    var v=(document.getElementById('gateInput').value||'').trim();
+    if(v!==CODE){ document.getElementById('gateErr').textContent='家庭码不对'; return; }
+    sessionStorage.setItem(KEY,'1');
+    gate.remove();
+  }
+  document.getElementById('gateBtn').onclick=ok;
+  document.getElementById('gateInput').addEventListener('keydown',function(e){ if(e.key==='Enter') ok(); });
+})();
+</script>
+
+<div class="wrap">
+<header>
+  <h1>如意 · 数学 P1 专项｜绝对值·单项式·有理数</h1>
+  <div class="meta">七上 · Notion P1：绝对值与数轴距离 · 代数式/单项式 · 有理数分类与集合计数</div>
+  <span class="pill">约 25–40 分钟</span>
+  <span class="pill">学校第一难度 · 可提交</span>
+  <div class="bar"><i id="bar"></i></div>
+  <div class="meta" id="savedHint" style="margin-top:8px">边写边自动保存草稿（本机）；中途退出再打开还能接着写</div>
+</header>
+
+<section class="card">
+  <h2>怎么用</h2>
+  <p class="hint" style="margin:0">做完 →「检查客观题」→ 填家庭码 →「提交给爆米花」。过程题不自动判分，提交后老师看。</p>
+  <p class="hint"><a href="../../">每日一练</a> · <a href="../../days/">往日归档</a> · <a href="answer.html">家长答案页</a></p>
+  <div class="warnbox">易漏点自检：绝对值方程是否写出<strong>两解</strong>；单项式是否误把「分母有字母 / 含加号」算进去；有理数表是否把 <strong>0</strong> 单独归好（非正非负、是整数）。</div>
+  <div class="q" style="margin-top:12px;margin-bottom:0">
+    <label class="sublabel" for="familyCode">家庭码（提交用）</label>
+    <input type="text" id="familyCode" placeholder="问家长要" autocomplete="off" />
+  </div>
+</section>
+
+<!-- ========== 一、绝对值与数轴距离 ========== -->
+<section class="card">
+  <h2>一、绝对值与数轴距离（盯住漏负解）</h2>
+  <p class="hint">绝对值 = 到原点的距离。解含绝对值的方程时，先想「到某点距离为…」，通常有<strong>左右两个位置</strong>。</p>
+
+  <div class="q" data-id="A1">
+    <div class="stem">1. 直接求值（填空）</div>
+    <div class="dual">
+      <div><span class="sublabel">|−9| =</span><input type="text" id="A1a" inputmode="numeric" autocomplete="off"/></div>
+      <div><span class="sublabel">|5 − 12| =</span><input type="text" id="A1b" inputmode="numeric" autocomplete="off"/></div>
+    </div>
+    <div class="fb" id="A1-fb"></div>
+  </div>
+
+  <div class="q" data-id="A2">
+    <div class="stem">2. 若 <span class="math">|x| = 6</span>，则 <span class="math">x</span> 等于（ ）</div>
+    <div class="opts" id="A2opts"></div>
+    <div class="fb" id="A2-fb"></div>
+  </div>
+
+  <div class="q" data-id="A3">
+    <div class="stem">3. 数轴上点 <span class="math">A</span> 表示 −4，点 <span class="math">B</span> 表示 3，则 <span class="math">A、B</span> 两点间的距离是 ______。</div>
+    <input type="text" id="A3" inputmode="numeric" autocomplete="off" placeholder="填一个数"/>
+    <div class="fb" id="A3-fb"></div>
+  </div>
+
+  <div class="q" data-id="A4">
+    <div class="stem">4. 已知 <span class="math">|a| = a</span>，则 <span class="math">a</span> 一定是（ ）</div>
+    <div class="opts" id="A4opts"></div>
+    <div class="fb" id="A4-fb"></div>
+  </div>
+
+  <div class="q" data-id="A5">
+    <div class="stem">5. 解方程：<span class="math">|x − 2| = 5</span>。<strong>两个解都要写</strong>（从小到大，用逗号或空格隔开）。</div>
+    <input type="text" id="A5" autocomplete="off" placeholder="例如：-3, 7"/>
+    <div class="fb" id="A5-fb"></div>
+  </div>
+
+  <div class="q" data-id="A6">
+    <div class="stem">6. 动点：数轴上定点 <span class="math">A</span> 在 1 处。动点 <span class="math">P</span> 从 −5 出发，沿正方向以每秒 2 个单位匀速运动。设运动时间为 <span class="math">t</span> 秒（<span class="math">t ≥ 0</span>）。当 <span class="math">|PA| = 3</span> 时，求所有可能的 <span class="math">t</span>（秒）。<strong>两个时刻都要写</strong>。</div>
+    <div class="numline">数轴示意：  −5······0··1········→正方向（P 从 −5 向右）</div>
+    <input type="text" id="A6" autocomplete="off" placeholder="两个 t，从小到大"/>
+    <div class="fb" id="A6-fb"></div>
+  </div>
+
+  <div class="q" data-id="A7">
+    <div class="stem">7.【过程题 · 不自动判分】数轴上区间 <span class="math">[−3, 5]</span> 上有动点 <span class="math">M</span>。（1）求 <span class="math">|OM|</span>（O 为原点）的最大值与最小值；（2）用一句话说明为什么最小值不是在端点 −3 处取得。</div>
+    <textarea id="A7" rows="4" placeholder="写最大值、最小值，并写一句理由"></textarea>
+    <div class="fb soft" id="A7-fb">过程题 · 提交后老师批改</div>
+  </div>
+</section>
+
+<!-- ========== 二、代数式 / 单项式 ========== -->
+<section class="card">
+  <h2>二、代数式 / 单项式概念辨析</h2>
+  <p class="hint">代数式：用运算符号把数或字母连起来的式子（一般<strong>不含</strong>等号、不等号）。单项式：数与字母的积（单独一个数或字母也算）；系数、次数、所含字母要分清。</p>
+
+  <div class="q" data-id="B1">
+    <div class="stem">8. 下列各式中，<strong>是代数式</strong>的序号有 ______。（可多选，填序号）<br/>
+      ① <span class="math">3a − b</span>　② <span class="math">x = 2</span>　③ <span class="math">(m+1)/4</span>　④ <span class="math">n &gt; 0</span>　⑤ <span class="math">−2/5</span></div>
+    <input type="text" id="B1" autocomplete="off" placeholder="例如：①③⑤"/>
+    <div class="fb" id="B1-fb"></div>
+  </div>
+
+  <div class="q" data-id="B2">
+    <div class="stem">9. 下列说法正确的是（ ）</div>
+    <div class="opts" id="B2opts"></div>
+    <div class="fb" id="B2-fb"></div>
+  </div>
+
+  <div class="q" data-id="B3">
+    <div class="stem">10. 判断：<span class="math">−4xy²</span> 是单项式。（填「是」或「否」）</div>
+    <input type="text" id="B3" autocomplete="off" placeholder="是 / 否"/>
+    <div class="fb" id="B3-fb"></div>
+  </div>
+
+  <div class="q" data-id="B4">
+    <div class="stem">11. 判断：<span class="math">2/x</span> 是单项式。（填「是」或「否」）</div>
+    <input type="text" id="B4" autocomplete="off" placeholder="是 / 否"/>
+    <div class="fb" id="B4-fb"></div>
+  </div>
+
+  <div class="q" data-id="B5">
+    <div class="stem">12. 单项式 <span class="math">−(3/4)mn³</span> 的系数是 ______，次数是 ______，所含字母是 ______。</div>
+    <div class="triple">
+      <div><span class="sublabel">系数</span><input type="text" id="B5a" autocomplete="off"/></div>
+      <div><span class="sublabel">次数</span><input type="text" id="B5b" inputmode="numeric" autocomplete="off"/></div>
+      <div><span class="sublabel">字母</span><input type="text" id="B5c" autocomplete="off" placeholder="如 m,n"/></div>
+    </div>
+    <div class="fb" id="B5-fb"></div>
+  </div>
+
+  <div class="q" data-id="B6">
+    <div class="stem">13.【过程题 · 不自动判分】小华说：「<span class="math">2x + 1/3</span> 和 <span class="math">(2x)/3</span> 都是单项式。」对吗？请分别判断并各写一句理由。</div>
+    <textarea id="B6" rows="4" placeholder="分别判断两个式子，写清理由"></textarea>
+    <div class="fb soft" id="B6-fb">过程题 · 提交后老师批改</div>
+  </div>
+</section>
+
+<!-- ========== 三、有理数分类与集合计数 ========== -->
+<section class="card">
+  <h2>三、有理数分类与集合计数（含 0 · 双重筛选）</h2>
+  <p class="hint">有理数 = 整数 ∪ 分数。0 是整数，既不是正数也不是负数。数个数时先画表，再按条件筛。</p>
+
+  <div class="q" data-id="C1">
+    <div class="stem">14. 给出集合：<span class="math">{ −3, −1.5, 0, 2/5, 4, √9, −π }</span>（说明：√9 = 3，是有理数；π 是无理数）。其中<strong>有理数</strong>的个数是 ______。</div>
+    <input type="text" id="C1" inputmode="numeric" autocomplete="off"/>
+    <div class="fb" id="C1-fb"></div>
+  </div>
+
+  <div class="q" data-id="C2">
+    <div class="stem">15. 仍用上一题的集合（去掉已确定的无理数后，对剩余有理数计数）。其中<strong>非负整数</strong>的个数是 ______。（非负整数 = 0, 1, 2, …）</div>
+    <input type="text" id="C2" inputmode="numeric" autocomplete="off"/>
+    <div class="fb" id="C2-fb"></div>
+  </div>
+
+  <div class="q" data-id="C3">
+    <div class="stem">16. 在 −2, −0.5, 0, 1, 3/4, −7/2, 6 中，同时满足「是有理数」且「不是正数」的数有 ______ 个。</div>
+    <input type="text" id="C3" inputmode="numeric" autocomplete="off"/>
+    <div class="fb" id="C3-fb"></div>
+  </div>
+
+  <div class="q" data-id="C4">
+    <div class="stem">17. 下列说法错误的是（ ）</div>
+    <div class="opts" id="C4opts"></div>
+    <div class="fb" id="C4-fb"></div>
+  </div>
+
+  <div class="q" data-id="C5">
+    <div class="stem">18. 填空：整数可以分为 ______、______ 和 ______ 三类。（按正负与零）</div>
+    <div class="triple">
+      <div><span class="sublabel">①</span><input type="text" id="C5a" autocomplete="off"/></div>
+      <div><span class="sublabel">②</span><input type="text" id="C5b" autocomplete="off"/></div>
+      <div><span class="sublabel">③</span><input type="text" id="C5c" autocomplete="off"/></div>
+    </div>
+    <div class="fb" id="C5-fb"></div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>口述验收（约 1 分钟 · 给家长）</h2>
+  <label><input type="checkbox" id="chk1"/> 能讲清：|x|=a（a&gt;0）为什么通常有两个解</label><br/>
+  <label><input type="checkbox" id="chk2"/> 能讲清：单项式 vs 多项式，并举「分母有字母」反例</label><br/>
+  <label><input type="checkbox" id="chk3"/> 能讲清：0 为什么既不是正数也不是负数，但是整数/有理数</label>
+  <div id="submitStatus" class="fb" style="margin-top:10px"></div>
+</section>
+
+<div class="sticky">
+  <button type="button" class="btn-ghost" id="btnClear">清空</button>
+  <button type="button" class="btn-primary" id="btnCheck">检查客观题</button>
+  <button type="button" class="btn-submit" id="btnSubmit">提交给爆米花</button>
+</div>
+<footer>爆米花 · 数学 P1 专项 · 提交后归档进题库</footer>
+</div>
+
+<script>
+const DAY_KEY = 'ruyi-math-p1-2026-09-20';
+const NTFY = 'https://ntfy.sh/ruyi-en-9323f3e3bc60f5a61480b5e2f0065ed7';
+const FAMILY_OK = 'ruyi2026';
+
+const mcqs = {
+  A2:{options:['A. 6','B. −6','C. ±6','D. 0'],ans:'C'},
+  A4:{options:['A. 正数','B. 负数','C. 非负数（≥0）','D. 非正数（≤0）'],ans:'C'},
+  B2:{options:[
+    'A. x+1 是单项式',
+    'B. −5ab² 是单项式',
+    'C. a/b 一定是单项式（b 为字母）',
+    'D. x=3 是代数式'
+  ],ans:'B'},
+  C4:{options:[
+    'A. 0 是整数，也是有理数',
+    'B. 循环小数都是有理数',
+    'C. 正整数、负整数合起来就是全体整数',
+    'D. 分数都属于有理数（分母≠0）'
+  ],ans:'C'}
+};
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+function renderMC(id){
+  const q=mcqs[id];
+  const box=document.getElementById(id+'opts');
+  box.innerHTML=q.options.map(op=>{
+    const letter=op.charAt(0);
+    return '<label><input type="radio" name="'+id+'" value="'+letter+'"/> <span>'+esc(op)+'</span></label>';
+  }).join('');
+}
+['A2','A4','B2','C4'].forEach(renderMC);
+
+function getRadio(name){
+  const el=document.querySelector('input[name="'+name+'"]:checked');
+  return el?el.value:'';
+}
+
+function norm(s){
+  return (s||'').trim().toLowerCase()
+    .replace(/[．。]/g,'.')
+    .replace(/[，]/g,',')
+    .replace(/[−–—－]/g,'-')
+    .replace(/[±]/g,'+-')
+    .replace(/\s+/g,'')
+    .replace(/¹/g,'').replace(/²/g,'2').replace(/³/g,'3');
+}
+
+function normNumList(s){
+  // extract numbers possibly negative, allow comma/space/顿号/和
+  const t=(s||'').replace(/[−–—－]/g,'-').replace(/[，、；;]/g,',');
+  const parts=t.split(/[,/\s和与]+/).map(x=>x.trim()).filter(Boolean);
+  return parts.map(p=>{
+    p=p.replace(/^\(+|\)+$/g,'');
+    // fractions like -3/4 already fine; ±6 -> skip
+    if(/^[\+\-]?(\d+)\/(\d+)$/.test(p)) return p;
+    if(/^[\+\-]?\d+(\.\d+)?$/.test(p)) return String(Number(p));
+    return norm(p);
+  }).sort((a,b)=>parseFloat(a)-parseFloat(b));
+}
+
+function matchNumList(val, expectedArr){
+  const got=normNumList(val);
+  const exp=expectedArr.map(String).sort((a,b)=>parseFloat(a)-parseFloat(b));
+  if(got.length!==exp.length) return false;
+  return got.every((g,i)=>g===exp[i] || Number(g)===Number(exp[i]));
+}
+
+function matchChoiceSet(val, expectedNums){
+  // ①③⑤ style
+  const t=(val||'').replace(/\s/g,'');
+  const found=[...t.matchAll(/[①②③④⑤⑥⑦⑧⑨⑩1-9]/g)].map(m=>{
+    const c=m[0];
+    const map={'①':'1','②':'2','③':'3','④':'4','⑤':'5','⑥':'6','⑦':'7','⑧':'8','⑨':'9','⑩':'10'};
+    return map[c]||c;
+  });
+  const uniq=[...new Set(found)].sort().join('');
+  const exp=[...expectedNums].map(String).sort().join('');
+  return uniq===exp;
+}
+
+function matchYesNo(val, yes){
+  const n=norm(val).replace(/对/g,'是').replace(/错/g,'否').replace(/不对/g,'否').replace(/不是/g,'否');
+  if(yes) return n==='是'||n==='yes'||n==='y'||n==='✓'||n==='√';
+  return n==='否'||n==='no'||n==='n'||n==='×'||n==='x';
+}
+
+function matchFrac(val, accepted){
+  const n=norm(val).replace(/／/g,'/');
+  return accepted.some(a=>norm(a)===n);
+}
+
+function matchLetters(val){
+  const n=norm(val).replace(/，/g,',').replace(/和/g,',').replace(/与/g,',');
+  const parts=n.split(/[,/]/).filter(Boolean).map(x=>x.replace(/[^a-zA-Z]/g,'').toLowerCase()).filter(Boolean).sort();
+  return parts.join(',')==='m,n';
+}
+
+function matchC5(a,b,c){
+  const bag=[norm(a),norm(b),norm(c)].map(x=>x.replace(/数/g,''));
+  const need=['正整数','负整数','零'];
+  // also accept 0 / 正的整数 etc.
+  function hit(s, key){
+    if(key==='正整数') return s.includes('正整')||s==='正'||s.includes('正的整数');
+    if(key==='负整数') return s.includes('负整')||s==='负'||s.includes('负的整数');
+    if(key==='零') return s==='0'||s==='零'||s.includes('零');
+    return false;
+  }
+  return need.every(k=>bag.some(s=>hit(s,k)));
+}
+
+// Objective checkers
+const objective = [
+  {id:'A1', check(){
+    const a=norm(document.getElementById('A1a').value);
+    const b=norm(document.getElementById('A1b').value);
+    const filled=!!(document.getElementById('A1a').value.trim()||document.getElementById('A1b').value.trim());
+    const good=(a==='9'||a==='+9')&&(b==='7'||b==='+7');
+    return {filled, good, answer: document.getElementById('A1a').value+' ; '+document.getElementById('A1b').value};
+  }},
+  {id:'A2', check(){ const v=getRadio('A2'); return {filled:!!v, good:v===mcqs.A2.ans, answer:v}; }},
+  {id:'A3', check(){ const v=document.getElementById('A3').value; const n=norm(v); return {filled:!!v.trim(), good:n==='7'||n==='+7', answer:v}; }},
+  {id:'A4', check(){ const v=getRadio('A4'); return {filled:!!v, good:v===mcqs.A4.ans, answer:v}; }},
+  {id:'A5', check(){ const v=document.getElementById('A5').value; return {filled:!!v.trim(), good:matchNumList(v,[-3,7]), answer:v}; }},
+  {id:'A6', check(){
+    // P(t) = -5 + 2t; |P-1|=3 → P=4 or P=-2
+    // -5+2t=4 → t=4.5; -5+2t=-2 → t=1.5
+    const v=document.getElementById('A6').value;
+    const good=matchNumList(v,['1.5','4.5']) || matchNumList(v,['3/2','9/2']) || matchNumList(v,['1.5','9/2']) || matchNumList(v,['3/2','4.5']);
+    // also accept 3/2, 9/2 written mixed
+    let good2=good;
+    if(!good2){
+      const got=normNumList(v);
+      const alt=got.map(g=>{
+        if(g==='1.5') return '1.5';
+        if(g==='4.5') return '4.5';
+        if(g==='3/2'||g==='1.50') return '1.5';
+        if(g==='9/2') return '4.5';
+        return g;
+      });
+      good2 = alt.length===2 && alt.includes('1.5') && alt.includes('4.5');
+    }
+    return {filled:!!v.trim(), good:good2, answer:v};
+  }},
+  {id:'B1', check(){ const v=document.getElementById('B1').value; return {filled:!!v.trim(), good:matchChoiceSet(v,['1','3','5']), answer:v}; }},
+  {id:'B2', check(){ const v=getRadio('B2'); return {filled:!!v, good:v===mcqs.B2.ans, answer:v}; }},
+  {id:'B3', check(){ const v=document.getElementById('B3').value; return {filled:!!v.trim(), good:matchYesNo(v,true), answer:v}; }},
+  {id:'B4', check(){ const v=document.getElementById('B4').value; return {filled:!!v.trim(), good:matchYesNo(v,false), answer:v}; }},
+  {id:'B5', check(){
+    const a=document.getElementById('B5a').value, b=document.getElementById('B5b').value, c=document.getElementById('B5c').value;
+    const filled=!!(a.trim()||b.trim()||c.trim());
+    const goodCoef=matchFrac(a,['-3/4','-(3/4)','-0.75','－3/4','-¾']);
+    const goodDeg=norm(b)==='4';
+    const goodLet=matchLetters(c);
+    return {filled, good:goodCoef&&goodDeg&&goodLet, answer:a+'; '+b+'; '+c};
+  }},
+  {id:'C1', check(){ const v=document.getElementById('C1').value; return {filled:!!v.trim(), good:norm(v)==='6', answer:v}; }},
+  {id:'C2', check(){ const v=document.getElementById('C2').value; return {filled:!!v.trim(), good:norm(v)==='3', answer:v}; }}, // 0,4,√9=3
+  {id:'C3', check(){ const v=document.getElementById('C3').value; return {filled:!!v.trim(), good:norm(v)==='4', answer:v}; }}, // -2,-0.5,0,-7/2
+  {id:'C4', check(){ const v=getRadio('C4'); return {filled:!!v, good:v===mcqs.C4.ans, answer:v}; }},
+  {id:'C5', check(){
+    const a=document.getElementById('C5a').value,b=document.getElementById('C5b').value,c=document.getElementById('C5c').value;
+    return {filled:!!(a.trim()||b.trim()||c.trim()), good:matchC5(a,b,c), answer:[a,b,c].join(' / ')};
+  }},
+];
+
+const processIds = ['A7','B6'];
+const textIds = ['A1a','A1b','A3','A5','A6','A7','B1','B3','B4','B5a','B5b','B5c','B6','C1','C2','C3','C5a','C5b','C5c','familyCode'];
+const radioIds = ['A2','A4','B2','C4'];
+const chkIds = ['chk1','chk2','chk3'];
+
+const familyCode=document.getElementById('familyCode');
+const bar=document.getElementById('bar');
+const savedHint=document.getElementById('savedHint');
+const submitStatus=document.getElementById('submitStatus');
+const btnClear=document.getElementById('btnClear');
+const btnCheck=document.getElementById('btnCheck');
+const btnSubmit=document.getElementById('btnSubmit');
+
+function collectDraft(){
+  const data={familyCode:familyCode.value, chk1:chk1.checked, chk2:chk2.checked, chk3:chk3.checked};
+  textIds.forEach(id=>{ if(id==='familyCode') return; const el=document.getElementById(id); if(el) data[id]=el.value; });
+  radioIds.forEach(id=>{ data[id]=getRadio(id); });
+  return data;
+}
+
+function save(){
+  try{
+    localStorage.setItem(DAY_KEY, JSON.stringify(collectDraft()));
+    savedHint.textContent='已自动保存 · '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+    savedHint.style.color='';
+  }catch(e){}
+  updateProgress();
+}
+
+function load(){
+  try{
+    const data=JSON.parse(localStorage.getItem(DAY_KEY)||'{}');
+    if(data.familyCode) familyCode.value=data.familyCode;
+    textIds.forEach(id=>{
+      if(id==='familyCode') return;
+      if(data[id]!=null && document.getElementById(id)) document.getElementById(id).value=data[id];
+    });
+    radioIds.forEach(id=>{
+      if(data[id]){
+        const el=document.querySelector('input[name="'+id+'"][value="'+data[id]+'"]');
+        if(el) el.checked=true;
+      }
+    });
+    chkIds.forEach(id=>{ if(data[id]!=null) document.getElementById(id).checked=!!data[id]; });
+  }catch(e){}
+  updateProgress();
+}
+
+function updateProgress(){
+  const fields=[...textIds.filter(id=>id!=='familyCode'), ...radioIds];
+  let filled=0;
+  fields.forEach(id=>{
+    if(radioIds.includes(id)){ if(getRadio(id)) filled++; }
+    else { const el=document.getElementById(id); if(el && (el.value||'').trim()) filled++; }
+  });
+  bar.style.width=Math.round(filled/fields.length*100)+'%';
+}
+
+function checkObjective(){
+  let ok=0, total=0;
+  objective.forEach(item=>{
+    total++;
+    const r=item.check();
+    const fb=document.getElementById(item.id+'-fb');
+    if(!r.filled){ if(fb){ fb.textContent=''; fb.className='fb'; } return; }
+    if(r.good) ok++;
+    if(fb){ fb.textContent=r.good?'✓ 对':'再想想'; fb.className='fb '+(r.good?'ok':'bad'); }
+  });
+  alert('客观题正确 '+ok+' / '+total+'（第7、13题过程题不计入）\n过程题提交后由老师批改。');
+  save();
+}
+
+function collectPayload(){
+  const answers={}, auto={}, wrongs=[];
+  const stems={
+    A1:'|−9| 与 |5−12|',A2:'|x|=6',A3:'A=-4,B=3 距离',A4:'|a|=a',A5:'|x−2|=5',A6:'动点 |PA|=3 求 t',
+    A7:'区间[−3,5] 上 |OM| 最值',B1:'哪些是代数式',B2:'单项式说法',B3:'−4xy² 是否单项式',B4:'2/x 是否单项式',
+    B5:'−(3/4)mn³ 系数次数字母',B6:'2x+1/3 与 (2x)/3 是否单项式',C1:'有理数个数',C2:'非负整数个数',
+    C3:'有理数且非正数个数',C4:'说法错误',C5:'整数三类'
+  };
+  objective.forEach(item=>{
+    const r=item.check();
+    answers[item.id]={stem:stems[item.id],answer:r.answer};
+    auto[item.id]=r.filled?r.good:null;
+    if(!r.filled || !r.good) wrongs.push(item.id);
+  });
+  processIds.forEach(id=>{
+    answers[id]={stem:stems[id],answer:document.getElementById(id).value};
+    auto[id]=null;
+  });
+  return {
+    type:'ruyi-math-p1-submit',
+    learner:'如意',
+    day_key:DAY_KEY,
+    submitted_at:new Date().toISOString(),
+    checkboxes:{chk1:chk1.checked,chk2:chk2.checked,chk3:chk3.checked},
+    answers, auto_score:auto, wrong_ids:wrongs,
+    meta:{focus:'绝对值·单项式·有理数分类 P1', site:location.href}
+  };
+}
+
+async function submit(){
+  if((familyCode.value||'').trim()!==FAMILY_OK){
+    submitStatus.textContent='家庭码不对，问家长要。';
+    submitStatus.className='fb bad';
+    return;
+  }
+  const payload=collectPayload();
+  submitStatus.textContent='提交中…';
+  submitStatus.className='fb soft';
+  btnSubmit.disabled=true;
+  try{
+    const body=JSON.stringify(payload);
+    const res=await fetch(NTFY,{
+      method:'POST',
+      headers:{'Title':'Ruyi Math P1 Submit','Tags':'mailbox_with_mail,student','Content-Type':'text/plain; charset=utf-8'},
+      body
+    });
+    if(!res.ok) throw new Error('http '+res.status);
+    localStorage.setItem(DAY_KEY+'-last-submit', body);
+    submitStatus.textContent='已提交！爆米花会收到并归档。';
+    submitStatus.className='fb ok';
+  }catch(e){
+    submitStatus.textContent='提交失败，请把答案复制发到聊天：'+(e.message||e);
+    submitStatus.className='fb bad';
+    try{
+      await navigator.clipboard.writeText(JSON.stringify(payload,null,2));
+      submitStatus.textContent+='（已复制到剪贴板）';
+    }catch(_){}
+  }finally{
+    btnSubmit.disabled=false;
+    save();
+  }
+}
+
+document.querySelectorAll('input,textarea').forEach(el=>{
+  el.addEventListener('input', save);
+  el.addEventListener('change', save);
+});
+btnCheck.onclick=checkObjective;
+btnSubmit.onclick=submit;
+btnClear.onclick=()=>{ if(confirm('清空本页填写？')){ localStorage.removeItem(DAY_KEY); location.reload(); } };
+load();
+
+function forceSave(){ try{ save(); }catch(e){} }
+window.addEventListener('pagehide', forceSave);
+window.addEventListener('beforeunload', forceSave);
+document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='hidden') forceSave(); });
+setInterval(forceSave, 10000);
+
+(function(){
+  try{
+    var raw=localStorage.getItem(DAY_KEY);
+    if(!raw) return;
+    var data=JSON.parse(raw);
+    var has=false;
+    Object.keys(data).forEach(function(k){
+      if(k==='familyCode'||k==='chk1'||k==='chk2'||k==='chk3') return;
+      if((data[k]||'').toString().trim()) has=true;
+    });
+    if(has){
+      savedHint.textContent='已恢复上次草稿 · 可继续写，不会白写';
+      savedHint.style.color='#0f766e';
+    }
+  }catch(e){}
+})();
+</script>
+</body>
+</html>

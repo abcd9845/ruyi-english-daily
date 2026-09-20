@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>家长答案 · 数学 P1 专项</title>
+<style>
+:root{--bg:#f6f3ee;--ink:#1c1917;--muted:#78716c;--accent:#0f766e;--line:#e7e5e4}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans SC",sans-serif;background:var(--bg);color:var(--ink);line-height:1.6;padding:16px 14px 48px}
+.wrap{max-width:720px;margin:0 auto}header{background:#fff;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 8px 24px rgba(0,0,0,.06)}
+h1{font-size:1.25rem;margin:0 0 6px}h2{font-size:1.05rem;color:var(--accent);margin:18px 0 8px}
+.meta{color:var(--muted);font-size:.9rem}.card{background:#fff;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 8px 24px rgba(0,0,0,.06)}
+.q{margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid var(--line)}.q:last-child{border:0}
+.ans{color:#15803d;font-weight:600}.note{color:var(--muted);font-size:.88rem;margin-top:4px}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div id="gate" style="position:fixed;inset:0;background:#f6f3ee;z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:22px;max-width:360px;width:100%;box-shadow:0 8px 24px rgba(0,0,0,.08)">
+    <h2 style="margin:0 0 8px;font-size:1.15rem">家庭专用</h2>
+    <p style="color:#78716c;font-size:.9rem;margin:0 0 12px">输入家庭码后才能查看练习/错题分析。</p>
+    <input id="gateInput" type="password" placeholder="家庭码" style="width:100%;font-size:16px;padding:11px 12px;border:1.5px solid #e7e5e4;border-radius:12px;box-sizing:border-box"/>
+    <button id="gateBtn" type="button" style="margin-top:12px;width:100%;border:none;border-radius:999px;padding:12px;background:#0f766e;color:#fff;font-weight:600;font-size:.95rem">进入</button>
+    <p id="gateErr" style="color:#b91c1c;font-size:.85rem;min-height:1.2em"></p>
+  </div>
+</div>
+<script>
+(function(){
+  var KEY='ruyi-en-gate-ok';
+  var CODE='ruyi2026';
+  var gate=document.getElementById('gate');
+  if(sessionStorage.getItem(KEY)==='1'){ if(gate) gate.remove(); return; }
+  function ok(){
+    var v=(document.getElementById('gateInput').value||'').trim();
+    if(v!==CODE){ document.getElementById('gateErr').textContent='家庭码不对'; return; }
+    sessionStorage.setItem(KEY,'1');
+    gate.remove();
+  }
+  document.getElementById('gateBtn').onclick=ok;
+  document.getElementById('gateInput').addEventListener('keydown',function(e){ if(e.key==='Enter') ok(); });
+})();
+</script>
+
+<div class="wrap">
+<header>
+  <h1>家长答案 · 数学 P1 专项</h1>
+  <div class="meta">2026-09-20｜绝对值 · 单项式 · 有理数分类｜先让孩子自检，再对照</div>
+  <p class="meta"><a href="./">← 学生练习页</a></p>
+</header>
+
+<section class="card">
+  <h2>一、绝对值与数轴距离</h2>
+  <div class="q"><strong>1.</strong> <span class="ans">9；7</span><div class="note">|−9|=9；|5−12|=|−7|=7</div></div>
+  <div class="q"><strong>2.</strong> <span class="ans">C（±6）</span><div class="note">漏负解常见错：只写 6</div></div>
+  <div class="q"><strong>3.</strong> <span class="ans">7</span><div class="note">|3−(−4)|=7</div></div>
+  <div class="q"><strong>4.</strong> <span class="ans">C（非负数 ≥0）</span><div class="note">含 0；不是「正数」</div></div>
+  <div class="q"><strong>5.</strong> <span class="ans">−3，7</span><div class="note">x−2=±5 → x=7 或 x=−3</div></div>
+  <div class="q"><strong>6.</strong> <span class="ans">1.5，4.5（或 3/2，9/2）</span>
+    <div class="note">P=−5+2t；|P−1|=3 → P=4 或 P=−2 → t=4.5 或 1.5。漏掉一侧即漏解。</div>
+  </div>
+  <div class="q"><strong>7.（过程）</strong> <span class="ans">最大值 5；最小值 0</span>
+    <div class="note">M∈[−3,5]，|OM| 在端点 5 取最大 5；在原点 0 取最小 0。−3 处 |OM|=3，不是最小——因为区间跨过原点。</div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>二、代数式 / 单项式</h2>
+  <div class="q"><strong>8.</strong> <span class="ans">①③⑤</span><div class="note">②方程、④不等式不是代数式；⑤单独一个数也是代数式</div></div>
+  <div class="q"><strong>9.</strong> <span class="ans">B</span><div class="note">A 含加号是多项式；C 分母有字母不是整式/单项式；D 含等号不是代数式</div></div>
+  <div class="q"><strong>10.</strong> <span class="ans">是</span></div>
+  <div class="q"><strong>11.</strong> <span class="ans">否</span><div class="note">分母含字母</div></div>
+  <div class="q"><strong>12.</strong> <span class="ans">系数 −3/4；次数 4；字母 m,n</span><div class="note">次数=1+3=4</div></div>
+  <div class="q"><strong>13.（过程）</strong> <span class="ans">不对</span>
+    <div class="note">2x+1/3：两项，是多项式，不是单项式。(2x)/3 = (2/3)x：是单项式（系数 2/3，次数 1）。</div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>三、有理数分类与集合计数</h2>
+  <div class="q"><strong>14.</strong> <span class="ans">6</span><div class="note">集合 7 个数中仅 −π 无理；√9=3 有理。有理数：−3,−1.5,0,2/5,4,√9</div></div>
+  <div class="q"><strong>15.</strong> <span class="ans">3</span><div class="note">非负整数：0, 4, √9(=3)</div></div>
+  <div class="q"><strong>16.</strong> <span class="ans">4</span><div class="note">全部有理；非正数：−2, −0.5, 0, −7/2（不含 1, 3/4, 6）</div></div>
+  <div class="q"><strong>17.</strong> <span class="ans">C</span><div class="note">整数 = 正整数 ∪ {0} ∪ 负整数；C 漏了 0</div></div>
+  <div class="q"><strong>18.</strong> <span class="ans">正整数、零、负整数</span>（顺序不限）</div>
+</section>
+
+<p class="meta" style="text-align:center">—— 答案页结束 ——</p>
+</div>
+</body>
+</html>

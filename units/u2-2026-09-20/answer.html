@@ -1,0 +1,77 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>参考答案 + 听力原文</title><style>
+@page { size:A4; margin:15mm 16mm 17mm; }
+:root { --ink:#18212b; --muted:#5c6975; --line:#68737d; --soft:#edf2f5; }
+* { box-sizing:border-box; }
+html { background:#e9edf0; }
+body { margin:0 auto; max-width:190mm; background:#fff; color:var(--ink); font-family:"Noto Sans SC","Microsoft YaHei",Arial,sans-serif; font-size:18px; line-height:1.65; padding:14mm 14mm 18mm; }
+header { border-bottom:2px solid var(--ink); padding-bottom:10px; margin-bottom:18px; }
+h1 { font-size:30px; line-height:1.25; margin:0 0 7px; } h2 { font-size:23px; line-height:1.35; margin:24px 0 9px; border-left:5px solid #3b647d; padding-left:10px; page-break-after:avoid; } h3 { font-size:20px; line-height:1.35; margin:16px 0 6px; page-break-after:avoid; }
+p { margin:0 0 9px; } .meta,.subtle { color:var(--muted); } .meta { font-size:17px; margin:4px 0; } .score { font-weight:700; margin-top:3px; }
+.notice { background:var(--soft); border:1px solid #cbd7df; border-radius:5px; padding:9px 12px; margin:13px 0 17px; font-size:16px; }
+.audio-box { background:#f4f8fa; border:1px solid #b9cbd5; border-radius:6px; padding:10px 12px; margin:10px 0 18px; page-break-inside:avoid; } .audio-box strong { display:block; margin-bottom:5px; } audio { width:min(100%,560px); }
+.passage { text-indent:2em; text-align:justify; } .passage + .passage { margin-top:10px; } .question { margin:12px 0 16px; page-break-inside:avoid; } .stem { font-weight:500; } .options { margin:4px 0 0 1.3em; } .options div { margin:1px 0; }
+.answer-line { display:grid; grid-template-columns:auto 1fr; align-items:end; gap:7px; min-height:3.05em; margin:3px 0 6px; } .answer-line.tall { min-height:3.65em; } .line-label { padding-bottom:.03em; white-space:nowrap; } .line-fill { display:block; min-height:1.35em; border-bottom:1.5px solid var(--line); }
+.inline-blank { display:inline-block; width:var(--blank-ch); min-width:4ch; height:1.15em; vertical-align:-.13em; border-bottom:1.5px solid var(--line); }
+.skeleton { display:grid; grid-template-columns:auto minmax(0,1fr) minmax(0,1fr); gap:9px; align-items:end; min-height:3.25em; margin:3px 0 8px; } .skeleton-label { padding-bottom:.05em; white-space:nowrap; } .skeleton-part { min-height:1.45em; border-bottom:1.5px solid var(--line); position:relative; } .skeleton-part span { position:absolute; left:4px; bottom:-.48em; background:#fff; padding:0 3px; color:var(--muted); font-size:.86em; }
+.reference-answer { margin:5px 0 8px; padding:7px 10px; background:#f5f7f8; border-left:3px solid #7d929f; page-break-inside:avoid; } .script { white-space:pre-wrap; background:#fafafa; border:1px solid #d8dfe3; border-radius:5px; padding:12px 14px; font-family:inherit; font-size:17px; line-height:1.7; } .end { text-align:center; color:var(--muted); margin-top:24px; }
+@media print { html { background:#fff; } body { max-width:none; padding:0; font-size:17px; } a { color:inherit; text-decoration:none; } }
+
+/* Phone-friendly layout while preserving generous answer space. */
+@media screen and (max-width: 600px) {
+  html { background:#fff; }
+  body { max-width:none; padding:12px 12px 28px; font-size:17px; line-height:1.6; }
+  h1 { font-size:24px; }
+  h2 { font-size:20px; margin-top:22px; }
+  h3 { font-size:18px; }
+  .notice { font-size:15px; }
+  .audio-box { padding:10px; }
+  audio { width:100%; }
+  .answer-line { min-height:3.05em; }
+  .answer-line.tall { min-height:4.1em; }
+  .skeleton { grid-template-columns:auto minmax(0,1fr) minmax(0,1fr); gap:6px; }
+  .options { margin-left:1.1em; }
+}
+</style></head><body class="answer-key">
+<div id="gate" style="position:fixed;inset:0;background:#f6f3ee;z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:22px;max-width:360px;width:100%;box-shadow:0 8px 24px rgba(0,0,0,.08)">
+    <h2 style="margin:0 0 8px;font-size:1.15rem">家庭专用</h2>
+    <p style="color:#78716c;font-size:.9rem;margin:0 0 12px">输入家庭码后才能查看练习/错题分析。</p>
+    <input id="gateInput" type="password" placeholder="家庭码" style="width:100%;font-size:16px;padding:11px 12px;border:1.5px solid #e7e5e4;border-radius:12px;box-sizing:border-box"/>
+    <button id="gateBtn" type="button" style="margin-top:12px;width:100%;border:none;border-radius:999px;padding:12px;background:#0f766e;color:#fff;font-weight:600;font-size:.95rem">进入</button>
+    <p id="gateErr" style="color:#b91c1c;font-size:.85rem;min-height:1.2em"></p>
+  </div>
+</div>
+<script>
+(function(){
+  var KEY='ruyi-en-gate-ok';
+  var CODE='ruyi2026';
+  var gate=document.getElementById('gate');
+  if(sessionStorage.getItem(KEY)==='1'){ if(gate) gate.remove(); return; }
+  function ok(){
+    var v=(document.getElementById('gateInput').value||'').trim();
+    if(v!==CODE){ document.getElementById('gateErr').textContent='家庭码不对'; return; }
+    sessionStorage.setItem(KEY,'1');
+    gate.remove();
+  }
+  document.getElementById('gateBtn').onclick=ok;
+  document.getElementById('gateInput').addEventListener('keydown',function(e){ if(e.key==='Enter') ok(); });
+})();
+</script><header><h1>参考答案 + 听力原文</h1><div class="meta">2026-09-20｜外研七上U2学完验收卷｜家长朗读 / 音频核对用</div></header><div class="audio-box"><strong>听力音频（点击播放）</strong><audio controls src="listening.mp3">您的浏览器不支持 audio 播放。</audio></div><section><h2>听力原文 Listening Script</h2><div class="script">【听力原文 Listening Script｜家长朗读用｜学生卷无此页】
+
+Part A 短对话（读两遍）
+W: Tom, what do you usually do after school?
+M: I practise the guitar. I want to join a band one day.
+W: Cool! Do you play football too?
+M: No, I don&#x27;t. My brother likes football, but I don&#x27;t.
+
+W: Lucy, which club do you want to join?
+M: The volleyball club. I&#x27;m not very good at volleyball yet, but my best friend is in it.
+   Wait—actually I join it because I want to make new friends. Everybody looks kind there.
+W: Great. Let&#x27;s go and ask the teacher after school.
+
+Part B 短独白（读两遍）
+Hello, I&#x27;m Mia. I play an electric guitar in our school band. Every Friday we practise
+for the music festival. The festival starts at three in the afternoon. When I stand on
+the stage, I feel a little nervous, but my heart is full of joy. Music is more than fun
+for me—it helps me smile when I feel lonely.
+</div></section><section><h2>一、听力答案</h2><div class="question"><div class="stem">1. B</div></div><div class="question"><div class="stem">2. C</div></div><div class="question"><div class="stem">3. B</div></div><div class="question"><div class="stem">4. A</div></div><div class="question"><div class="stem">5. B</div></div></section><section><h2>二、阅读答案</h2><h3>Passage A</h3><article class="question"><div class="stem">6. B</div></article><article class="question"><div class="stem">7. B</div></article><article class="question"><div class="stem">8. B</div></article><article class="question"><div class="stem">9. C</div></article><article class="question"><div class="stem">10. Because it teaches her to care / she helps a weak bird. Evidence: She held the weak bird and asked a classmate for help / took it to a pet shop.</div></article><h3>Passage B</h3><article class="question"><div class="stem">11. B</div></article><article class="question"><div class="stem">12. B</div></article><article class="question"><div class="stem">13. B</div></article><article class="question"><div class="stem">14. B</div></article><article class="question"><div class="stem">15. Because he wants her to understand hobbies can be different but still meaningful. Evidence: She cuts a simple heart and suddenly understands hobbies can hit your heart.</div></article></section><section><h2>三、首字母填空</h2><div class="question"><div class="stem">1. guitar</div></div><div class="question"><div class="stem">2. band</div></div><div class="question"><div class="stem">3. practise/practice</div></div><div class="question"><div class="stem">4. traditional</div></div><div class="question"><div class="stem">5. enjoy</div></div><div class="question"><div class="stem">6. festival</div></div><div class="question"><div class="stem">7. stage</div></div><div class="question"><div class="stem">8. weak</div></div><div class="question"><div class="stem">9. joy</div></div><div class="question"><div class="stem">10. lonely</div></div></section><section><h2>四、词汇语境</h2><div class="question"><div class="stem">26. check</div></div><div class="question"><div class="stem">27. sounds</div></div><div class="question"><div class="stem">28. adventure</div></div><div class="question"><div class="stem">29. nods</div></div><div class="question"><div class="stem">30. shelf; instrument</div></div><div class="question"><div class="stem">31. ending</div></div><div class="question"><div class="stem">32. doesn&#x27;t like; enjoys</div></div></section><section><h2>五、中译英（参考，合理变体可给分）</h2><article class="question"><div class="stem">33. After school, she usually practises playing the guitar. / She usually practises the guitar after school.</div></article><article class="question"><div class="stem">34. He doesn&#x27;t like rock music, but he wants to join the volleyball club.</div></article><article class="question"><div class="stem">35. Is everybody good at this sport? / Does everybody like this sport?（优先：Is everybody good at this sport?）</div></article><article class="question"><div class="stem">36. My hobby is different from yours: I like listening to traditional Chinese music.</div></article><article class="question"><div class="stem">37. At midnight she can almost not stay awake, but her heart is full of joy. / At midnight she almost can&#x27;t stay awake, but she is full of joy.</div></article></section><p class="end">—— 答案页结束 / End of answer key ——</p></body></html>

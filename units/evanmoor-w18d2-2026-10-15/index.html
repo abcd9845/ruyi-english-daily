@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>如意 · Evan-Moor G5 Week 18 Day 2｜1930s Hollywood</title>
+<style>
+:root{--bg:#f6f3ee;--card:#fff;--ink:#1c1917;--muted:#78716c;--accent:#0f766e;--accent-soft:#ccfbf1;--line:#e7e5e4;--warn:#b45309;--ok:#15803d;--bad:#b91c1c;--radius:16px;--shadow:0 8px 24px rgba(28,25,23,.06)}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans SC",sans-serif;background:radial-gradient(1200px 600px at 10% -10%,#d1fae5 0%,transparent 50%),radial-gradient(900px 500px at 100% 0%,#fde68a 0%,transparent 40%),var(--bg);color:var(--ink);line-height:1.55;padding:16px 14px 88px}
+.wrap{max-width:760px;margin:0 auto}
+header,.card{background:var(--card);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);margin-bottom:12px}
+h1{font-size:1.22rem;margin:0 0 6px}h2{font-size:1.02rem;margin:0 0 10px;color:var(--accent)}
+.meta{color:var(--muted);font-size:.9rem}
+.pill{display:inline-block;background:var(--accent-soft);color:var(--accent);font-size:.78rem;font-weight:600;padding:4px 10px;border-radius:999px;margin:10px 6px 0 0}
+.hint{color:var(--muted);font-size:.88rem;margin:0 0 12px}
+.q{margin-bottom:16px}
+.q .stem{display:block;font-size:.95rem;margin-bottom:8px;font-weight:500}
+.sublabel{font-size:.82rem;color:var(--muted);margin:6px 0 4px;display:block}
+input[type=text],textarea{width:100%;border:1.5px solid var(--line);border-radius:12px;padding:11px 12px;font-size:16px;font-family:inherit;background:#fafaf9}
+input:focus,textarea:focus{outline:none;border-color:var(--accent);background:#fff}
+textarea{min-height:88px;resize:vertical}
+button{appearance:none;border:none;border-radius:999px;padding:12px 18px;font-size:.95rem;font-weight:600;cursor:pointer}
+.btn-primary{background:var(--accent);color:#fff}.btn-ghost{background:#f5f5f4;color:var(--ink)}.btn-submit{background:#b45309;color:#fff}
+.sticky{position:sticky;bottom:10px;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:999px;padding:8px;display:flex;gap:8px;justify-content:center;box-shadow:var(--shadow);z-index:5;flex-wrap:wrap}
+.sticky button{flex:1;min-width:100px;max-width:180px}
+.fb{margin-top:6px;font-size:.86rem}.ok{color:var(--ok)}.bad{color:var(--bad)}.soft{color:var(--muted)}
+.bar{height:8px;background:var(--line);border-radius:999px;overflow:hidden;margin-top:12px}.bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#14b8a6,#0f766e);transition:width .2s}
+a{color:var(--accent)}footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
+.warnbox{background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:10px 12px;font-size:.86rem;color:#9a3412;margin:12px 0 0;display:none}
+.warnbox ol{margin:8px 0 0;padding-left:1.2em}
+.prompt{font-size:.92rem;margin:0 0 12px}
+.prompt strong{font-variant:small-caps;letter-spacing:.03em}
+/* open book */
+.book{display:flex;gap:0;justify-content:center;align-items:stretch;margin:4px auto 4px;max-width:680px;transform:rotate(-.8deg)}
+.page{background:#fff;border:1.5px solid #222;width:50%;min-height:280px;padding:12px 12px 14px;position:relative;box-shadow:3px 4px 0 rgba(0,0,0,.1)}
+.page.left{border-right:none;z-index:1}
+.page.right{z-index:2;margin-left:-2px;box-shadow:4px 5px 0 rgba(0,0,0,.12)}
+.page h3{margin:0 0 8px;text-align:center;font-size:15px;font-family:Georgia,"Times New Roman",serif}
+.toc{list-style:none;margin:0;padding:0;font-size:11.5px;line-height:1.5;font-family:Georgia,"Times New Roman",serif}
+.toc li{display:flex;align-items:baseline;gap:3px}
+.toc .title{flex:0 1 auto;white-space:nowrap}
+.toc .dots{flex:1 1 auto;border-bottom:1px dotted #666;margin:0 3px 2px;min-width:8px;height:0}
+.toc .num{flex:0 0 auto;min-width:1.3em;text-align:right}
+.excerpt{font-size:11.8px;line-height:1.42;text-align:justify;font-family:Georgia,"Times New Roman",serif}
+.excerpt p{margin:0 0 8px}
+.excerpt em{font-style:italic}
+.mk{font-style:normal;font-size:.85rem;margin-left:6px}
+.sheet-meta{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px;font-size:.82rem;color:var(--muted)}
+.week-badge{text-align:right;line-height:1.2;color:var(--ink)}
+.week-badge .skill{font-style:italic;font-size:.8rem}
+.week-badge .wd{font-weight:700;font-size:.9rem}
+@media(max-width:560px){
+  .book{flex-direction:column;transform:none;gap:10px}
+  .page{width:100%;border:1.5px solid #222!important;margin-left:0!important}
+}
+</style>
+</head>
+<body>
+
+<div id="gate" style="position:fixed;inset:0;background:#f6f3ee;z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:22px;max-width:360px;width:100%;box-shadow:0 8px 24px rgba(0,0,0,.08)">
+    <h2 style="margin:0 0 8px;font-size:1.15rem">家庭专用</h2>
+    <p style="color:#78716c;font-size:.9rem;margin:0 0 12px">输入家庭码后才能查看练习。</p>
+    <input id="gateInput" type="password" placeholder="家庭码" style="width:100%;font-size:16px;padding:11px 12px;border:1.5px solid #e7e5e4;border-radius:12px;box-sizing:border-box"/>
+    <button id="gateBtn" type="button" style="margin-top:12px;width:100%;border:none;border-radius:999px;padding:12px;background:#0f766e;color:#fff;font-weight:600;font-size:.95rem">进入</button>
+    <p id="gateErr" style="color:#b91c1c;font-size:.85rem;min-height:1.2em"></p>
+  </div>
+</div>
+<script>
+(function(){
+  var KEY='ruyi-en-gate-ok';
+  var CODE='ruyi2026';
+  var gate=document.getElementById('gate');
+  if(sessionStorage.getItem(KEY)==='1'){ if(gate) gate.remove(); return; }
+  function ok(){
+    var v=(document.getElementById('gateInput').value||'').trim();
+    if(v!==CODE){ document.getElementById('gateErr').textContent='家庭码不对'; return; }
+    sessionStorage.setItem(KEY,'1');
+    gate.remove();
+  }
+  document.getElementById('gateBtn').onclick=ok;
+  document.getElementById('gateInput').addEventListener('keydown',function(e){ if(e.key==='Enter') ok(); });
+})();
+</script>
+
+<div class="wrap">
+<header>
+  <h1>如意 · Evan-Moor G5 · Week 18 Day 2</h1>
+  <div class="meta">Nonfiction Text Features · 1930s Hollywood · EMC 3615 p120</div>
+  <span class="pill">约 10–15 分钟</span>
+  <span class="pill">可提交</span>
+  <div class="bar"><i id="bar"></i></div>
+  <div class="meta" id="savedHint" style="margin-top:8px">边写边自动保存草稿（本机）</div>
+</header>
+
+<section class="card">
+  <h2>怎么用</h2>
+  <p class="hint" style="margin:0">先看打开书页（左目录、右短文），再答下面 3 道 Skill + 1 道 Strategy。写完 →「检查」→ 填家庭码 →「提交给爆米花」。提交后才显示参考答案。</p>
+  <p class="hint"><a href="../../">每日一练</a> · <a href="../../days/">往日归档</a></p>
+  <div class="q" style="margin-top:12px;margin-bottom:0">
+    <label class="sublabel" for="familyCode">家庭码（提交用）</label>
+    <input type="text" id="familyCode" placeholder="问家长要" autocomplete="off" />
+  </div>
+</section>
+
+<section class="card">
+  <div class="sheet-meta">
+    <span>READ THE INFORMATION</span>
+    <div class="week-badge">
+      <div class="skill">Nonfiction Text Features</div>
+      <div class="wd">WEEK 18 · DAY 2</div>
+    </div>
+  </div>
+  <p class="prompt"><strong>READ THE INFORMATION</strong> Study the content and organization of this book about movies.</p>
+  <div class="book">
+    <div class="page left">
+      <h3>Contents</h3>
+      <ul class="toc">
+        <li><span class="title">Introduction</span><span class="dots"></span><span class="num">i</span></li>
+        <li><span class="title">Silent Films</span><span class="dots"></span><span class="num">1</span></li>
+        <li><span class="title">The Sounds of Progress</span><span class="dots"></span><span class="num">17</span></li>
+        <li><span class="title">A Colorful World</span><span class="dots"></span><span class="num">33</span></li>
+        <li><span class="title">Hollywood Rises Again</span><span class="dots"></span><span class="num">47</span></li>
+        <li><span class="title">Big-Budget Blockbusters</span><span class="dots"></span><span class="num">55</span></li>
+        <li><span class="title">Low-Budget Thrillers</span><span class="dots"></span><span class="num">67</span></li>
+        <li><span class="title">Special Effects</span><span class="dots"></span><span class="num">71</span></li>
+        <li><span class="title">Filmmaking Today</span><span class="dots"></span><span class="num">81</span></li>
+        <li><span class="title">What Will Tomorrow Bring?</span><span class="dots"></span><span class="num">89</span></li>
+        <li><span class="title">Conclusion</span><span class="dots"></span><span class="num">97</span></li>
+        <li><span class="title">Index</span><span class="dots"></span><span class="num">100</span></li>
+      </ul>
+    </div>
+    <div class="page right">
+      <div class="excerpt">
+        <p>By the 1930s, millions of Americans were flocking to movie theaters. New technology and big budgets brought major changes to filmmaking. It is no wonder that Hollywood and the actors who worked there gained enormous fame.</p>
+        <p>In 1939, <em>The Wizard of Oz</em> turned heads with its huge budget and cast. A young actress named Judy Garland sang the opening notes of “Over the Rainbow” and launched herself into the spotlight.</p>
+        <p>At a time when movies were still filmed mainly in black and white, Hollywood stars had to shine brightly enough to keep audiences interested. <em>Casablanca</em> opened in 1942 and featured a charming Humphrey Bogart and a beautiful Ingrid Bergman. These Hollywood stars proved that they didn’t need elaborate makeup or flashy special effects to entertain a nation. They needed only the spotlight and an audience to love them.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>SKILL PRACTICE</h2>
+  <p class="hint">Read the item. Write your response.</p>
+  <div class="q">
+    <label class="stem" for="a1"><b>1.</b> In which chapter would the excerpt on the right appear? Use text evidence to tell how you know. <i class="mk" id="m1"></i></label>
+    <textarea id="a1" autocomplete="off" spellcheck="true" aria-label="Question 1"></textarea>
+  </div>
+  <div class="q">
+    <label class="stem" for="a2"><b>2.</b> To which page would you turn to start reading about the future of filmmaking? How can you tell? <i class="mk" id="m2"></i></label>
+    <textarea id="a2" autocomplete="off" spellcheck="true" aria-label="Question 2"></textarea>
+  </div>
+  <div class="q">
+    <label class="stem" for="a3"><b>3.</b> What did Judy Garland and Ingrid Bergman have in common? <i class="mk" id="m3"></i></label>
+    <textarea id="a3" autocomplete="off" spellcheck="true" aria-label="Question 3"></textarea>
+  </div>
+  <h2 style="margin-top:8px">STRATEGY PRACTICE</h2>
+  <div class="q" style="margin-bottom:0">
+    <label class="stem" for="a4">What clues in the chapter titles and the excerpt suggest that this book is organized in chronological order? <i class="mk" id="m4"></i></label>
+    <textarea id="a4" autocomplete="off" spellcheck="true" aria-label="Strategy practice"></textarea>
+  </div>
+  <div id="submitStatus" class="fb" style="margin-top:10px"></div>
+  <div id="reveal" class="warnbox"></div>
+</section>
+
+<div class="sticky">
+  <button type="button" class="btn-ghost" id="btnClear">清空</button>
+  <button type="button" class="btn-primary" id="btnCheck">检查</button>
+  <button type="button" class="btn-submit" id="btnSubmit">提交给爆米花</button>
+</div>
+<footer>如意 · 英语每日一练 · Evan-Moor DRC G5</footer>
+</div>
+
+<script>
+const NTFY = 'https://ntfy.sh/ruyi-en-9323f3e3bc60f5a61480b5e2f0065ed7';
+const FAMILY_OK = 'ruyi2026';
+const DAY_KEY = 'ruyi-evanmoor-w18d2-2026-10-15';
+const SET = {source:'evanmoor.drc.g5', set:'week18', code:'w18d2', page:'p120'};
+const N = 4;
+const QREFS = [
+  'evanmoor.drc.g5:english:w18d2-q1',
+  'evanmoor.drc.g5:english:w18d2-q2',
+  'evanmoor.drc.g5:english:w18d2-q3',
+  'evanmoor.drc.g5:english:w18d2-strategy'
+];
+const HINTS = [
+  ['hollywood rises again','hollywood rises'],
+  ['89','tomorrow bring'],
+  ['star','actress','bergman','garland','makeup','special effect','famous'],
+  ['silent','future','chronolog','time order','timeline','begin','progress']
+];
+const K = '==QXi4yZul2ah1WbslmZgY2bgUmc1RXdmBSZoRHIvRnbpByav9GbgEGIoRXa3Byck5WZgQmbhByclJXd0NWawBCduVGbpNHI0V3biFGIyVGdwFGajBSYggGdpdHIz5WanVmYgs2bvJGIlhGViACLi4yc0NWZmZWZgwWYpNWZwNHIy9GIwVXZrFWbgk3YuFmZgUmdhhGI0lJgi7GZpRGI5VGa0BCd1JGIzJXY0NHIllmdv1GIzV3btFmZgUmcldHI5VGaUJCIsISnAK+Pn5WayJEI39mcy9WbvRFIsxWaXBCdhh2VcCo4gQWZsRXa05WZgIXZ0BXYoNGIlhGdgY2bgQnchR3cgUGa0BycZCo40FGa0BSZzVXYjVmYgkDOgU2ZhBHIvRHIuJXd0BCZsV3b3BSSiACLi0Jgi7yZul2ah1WbslmZg8GdgMXZn5WYoNGIy9mah1GI0h2Z19mciByc0V2ZkVnYgcWaiBCZuFGI5d2bs9mboNWZ0Bydl5EnAKOI6QHcyV2Y4VGIlhGdg4WagUmbpxGIzlGa0BiZvBSZzVXYjVmYgc3butGIJBSnAKuLulWYnFEIzV2cpJFIk92b3lHbs9GScCo4gQWZsRXa05WZgIXZ0BXYoNGIlhGdg4WagIXYlBHchBCZsV3b3BCdJJyW';
+function keyList(){ return JSON.parse(atob(K.split('').reverse().join(''))); }
+const familyCode=document.getElementById('familyCode');
+const bar=document.getElementById('bar');
+const savedHint=document.getElementById('savedHint');
+const submitStatus=document.getElementById('submitStatus');
+const btnSubmit=document.getElementById('btnSubmit');
+let checkCount=0, submitted=false;
+function el(i){ return document.getElementById('a'+i); }
+function norm(s){ return (s||'').trim().replace(/\s+/g,' ').toLowerCase().replace(/[’‘`]/g,"'"); }
+function softOk(i, text){
+  const t=norm(text); if(!t) return false;
+  return HINTS[i-1].some(k => t.includes(k));
+}
+function grade(){
+  const r=[];
+  for(let i=1;i<=N;i++){
+    const raw=el(i).value; const filled=!!norm(raw);
+    r.push({n:i, raw:raw, filled:filled, good:filled && softOk(i, raw)});
+  }
+  return r;
+}
+function save(){
+  try{
+    const d={familyCode:familyCode.value};
+    for(let i=1;i<=N;i++) d['a'+i]=el(i).value;
+    localStorage.setItem(DAY_KEY, JSON.stringify(d));
+    savedHint.textContent='已自动保存 · '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+  }catch(e){}
+  let f=0; for(let i=1;i<=N;i++) if(norm(el(i).value)) f++;
+  bar.style.width=Math.round(f/N*100)+'%';
+}
+function load(){
+  try{
+    const d=JSON.parse(localStorage.getItem(DAY_KEY)||'{}');
+    if(d.familyCode) familyCode.value=d.familyCode;
+    for(let i=1;i<=N;i++) if(d['a'+i]!=null) el(i).value=d['a'+i];
+  }catch(e){}
+  save();
+}
+function check(){
+  checkCount++;
+  let ok=0, filled=0;
+  grade().forEach(r=>{
+    const m=document.getElementById('m'+r.n);
+    if(!r.filled){ m.textContent='?'; m.className='mk'; return; }
+    filled++;
+    if(r.good) ok++;
+    m.textContent=r.good?'✓':'△';
+    m.className='mk '+(r.good?'ok':'soft');
+  });
+  alert('要点命中 '+ok+' / '+N+'（开放题，△ 表示写了但要点不全；提交后才显示参考答案）');
+  save();
+}
+function payload(){
+  const g=grade();
+  return {
+    type:'ruyi-en-evanmoor-submit',
+    learner:'如意',
+    day_key:DAY_KEY,
+    submitted_at:new Date().toISOString(),
+    set:SET,
+    check_count:checkCount,
+    answers:g.map(r=>({n:r.n, qref:QREFS[r.n-1], typed:r.raw, correct:r.filled?r.good:null})),
+    score:g.filter(r=>r.good).length+'/'+N,
+    wrong_ids:g.filter(r=>!r.good).map(r=>r.n),
+    meta:{focus:'Evan-Moor G5 W18D2 Hollywood', site:location.href}
+  };
+}
+function reveal(){
+  const k=keyList();
+  const box=document.getElementById('reveal');
+  const labels=['1','2','3','Strategy'];
+  box.innerHTML='<strong>参考答案</strong><ol>'+k.map((w,i)=>'<li><b>'+labels[i]+'.</b> '+w+'</li>').join('')+'</ol>';
+  box.style.display='block';
+}
+async function submit(){
+  if((familyCode.value||'').trim()!==FAMILY_OK){
+    submitStatus.textContent='家庭码不对，问家长要。';
+    submitStatus.className='fb bad';
+    return;
+  }
+  const p=payload();
+  submitStatus.textContent='提交中…';
+  submitStatus.className='fb soft';
+  btnSubmit.disabled=true;
+  try{
+    const body=JSON.stringify(p);
+    const res=await fetch(NTFY,{
+      method:'POST',
+      headers:{'Title':'Ruyi Evan-Moor W18D2 Submit','Tags':'mailbox_with_mail,student','Content-Type':'text/plain; charset=utf-8'},
+      body
+    });
+    if(!res.ok) throw new Error('http '+res.status);
+    localStorage.setItem(DAY_KEY+'-last-submit', body);
+    submitted=true;
+    submitStatus.textContent='已提交！要点命中 '+p.score+'。爆米花会收到。';
+    submitStatus.className='fb ok';
+    reveal();
+  }catch(e){
+    submitStatus.textContent='提交失败，请把答案复制发到聊天：'+(e.message||e);
+    submitStatus.className='fb bad';
+    try{ await navigator.clipboard.writeText(JSON.stringify(p,null,2)); submitStatus.textContent+='（已复制到剪贴板）'; }catch(_){}
+  }finally{ btnSubmit.disabled=false; save(); }
+}
+document.querySelectorAll('textarea,input').forEach(x=>{ x.addEventListener('input',save); });
+document.getElementById('btnCheck').onclick=check;
+btnSubmit.onclick=submit;
+document.getElementById('btnClear').onclick=()=>{ if(confirm('清空本页填写？')){ localStorage.removeItem(DAY_KEY); location.reload(); } };
+load();
+window.addEventListener('pagehide',save);
+</script>
+</body>
+</html>

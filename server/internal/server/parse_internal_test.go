@@ -56,3 +56,42 @@ func TestParseAnswerShapes(t *testing.T) {
 		}
 	}
 }
+
+// The second guard before the brain: answers of more than brain.MaxAnswerLen
+// characters (code points, not bytes) are not sent; exactly that many are.
+func TestAnswerFitsBrainBoundary(t *testing.T) {
+	if brain.MaxAnswerLen != 2000 {
+		t.Fatalf("MaxAnswerLen = %d, the brain's limit is 2000", brain.MaxAnswerLen)
+	}
+	if maxFreeLen != brain.MaxAnswerLen {
+		t.Fatalf("free-text cap %d must be the brain's cap %d", maxFreeLen, brain.MaxAnswerLen)
+	}
+	han := func(n int) string { return strings.Repeat("字", n) } // 3 bytes each
+	for name, c := range map[string]struct {
+		ans  any
+		want bool
+	}{
+		"2000 chars":           {han(2000), true},
+		"2001 chars":           {han(2001), false},
+		"2000 ascii":           {strings.Repeat("a", 2000), true},
+		"2001 ascii":           {strings.Repeat("a", 2001), false},
+		"2000 emoji (4 bytes)": {strings.Repeat("😀", 2000), true},
+		"2001 emoji":           {strings.Repeat("😀", 2001), false},
+		"blanks all 2000":      {[]string{han(2000), han(2000)}, true},
+		"one blank 2001":       {[]string{"x", han(2001)}, false},
+		"short choice":         {"B", true},
+		"multi choice":         {[]string{"A", "C"}, true},
+	} {
+		if got := answerFitsBrain(c.ans); got != c.want {
+			t.Errorf("%s: answerFitsBrain = %v, want %v", name, got, c.want)
+		}
+	}
+	// free text goes through the same boundary on the way in
+	free := shapeOf(brain.Question{QType: "calc", Stem: "no blanks"})
+	for n, want := range map[int]bool{2000: true, 2001: false} {
+		raw, _ := json.Marshal(han(n))
+		if _, _, ok := parseAnswer(free, raw); ok != want {
+			t.Errorf("free text of %d characters: ok=%v, want %v", n, ok, want)
+		}
+	}
+}

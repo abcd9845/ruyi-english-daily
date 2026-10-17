@@ -750,11 +750,24 @@ expect "S4d brain: attempt_kind / session_ref / payload do not take part in the 
 expect "S5 grade: unknown body field -> 400 invalid_json (mock mirrors the brain)" "$(gdirect '{"brain":"ruyi","client_attempt_id":"x1","items":[{"qref":"example.set:math:2","answer":"B"}],"extra":1}') $(jq -r .code "$WORK/resp/gd.b")" "400 invalid_json"
 expect "S5b grade: any query other than ?brain= -> 400; upper-case qref -> 400; answered_at out of range -> 400" "$(gdirect "$(gb x2 "")" '?foo=1') $(gdirect '{"brain":"ruyi","client_attempt_id":"x3","items":[{"qref":"Example.Set:Math:2","answer":"B"}]}') $(gdirect "$(gb x4 ',"answered_at":"2020-01-01T00:00:00Z"')")" "400 400 400"
 B400=$(mstat grade_400 "$SM")
-gpost s11 "$SB" free-1 "$(sbody "$(scid 31)" "[{\"qref\":\"example.set:math:4\",\"answer\":\"$(printf 'x%.0s' $(seq 1 600))\"}]")" -b "$WORK/jarS"
-expect "S5c an answer of 600 characters (> 500) is never sent: archived, 200, brain not called with it" "$CODE_HTTP $(jq -c '[.mode,.recorded_count,.brain_note,.archived]' "$WORK/resp/s11.b") $(( $(mstat grade_400 "$SM") - B400 ))" '200 ["archive_only",0,"not_sent",true] 0'
+# answer length: the brain takes up to 2000 characters (code points, not bytes) per answer/blank (brain PR #47)
+A2000=$(printf 'x%.0s' $(seq 1 2000)); A2001=$(printf 'x%.0s' $(seq 1 2001)); H2000=$(python3 -c 'print("字"*2000,end="")'); H2001=$(python3 -c 'print("字"*2001,end="")')
+G0=$(mstat grade "$SM")
+gpost s11 "$SB" free-1 "$(sbody "$(scid 31)" "[{\"qref\":\"example.set:math:4\",\"answer\":\"$A2000\"}]")" -b "$WORK/jarS"
+expect "S5c an answer of exactly 2000 characters is SENT to the brain (mode graded, not archive_only/not_sent; this free-text qref is 'unsupported' at the mock, so recorded:false) and the brain accepts it (no 400)" "$CODE_HTTP $(jq -c '[.mode,.results[0].status]' "$WORK/resp/s11.b") $(( $(mstat grade "$SM") - G0 )) $(( $(mstat grade_400 "$SM") - B400 ))" '200 ["graded","unsupported"] 1 0'
+gpost s11b "$SB" free-1 "$(sbody "$(scid 34)" "[{\"qref\":\"example.set:math:4\",\"answer\":\"$H2000\"}]")" -b "$WORK/jarS"
+expect "S5c2 2000 Chinese characters (6000 bytes) count as 2000 characters: sent, accepted by the brain" "$CODE_HTTP $(jq -c '[.mode,.results[0].status]' "$WORK/resp/s11b.b") $(( $(mstat grade "$SM") - G0 )) $(( $(mstat grade_400 "$SM") - B400 ))" '200 ["graded","unsupported"] 2 0'
+G1=$(mstat grade "$SM")
+gpost s11c "$SB" free-1 "$(sbody "$(scid 35)" "[{\"qref\":\"example.set:math:4\",\"answer\":\"$A2001\"}]")" -b "$WORK/jarS"; C1=$CODE_HTTP
+gpost s11d "$SB" free-1 "$(sbody "$(scid 36)" "[{\"qref\":\"example.set:math:4\",\"answer\":\"$H2001\"}]")" -b "$WORK/jarS"
+expect "S5c3 2001 characters (ASCII or Chinese): the site refuses with 400 itself (free-text cap = the brain's cap); the brain is never called, nothing truncated" "$C1 $CODE_HTTP $(( $(mstat grade "$SM") - G1 )) $(( $(mstat grade_400 "$SM") - B400 ))" '400 400 0 0'
+# the brain mock itself (mirrors the brain): 2000 per answer / per blank accepted, 2001 -> 400; array of 10 stays the cap
+BLK=$(python3 -c 'import json;print(json.dumps(["字"*2000]*10,ensure_ascii=False))'); BLK1=$(python3 -c 'import json;print(json.dumps(["x"]*9+["字"*2001],ensure_ascii=False))')
+expect "S5c4 brain mock: 10 blanks x 2000 characters -> 201" "$(gdirect "{\"brain\":\"ruyi\",\"client_attempt_id\":\"len-a\",\"items\":[{\"qref\":\"example.set:math:1\",\"answer\":$BLK}]}")" 201
+expect "S5c5 brain mock: one blank of 2001 characters -> 400 validation_failed" "$(gdirect "{\"brain\":\"ruyi\",\"client_attempt_id\":\"len-b\",\"items\":[{\"qref\":\"example.set:math:1\",\"answer\":$BLK1}]}") $(jq -r .code "$WORK/resp/gd.b")" "400 validation_failed"
 nextday "$SM"
 gpost s12 "$SB" one-s "$(sbody "$(scid 32)" '[{"qref":"example.set:math:2","answer":"B","rev":0}]')" -b "$WORK/jarS"
-expect "S5d a rev below 1 never reaches the brain: the site answers 400 bad_rev itself" "$CODE_HTTP $(jq -r .error "$WORK/resp/s12.b") $(mstat grade_400 "$SM")" "400 bad_rev 4"
+expect "S5d a rev below 1 never reaches the brain: the site answers 400 bad_rev itself" "$CODE_HTTP $(jq -r .error "$WORK/resp/s12.b") $(mstat grade_400 "$SM")" "400 bad_rev 5"
 # --- 5. rev_mismatch: details qref/rev/current_rev, the item is located by qref, never by index
 curl -s -X POST "$SMB/_mock/bump-rev?qref=example.set:math:2" >/dev/null
 gpost s13 "$SB" one-s "$(sbody "$(scid 33)" '[{"qref":"example.set:math:2","answer":"B","rev":1}]')" -b "$WORK/jarS"
@@ -784,7 +797,7 @@ start_site S2 18263 "http://127.0.0.1:18262" "${SENV[@]}" RUYI_ATTEMPTS_DIR="$WO
 grep -q 'not deployed yet' "$WORK/S2.log" && ok "S9 probe against a brain without lookup: a warning, startup continues" || bad "S9 probe warning missing"
 expect "S9b ... and the site is healthy" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18263/healthz)" 200
 # --- the whole run: nothing the brain would reject as 400 was ever sent by the site
-expect "S10 the site never produced a 400-class request to the brain in this section (grade_400 only from the 4 direct mock probes S5/S5b)" "$(mstat grade_400 "$SM") $(mstat pick_400 "$SM") $(mstat lookup_400 "$SM")" "4 0 0"
+expect "S10 the site never produced a 400-class request to the brain in this section (grade_400 only from the 5 direct mock probes S5/S5b x3/S5c5)" "$(mstat grade_400 "$SM") $(mstat pick_400 "$SM") $(mstat lookup_400 "$SM")" "5 0 0"
 expect "S10b the R section never produced one either" "$(mstat grade_400 "$RM") $(mstat pick_400 "$RM") $(mstat lookup_400 "$RM")" "0 0 0"
 cat "$WORK/S.log" "$WORK/S2.log" > "$WORK/slogs"
 for pair in "bearer token:$TOKEN" "grade token:$GTOKEN" "family code:$CODE"; do

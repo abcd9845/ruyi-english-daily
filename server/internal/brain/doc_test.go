@@ -149,12 +149,12 @@ func TestGradeBodyIsStrictAndLowerCase(t *testing.T) {
 }
 
 func TestValidateAgainstTheDocumentLimits(t *testing.T) {
-	long := strings.Repeat("字", 501)
-	ok500 := strings.Repeat("字", 500)
+	long := strings.Repeat("字", 2001)
+	ok2000 := strings.Repeat("字", 2000)
 	base := func(items ...GradeItem) GradeRequest { return GradeRequest{ClientAttemptID: "cid-1", Items: items} }
 	for name, r := range map[string]GradeRequest{
-		"answer 501 chars":          base(GradeItem{QRef: "a", Answer: long}),
-		"blank 501 chars":           base(GradeItem{QRef: "a", Answer: []string{"x", long}}),
+		"answer 2001 chars":         base(GradeItem{QRef: "a", Answer: long}),
+		"blank 2001 chars":          base(GradeItem{QRef: "a", Answer: []string{"x", long}}),
 		"11 blanks":                 base(GradeItem{QRef: "a", Answer: make([]string, 11)}),
 		"qrefs equal once lowered":  base(GradeItem{QRef: "Math:1", Answer: "x"}, GradeItem{QRef: "math:1", Answer: "y"}),
 		"key over 198 chars":        {ClientAttemptID: strings.Repeat("c", 160), Items: []GradeItem{{QRef: strings.Repeat("q", 36), Answer: "x"}}},
@@ -174,7 +174,8 @@ func TestValidateAgainstTheDocumentLimits(t *testing.T) {
 		}
 	}
 	good := []GradeRequest{
-		base(GradeItem{QRef: "a", Answer: ok500}),
+		base(GradeItem{QRef: "a", Answer: ok2000}),
+		base(GradeItem{QRef: "a", Answer: []string{ok2000, ok2000, ok2000, ok2000, ok2000, ok2000, ok2000, ok2000, ok2000, ok2000}}), // 10 blanks x 2000 characters
 		base(GradeItem{QRef: "a", Answer: make([]string, 10)}),
 		{ClientAttemptID: strings.Repeat("c", 160), Items: []GradeItem{{QRef: strings.Repeat("q", 34), Answer: "x"}}}, // 3+160+1+34 = 198
 		base(GradeItem{QRef: "a", Answer: "x", AttemptKind: "correction", Rev: 1}),

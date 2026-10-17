@@ -495,7 +495,7 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, x := range a {
 				xs, ok := x.(string)
-				if !ok || len([]rune(xs)) > 500 {
+				if !ok || len([]rune(xs)) > 2000 {
 					jerrf(w, 400, "validation_failed")
 					return
 				}
@@ -504,7 +504,7 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 			jerrf(w, 400, "validation_failed")
 			return
 		}
-		bad := it.QRef == "" || it.QRef != strings.ToLower(it.QRef) || seenQ[fakeCanon(it.QRef)] || n > 500 ||
+		bad := it.QRef == "" || it.QRef != strings.ToLower(it.QRef) || seenQ[fakeCanon(it.QRef)] || n > 2000 ||
 			(it.Rev != nil && *it.Rev < 1) || (it.AttemptKind != "" && it.AttemptKind != "correction" && it.AttemptKind != "variant") ||
 			(it.SessionRef != "" && len([]rune(it.SessionRef)) > 200) || len(it.Payload) > 4096 ||
 			3+len(req.CID)+1+len(it.QRef) > 198

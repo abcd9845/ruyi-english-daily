@@ -63,8 +63,11 @@ type gradeOut struct {
 	Results       []gradeResult    `json:"results"`
 	Summary       attempts.Summary `json:"summary"`
 	Archived      bool             `json:"archived"`
-	Notify        string           `json:"notify,omitempty"` // sent | retrying | off | unknown
-	Replayed      bool             `json:"replayed,omitempty"`
+	// Queue (S1, additive): what became of the answers the brain could not judge.
+	// Absent with the queue off or when nothing was eligible.
+	Queue    *queueOut `json:"queue,omitempty"`
+	Notify   string    `json:"notify,omitempty"` // sent | retrying | off | unknown
+	Replayed bool      `json:"replayed,omitempty"`
 	// Test is set for a local test set: archive_only, judged on the server,
 	// never recorded in the brain. Absent for real sets.
 	Test bool `json:"test,omitempty"`
@@ -118,6 +121,22 @@ func (d *idemStore) begin(id string) (*idemEntry, bool) {
 		}
 	}
 	return e, true
+}
+
+// record returns the finished record of id (nil if unknown or still running).
+func (d *idemStore) record(id string) *attempts.Record {
+	d.mu.Lock()
+	e := d.m[id]
+	d.mu.Unlock()
+	if e == nil {
+		return nil
+	}
+	select {
+	case <-e.done:
+		return e.rec
+	default:
+		return nil
+	}
 }
 
 func (d *idemStore) finish(e *idemEntry, rec *attempts.Record) {
@@ -505,6 +524,9 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		out := outFromRecord(e.rec)
 		out.Replayed = true
+		if s.queueOn() {
+			out.Queue = queueOutOf(s.q.links.get(cid))
+		}
 		status := http.StatusOK
 		if out.Error != "" { // a daily_cap outcome replays as it was answered (429, archived)
 			status = http.StatusTooManyRequests
@@ -542,12 +564,13 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 	var items []brain.GradeItem
 	for _, q := range set.QRefs {
 		if g, ok := answered[q]; ok && g.ans != nil && !g.skip {
-			items = append(items, brain.GradeItem{QRef: q, Answer: g.ans, Rev: g.rev, AttemptKind: g.kind, AnsweredAt: answeredAt, SessionRef: set.ID})
+			items = append(items, brain.GradeItem{QRef: q, Answer: g.ans, Rev: g.rev, AttemptKind: g.kind, AnsweredAt: answeredAt, SessionRef: cid})
 		}
 	}
 	mode := modeArchive
 	note := "not_configured"
 	verdict := map[string]gradeResult{}
+	hints := map[string]gradeHint{} // the brain's additive queueable hint per qref (S1)
 	var gresp *brain.GradeResponse
 	var gerr error
 	capped := map[string]bool{} // questions named in a 429 daily_cap refusal
@@ -568,6 +591,7 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		mode, note = modeGraded, ""
 		for _, g := range gresp.Results {
 			verdict[g.QRef] = gradeResult{QRef: g.QRef, Status: g.Status, Correct: g.Correct, Recorded: g.Recorded, AttemptID: g.AttemptID, Duplicate: g.Duplicate}
+			hints[g.QRef] = gradeHint{known: g.Queueable != nil, queueable: g.Queueable != nil && *g.Queueable, reason: g.QueueableReason}
 		}
 	case errors.Is(gerr, brain.ErrGradeDisabled):
 		// configured off: nothing to log per request
@@ -678,13 +702,25 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 			out.Summary.Recorded++
 		}
 	}
+	// S1: answers the brain could not judge go into its pending-answer queue (only
+	// when the queue is on, the brain answered grade, and the question is a real one).
+	var anchors map[string]int
+	if s.queueOn() && mode == modeGraded && note == "" && !set.Local {
+		out.Queue, anchors = s.queueAfterGrade(r.Context(), cid, set.ID, set.Title, rec, out, items, hints, answeredAt)
+		if out.Queue != nil {
+			rec.V = 3
+		}
+	}
 	out.RecordedCount = out.Summary.Recorded
 	out.BrainRecorded = out.RecordedCount > 0
 	rec.Summary = out.Summary
 
 	rec.Archived = s.Attempts != nil && s.Attempts.Append(rec) == nil
 	out.Archived = rec.Archived
-	s.quotaT.add(rec) // the "N left today" estimate counts what the brain confirmed
+	s.quotaT.add(rec)                // the "N left today" estimate counts what the brain confirmed
+	for qref, rem := range anchors { // ... and the brain's own daily_remaining, when it said
+		s.quotaT.anchor(shanghaiDay(rec.SubmittedAt), qref, rem)
+	}
 
 	// The parent notification is sent in the background (notify.go). It is
 	// started before the attempt is published to the idempotency store, which

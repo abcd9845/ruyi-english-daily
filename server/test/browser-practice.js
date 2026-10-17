@@ -9,6 +9,8 @@
 // BROWSER_FLOW=smoke: the local test set ?set=smoke-test (needs a sets file with it): answer, 检查, submit; archive-only wording, never 已提交到大脑.
 // BROWSER_FLOW=dailylimit (needs the mock brain with the real daily cap + a site with grading): 「今天约还剩N次」, the confirm
 // dialog, 3 successes then a 429 daily_cap (archived, not recorded), rate_limited wording, 「不入大脑」 badges.
+// BROWSER_FLOW=queue (needs MOCK_URL = a mock brain started with MOCK_QUEUE=1, and a site with RUYI_QUEUE_ENABLED=1): the AI first-pass
+// status under each queued answer: 待解答 → AI 判卷中 → AI初评·待家长核 (full text, escaped), timeout copy, purged, polling schedule, reload.
 // Against the mock brain's synthetic questions. Logs in through the real form, fills
 // answers, reloads, clears; writes mobile-viewport screenshots to <out-dir>.
 const { spawn } = require('child_process');
@@ -215,6 +217,84 @@ const loginAndLoad = async (url, n) => {
   if (await waitFor(`getComputedStyle(document.getElementById('gate')).display==='flex'`, 3000)) await gateLogin();
   return waitFor(`document.querySelectorAll('#qs section.card').length===${n}`);
 };
+
+
+// S1: the AI first-pass status of queued answers (mock brain with MOCK_QUEUE=1; site with the queue on).
+const mockQ = (op, params) => new Promise((res, rej) => {
+  const u = new URL(process.env.MOCK_URL + '/_mock/queue/' + op + '?' + new URLSearchParams(params));
+  const rq = require('http').request(u, { method: 'POST' }, r => { r.resume(); r.on('end', res); });
+  rq.on('error', rej); rq.end();
+});
+async function queueFlow(base) {
+  const resultShown = `getComputedStyle(document.getElementById('resultCard')).display==='block'`;
+  const cards = n => `document.querySelectorAll('#qs section.card').length===${n}`;
+  const Q3 = 'example.set:math:3';
+  const st3 = () => ev(`(() => { const c = document.querySelector('#qs section[data-qref="${Q3}"] .qst'); return c ? c.getAttribute('data-ui') : null; })()`);
+  const waitUI = (ui, ms) => waitFor(`(() => { const c = document.querySelector('#qs section[data-qref="${Q3}"] .qst'); return !!c && c.getAttribute('data-ui') === ${JSON.stringify(ui)}; })()`, ms || 15000);
+  // the real schedule is 15 s / 60 s: scale every long timer down so the run is quick (the real numbers are asserted below)
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const st = window.setTimeout; window.setTimeout = (f, d, ...a) => st(f, d >= 15000 ? d / 50 : d, ...a); })();` }, sid);
+  check('[queue] demo set loads', await loginAndLoad(base + '/m/practice/?set=demo-1', 3));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid); await waitFor(cards(3));
+  check('[queue] polling schedule: 15 s for the first 5 minutes, then 60 s', await ev(`(() => { const d = window.__ruyiQ.delay; return d(0) === 15000 && d(299999) === 15000 && d(300000) === 60000 && d(3600000) === 60000; })()`));
+
+  const submitOnce = async () => {
+    await fillDemo(); await sleep(400);
+    await ev(`window.confirm = () => true; 1`);
+    await ev(`document.getElementById('btnSubmit').click(); 1`);
+    return waitFor(resultShown);
+  };
+  // --- 1. submit: the unkeyed answer (q3, pending_key) is queued; graded ones are not
+  check('[queue] submit: result card appears', await submitOnce());
+  check('[queue] the queued answer (q3) shows a status box right away (待解答 / 排队 / AI 判卷中)', await waitFor(`!!document.querySelector('#qs section[data-qref="${Q3}"] .qst')`));
+  check('[queue] graded answers (q1, q2) get NO status box', await ev(`document.querySelectorAll('#qs .qst').length === 1`));
+  check('[queue] first status is waiting: 待解答（排队中），预计 24 小时内出结果', await waitUI('waiting') && (await ev(`document.querySelector('#qs .qst .qst-l').textContent`)).includes('预计 24 小时内出结果'), String(await st3()));
+  check('[queue] banner under the heading explains the wait', await waitFor(`!!document.getElementById('qBanner') && document.getElementById('qBanner').textContent.includes('还在等 1 题')`));
+  check('[queue] no upload control and no reanalyze/re-run button anywhere (S2/S3 are not part of S1)',
+    await ev(`document.querySelectorAll('input[type=file]').length === 0 && ![...document.querySelectorAll('button')].some(b => /重新分析|重判|重新判|reanaly/i.test(b.textContent))`));
+  check('[queue] the badge of a queued answer does not say 不入大脑', await ev(`!document.querySelector('#qs section[data-qref="${Q3}"] .vd').textContent.includes('不入大脑')`));
+  await shotEl('queue-waiting.png', '#q3');
+  // --- 2. brain claims it -> AI 判卷中 (the page polls on its own)
+  await mockQ('advance', { qref: Q3, to: 'claimed' });
+  check('[queue] claimed -> AI 判卷中 (picked up by the poll, no reload)', await waitUI('ai_working'));
+  // --- 3. first pass with full text; hostile text is shown as text
+  const evil = '12 <img src=x onerror="window.__xss=1"> $x^2$';
+  await mockQ('advance', { qref: Q3, to: 'compared', answer: evil, rationale: '第一步 <b>粗体</b>\n第二步 $\\dfrac{1}{2}$', compare: 'mismatch' });
+  check('[queue] compared -> AI初评·待家长核', await waitUI('ai_first_pass'));
+  const fp = await ev(`(() => { const q = document.querySelector('#qs section[data-qref="${Q3}"] .qst'); return {label: q.querySelector('.qst-l').textContent, box: (q.querySelector('.aibox')||{}).innerText || '', imgs: q.querySelectorAll('img').length, bold: q.querySelectorAll('b').length, xss: window.__xss === 1, banner: document.getElementById('qBanner').textContent, cmp: (q.querySelector('.qst-c')||{}).textContent}; })()`);
+  check('[queue] first-pass label and the FULL AI text (answer + rationale) are shown, labelled AI初评·待家长核', fp.label === 'AI 初评 · 待家长核' && fp.box.includes('AI初评·待家长核') && fp.box.includes('AI 的答案') && fp.box.includes('12') && fp.box.includes('第一步') && fp.box.includes('第二步'), JSON.stringify(fp));
+  check('[queue] AI text is escaped: no injected <img>, <b>, no script ran', fp.imgs === 0 && fp.bold === 0 && !fp.xss, JSON.stringify([fp.imgs, fp.bold, fp.xss]));
+  check('[queue] math in the AI text is typeset (KaTeX)', await waitFor(`document.querySelectorAll('#qs .aibox .katex').length >= 1`));
+  check('[queue] the mismatch note and the banner (AI 初评已出 1 题（待家长核）)', (fp.cmp || '').includes('不一致') && fp.banner.includes('AI 初评已出 1 题（待家长核）'), fp.banner);
+  await shotEl('queue-firstpass.png', '#q3');
+  // --- 4. everything processed: polling stops (no more GET .../queue)
+  await sleep(1500);
+  await ev(`(() => { window.__qreq = 0; const of = window.fetch; window.fetch = (u, o) => { if (String(u).includes('/queue')) window.__qreq++; return of(u, o); }; return 1; })()`);
+  await sleep(2500);
+  check('[queue] all processed -> the page stops polling (0 requests in 2.5 s even at the scaled speed)', (await ev(`window.__qreq`)) === 0 && (await ev(`window.__ruyiQ.state().active`)) === false);
+  // --- 5. reload keeps everything (state comes from the site, not from the draft)
+  await send('Page.reload', {}, sid); await waitFor(cards(3));
+  check('[queue] after a reload the first-pass text is back (status is re-read, nothing re-queued)', await waitUI('ai_first_pass') && await ev(`document.querySelector('#qs .aibox').innerText.includes('第二步')`));
+  // --- 6. second submission: hidden tab does not poll; timeout copy
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+  await waitFor(`document.querySelectorAll('#qs .qst').length === 0`);
+  check('[queue] 再做一次: status boxes are gone with the old result', await ev(`document.querySelectorAll('#qs .qst').length === 0 && !document.getElementById('qBanner')`));
+  check('[queue] second submit succeeds', await submitOnce() && await waitUI('waiting'));
+  await ev(`Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'}); 1`);
+  await mockQ('advance', { qref: Q3, to: 'expired' });
+  await sleep(2500);
+  check('[queue] a hidden tab does not poll (status unchanged after the brain moved on)', (await st3()) === 'waiting');
+  await ev(`Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'visible'}); document.dispatchEvent(new Event('visibilitychange')); 1`);
+  check('[queue] back in view: expired -> 「超过 24 小时仍没有结果，已转人工」', await waitUI('expired') && (await ev(`document.querySelector('#qs section[data-qref="${Q3}"] .qst-l').textContent`)) === '超过 24 小时仍没有结果，已转人工');
+  // --- 7. third submission: purged = deleted, no text
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+  await waitFor(`document.querySelectorAll('#qs .qst').length === 0`);
+  check('[queue] third submit succeeds', await submitOnce() && await waitUI('waiting'));
+  await mockQ('advance', { qref: Q3, to: 'purged' });
+  check('[queue] purged -> 「家长已删除这道题的解析」 and no AI text', await waitUI('purged') && await ev(`document.querySelectorAll('#qs .aibox').length === 0 && document.querySelector('#qs .qst-l').textContent === '家长已删除这道题的解析'`));
+  check('[queue] no family code / token in storage or page', !(await ev(`JSON.stringify(Object.assign({}, localStorage)) + document.body.innerText`)).includes(code));
+  return finish();
+}
 
 // Final-contract states in a real browser, against the mock brain (grade token configured, auto sets on).
 async function contractFlow(base) {
@@ -462,6 +542,7 @@ async function smokeFlow(base) {
 
   if (flow === 'contract') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return contractFlow(base); }
   if (flow === 'dailylimit') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return dailyLimitFlow(base); }
+  if (flow === 'queue') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return queueFlow(base); }
   if (flow === 'notready') { return notReadyFlow(base); }
   if (flow === 'smoke') { return smokeFlow(base); }
   if (flow === 'archive') {

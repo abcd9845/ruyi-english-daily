@@ -32,6 +32,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/abcd9845/ruyi-english-daily/server/internal/mockqueue"
 )
 
 const source = "math-intake.zz-yuekao-numberline-4y"
@@ -672,6 +674,7 @@ func main() {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	var attemptSeq int64 = 1000
+	var qmock *mockqueue.Mock
 	decide := func(ref string, ans any, a string) (status string, correct *bool) {
 		if strings.Contains(a, "~review~") {
 			return "needs_review", nil
@@ -860,6 +863,9 @@ func main() {
 			AttemptID int64  `json:"attempt_id,omitempty"`
 			Recorded  bool   `json:"recorded"`
 			Duplicate bool   `json:"duplicate"`
+			// additive hints (contract v1.0 §2); only when MOCK_QUEUE=1
+			Queueable       *bool   `json:"queueable,omitempty"`
+			QueueableReason *string `json:"queueable_reason"`
 		}
 		out := make([]outItem, len(req.Items))
 		wrote := false
@@ -880,6 +886,13 @@ func main() {
 				bump("grade_new_item")
 				wrote = true
 			}
+			if qmock != nil {
+				qb, qr := qmock.Queueable(cq[i], p.status)
+				o.Queueable = &qb
+				if qr != "" {
+					o.QueueableReason = &qr
+				}
+			}
 			out[i] = o
 		}
 		bump("grade_new")
@@ -889,6 +902,48 @@ func main() {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"client_attempt_id": req.CID, "items": out})
 	})
+	if os.Getenv("MOCK_QUEUE") == "1" { // pending-answer queue (contract v1.0): write token = the grade token, events/ack = a third token
+		nt := os.Getenv("MOCK_NOTIFY_TOKEN")
+		if nt == "" {
+			nt = "notify-" + token
+		}
+		qmock = mockqueue.New(mockqueue.Config{Brain: brainID, WriteToken: gradeToken, NotifyToken: nt, Env: mockEnv{
+			attempt: func(k string) (int64, bool) {
+				gmu.Lock()
+				defer gmu.Unlock()
+				if st, ok := idem[k]; ok && st.recorded {
+					return st.attemptID, true
+				}
+				return 0, false
+			},
+			count: func(q string) int {
+				gmu.Lock()
+				defer gmu.Unlock()
+				return dayCount[now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")+"|"+canonOf(q)]
+			},
+			write: func(k, q, canon string, at time.Time) int64 {
+				gmu.Lock()
+				defer gmu.Unlock()
+				attemptSeq++
+				dayCount[now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")+"|"+canonOf(q)]++
+				prev := idem[k]
+				st := prev.status
+				if st == "" {
+					st = "pending_key"
+				}
+				idem[k] = stored{canon, st, prev.correct, attemptSeq, true, at}
+				return attemptSeq
+			},
+			known: func(q string) bool {
+				gmu.Lock()
+				defer gmu.Unlock()
+				_, ok := known[canonOf(q)]
+				return ok && !gradeUnknown[canonOf(q)]
+			},
+			now: now,
+		}})
+		qmock.Register(mux)
+	}
 	mux.HandleFunc("GET /_mock/last-grade", func(w http.ResponseWriter, r *http.Request) {
 		gmu.Lock()
 		defer gmu.Unlock()
@@ -946,6 +1001,20 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+type mockEnv struct {
+	attempt func(string) (int64, bool)
+	count   func(string) int
+	write   func(k, q, canon string, at time.Time) int64
+	known   func(string) bool
+	now     func() time.Time
+}
+
+func (e mockEnv) Lookup(q string) (string, bool)           { return "pending_key", e.known(q) }
+func (e mockEnv) Attempt(k string) (int64, bool)           { return e.attempt(k) }
+func (e mockEnv) DayCount(q string) int                    { return e.count(q) }
+func (e mockEnv) Write(k, q, c string, at time.Time) int64 { return e.write(k, q, c, at) }
+func (e mockEnv) Now() time.Time                           { return e.now() }
 
 func sameCorrect(a, b *bool) bool {
 	if a == nil || b == nil {

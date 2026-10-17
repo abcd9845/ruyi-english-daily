@@ -43,6 +43,21 @@ type Item struct {
 	// Capped marks a question the brain named in a 429 daily_cap refusal (the
 	// whole batch was refused: nothing was written, Recorded is false).
 	Capped bool `json:"capped,omitempty"`
+	// Queue is the snapshot of this answer's enqueue at submission time (S1;
+	// absent unless RUYI_QUEUE_ENABLED=1 and the answer was eligible). The live
+	// state of the queue is kept in the queue's own state files, never here.
+	Queue *ItemQueue `json:"queue,omitempty"`
+}
+
+// ItemQueue is what the archive keeps of one enqueue: ids and a reason, never an answer.
+type ItemQueue struct {
+	// Enq: ok (queued at the brain) | failed (will be retried) | not_queued (refused for good).
+	Enq        string    `json:"enq"`
+	ItemID     string    `json:"item_id,omitempty"`
+	State      string    `json:"state,omitempty"`
+	Created    bool      `json:"created,omitempty"`
+	DeadlineAt time.Time `json:"deadline_at,omitzero"`
+	Reason     string    `json:"reason,omitempty"`
 }
 
 // Summary counts the verdicts.
@@ -64,7 +79,7 @@ type Client struct {
 
 // Record is one archived attempt.
 type Record struct {
-	V               int       `json:"v"` // 2: per-item recorded/attempt_id (v1 had one brain_attempt_id)
+	V               int       `json:"v"` // 2: per-item recorded/attempt_id (v1 had one brain_attempt_id); 3: + per-item queue (S1, only when the queue is on)
 	ClientAttemptID string    `json:"client_attempt_id"`
 	SetID           string    `json:"set_id"`
 	SetTitle        string    `json:"set_title"`

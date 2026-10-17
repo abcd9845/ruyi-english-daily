@@ -155,7 +155,7 @@ func TestContractRequestBodyCarriesRevKindAnsweredAtSessionRef(t *testing.T) {
 	items := m["items"].([]any)
 	i1, i2 := items[0].(map[string]any), items[1].(map[string]any)
 	if m["brain"] != "ruyi" || m["client_attempt_id"] != cid1 || i1["rev"].(float64) != 1 || i2["rev"].(float64) != 4 ||
-		i1["attempt_kind"] != "correction" || i2["attempt_kind"] != "variant" || i1["session_ref"] != "demo-1" || i1["answered_at"] == nil || i1["answered_at"] != i2["answered_at"] {
+		i1["attempt_kind"] != "correction" || i2["attempt_kind"] != "variant" || i1["session_ref"] != cid1 || i2["session_ref"] != cid1 || i1["answered_at"] == nil || i1["answered_at"] != i2["answered_at"] {
 		t.Errorf("request: %v", m)
 	}
 	// bad inputs are refused before the brain is asked

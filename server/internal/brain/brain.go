@@ -199,6 +199,11 @@ type Config struct {
 	LookupPath string
 	PickPath   string
 	BrainID    string
+	// NotifyToken is the THIRD token (queue:<slug>:notify): used only for the
+	// outbox events/ack calls (queue.go), never for anything else. PendingPath
+	// overrides DefaultPendingPath (the enqueue endpoint).
+	NotifyToken string
+	PendingPath string
 }
 
 type ticket struct {
@@ -217,6 +222,8 @@ type Client struct {
 	token      string
 	gradeToken string
 	gradePath  string
+	notifyTok  string
+	pendingPth string
 	lookupPath string
 	pickPath   string
 	brainID    string
@@ -271,6 +278,7 @@ func New(c Config) (*Client, error) {
 	return &Client{
 		base: c.BaseURL, token: c.Token, now: now, gradeToken: c.GradeToken, gradePath: c.GradePath,
 		lookupPath: c.LookupPath, pickPath: c.PickPath, brainID: c.BrainID, retryDelay: 200 * time.Millisecond,
+		notifyTok: c.NotifyToken, pendingPth: c.PendingPath,
 		hc: &http.Client{
 			Transport:     tr,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

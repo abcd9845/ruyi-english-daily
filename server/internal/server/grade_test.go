@@ -185,7 +185,7 @@ func TestGradeGradedMode(t *testing.T) {
 		} `json:"items"`
 	}
 	must(t, json.Unmarshal(e.brain.gradeReqs[0], &sent))
-	if sent.Brain != "ruyi" || sent.CID != cid1 || len(sent.Items) != 3 || sent.Items[0].SessionRef != "demo-1" || sent.Items[0].Rev != 0 {
+	if sent.Brain != "ruyi" || sent.CID != cid1 || len(sent.Items) != 3 || sent.Items[0].SessionRef != cid1 || sent.Items[2].SessionRef != cid1 || sent.Items[0].Rev != 0 {
 		t.Errorf("upstream request: %s", e.brain.gradeReqs[0])
 	}
 	// per-item brain confirmation, integer attempt ids, recorded everywhere

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,26 @@ type Deps struct {
 	SkipDeferred bool
 	// Now is for tests (nil = time.Now).
 	Now func() time.Time
+
+	// S1 pending-answer queue (queue.go). All zero = off: the site then behaves
+	// exactly like before. Queue is the brain adapter (*brain.Client in production).
+	Queue        brain.Queue
+	QueueEnabled bool
+	// QueueNotify starts the completion-notification poller (queue_poller.go).
+	QueueNotify bool
+	QueueDir    string
+	// QueuePoll is the poller period (config enforces >= 40 s; tests may go lower).
+	QueuePoll time.Duration
+	// QueueSweep / QueueQuiet / QueueJitter are for tests (zero = the defaults:
+	// retry sweep 30 s, aggregation quiet period 5 min, random ±10% jitter).
+	QueueSweep  time.Duration
+	QueueQuiet  time.Duration
+	QueueJitter func() float64
+	// QueueViewTTL is the per-submission status cache (0 = 5 s; tests use a tiny value).
+	QueueViewTTL time.Duration
+	// QueueHook is a test-only fault injector for the poller: it is called with a
+	// stage name and returns true to simulate a crash right there.
+	QueueHook func(stage string) bool
 }
 
 // Server is the top-level http.Handler.
@@ -93,6 +114,12 @@ type Server struct {
 	notifiedOrd []string
 	ntfyTimeout time.Duration
 	ntfyWait    time.Duration
+
+	// S1 queue runtime (nil when the queue is off)
+	q          *queueRT
+	qlock      *os.File
+	qcloseOnce sync.Once
+	poll       *poller
 }
 
 // New builds a Server.
@@ -130,6 +157,7 @@ func New(d Deps) *Server {
 	s.idem = newIdemStore(d.Attempts)
 	s.quotaT = newQuotaTally(d.Attempts)
 	s.nstop = make(chan struct{})
+	s.initQueue()
 	s.notified = map[string]bool{}
 	s.ntfyTimeout, s.ntfyWait = d.NtfyAttemptTimeout, d.NtfyRequestWait
 	if s.ntfyTimeout <= 0 {
@@ -241,6 +269,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.need(w, r, http.MethodGet, s.authed(s.autoNew))
+		case s.queueOn() && strings.HasPrefix(rest, "attempts/"): // off: falls through to the old behaviour
+			s.queueRoute(w, r, rest)
 		case strings.HasSuffix(rest, "/check"):
 			id := strings.TrimSuffix(rest, "/check")
 			s.need(w, r, http.MethodPost, s.authed(func(w http.ResponseWriter, r *http.Request) { s.checkLocal(w, r, id) }))

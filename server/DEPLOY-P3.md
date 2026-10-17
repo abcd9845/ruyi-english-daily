@@ -189,3 +189,39 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
 - **保留命名空间**：本地套 id 必须以 `smoke-` 或 `test-` 开头，qref 必须以 `smoke:` 开头，source 固定为 `local.smoke`（可不写）；真实套**不得**使用这些 id 前缀 / qref 前缀 / source，也不能带 `questions`。违反任一条：启动即退出。
 - 本地套不能写 `qrefs`、必须有 `questions`；不会被 `/api/practice/new`（自动选题）选中，`local.smoke` 不是大脑 source（`/api/sets/…`、`/api/media/…` 对它一律 404）。
 - 答案字段（`questions[].answer`）只在服务端，用于「检查」和提交后的对错判断，不出现在任何响应、归档题干、ntfy 里（有测试 grep）。
+
+## 9. S1 待解答队列（`feat/queue-s1`，基于 `feat/daily-limit-ux` #22；依赖链 #18/#19 → #22 → S1）
+
+**前置**：大脑契约 v1.0 的 ①a 端点已部署（入队 / 读 / capabilities / events / ack）且**三枚令牌**已签发（read / write=练习站令牌 / notify）。本分支联调只用 mockbrain 和本地 mock ntfy，没碰真实大脑。
+
+### 9.1 新增环境变量（全部可选，默认 = 与 #22 完全一致）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `RUYI_QUEUE_ENABLED` | `0` | `1` = 无法自动判分的答案再入队，页面显示逐题状态。需要 `RUYI_BRAIN_GRADE_TOKEN` |
+| `RUYI_QUEUE_NOTIFY_ENABLED` | `0` | `1` = 起完成提醒轮询。需要 `RUYI_QUEUE_ENABLED=1`、`RUYI_BRAIN_NOTIFY_TOKEN`、`RUYI_NTFY_TOPIC` |
+| `RUYI_BRAIN_NOTIFY_TOKEN` | 空 | 第三枚令牌，只调 `events` / `ack`；与读令牌、写令牌都必须不同，否则拒绝启动 |
+| `RUYI_QUEUE_POLL_SECONDS` | `45` | 40–600；实际间隔 ±10% 抖动，失败指数退避到 5 分钟 |
+| `RUYI_QUEUE_STATE_DIR` | `/var/lib/ruyi-site/queue` | 绝对路径；要事先建好，0700，属主 `ruyi-site`，单元的 `ReadWritePaths` 要包含它（样例单元已改成 `/var/lib/ruyi-site`）。队列开着而目录不可用 → 启动失败（不会悄悄丢状态） |
+| `RUYI_BRAIN_PENDING_PATH` | `/v1/bank/pending-answers` | 入队路径 |
+
+### 9.2 部署顺序与回滚
+
+1. 建目录：`install -d -m 0700 -o ruyi-site -g ruyi-site /var/lib/ruyi-site/queue`；确认单元的 `ReadWritePaths` 含 `/var/lib/ruyi-site`（`systemctl daemon-reload`）。
+2. 换二进制（`ruyi-site-queue-s1-linux-amd64`），**不改环境变量先重启一次**：行为应与 #22 一致（`GET /api/practice/attempts/<cid>/queue` 仍是 400）。
+3. 在 env 文件里加 `RUYI_QUEUE_ENABLED=1`（先不开提醒）→ 重启 → 家长自己交一份含「待核对」题的练习，看状态页：待解答 → …。
+4. 再加 `RUYI_QUEUE_NOTIFY_ENABLED=1` 和 `RUYI_BRAIN_NOTIFY_TOKEN` → 重启。日志里应有 `queue capabilities`；notify 令牌被拒只会出现 `queue notify token rejected … no fallback`，站点其余功能不受影响。
+5. **回滚**：把 `RUYI_QUEUE_ENABLED` 改 `0` 重启（行为回到 #22；`queue/` 目录可留可删）；或直接换回 #22 的二进制。归档里 S1 写的 `v:3` 行带多出来的 `queue` 字段，#22 的读取器忽略未知字段（测试 `TestQueueArchiveV3LinesAreReadableByThePreviousBuild`），不需要改归档。
+
+### 9.3 本地状态与丢失时的对账
+
+目录里有：`links.jsonl`（每次提交的入队状态，追加 + fsync，最新一行为准，30 天后不再加载）、`notify.json`（事件游标、各套状态；临时文件 + fsync + rename + fsync 目录）、`sent.jsonl`（已通知过的提交，追加 + fsync）、`.lock`（flock，只允许一个轮询实例；18082 单实例）。
+
+- 重启：从本地状态继续，不重复通知、不漏通知（唯一重复窗口见 README）。
+- `notify.json` 没了/坏了：自动对账，见 README「本地状态丢失 / 损坏的对账」。对账只读大脑，不写。
+- **不要手改状态文件**；状态不对时联系开发（大脑那边的数据是权威，对账只读它）。
+- 令牌不会出现在这些文件、归档、日志和页面里（测试 `TestQueueSecretsNeverReachLogsArchiveStateOrPages`）。
+
+### 9.4 已知缺口 / 与大脑终稿可能的差异（C1–C6，详见 `internal/brain/queue.go` 头部注释）
+
+按契约 v1.0 实现；契约没写死、站点做了保守假设的点（大脑终稿若不同，改 `internal/brain/queue.go` 一处即可）：见 `INTEGRATION.md` §8（含 C1–C6 和需要 PM/大脑确认的 `daily_cap` 取舍）。

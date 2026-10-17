@@ -64,7 +64,26 @@ type Config struct {
 	NtfyRetryDelay  time.Duration
 	AutoSources     []string
 	AutoTTL         time.Duration
+
+	// S1: the pending-answer queue. Everything is OFF by default; with
+	// QueueEnabled=false the site behaves exactly as before.
+	QueueEnabled bool
+	// QueueNotifyEnabled starts the poller that tells the parent when a set has
+	// been processed (needs BrainNotifyToken and NtfyTopic).
+	QueueNotifyEnabled bool
+	// BrainNotifyToken is the THIRD token (queue:<slug>:notify): events/ack only.
+	BrainNotifyToken string
+	QueuePoll        time.Duration
+	QueueStateDir    string
+	BrainPendingPath string
 }
+
+// DefaultQueueDir is where the queue's local state lives (links + notify state).
+const DefaultQueueDir = "/var/lib/ruyi-site/queue"
+
+// MinQueuePoll is the shortest accepted poll period: with the poller's ±10%
+// jitter it never polls faster than 36 s (the hard limit is 30 s).
+const MinQueuePoll = 40 * time.Second
 
 // DefaultAttemptsDir is where attempts are archived unless RUYI_ATTEMPTS_DIR says otherwise.
 const DefaultAttemptsDir = "/var/lib/ruyi-site/attempts"
@@ -323,6 +342,54 @@ func Load(getenv func(string) string) (*Config, error) {
 		}
 	}
 
+	// ---- S1 queue (all optional, default off) ----
+	if c.QueueEnabled, ok = flag01(getenv("RUYI_QUEUE_ENABLED")); !ok {
+		bad("RUYI_QUEUE_ENABLED", "must be 0 or 1")
+	}
+	if c.QueueNotifyEnabled, ok = flag01(getenv("RUYI_QUEUE_NOTIFY_ENABLED")); !ok {
+		bad("RUYI_QUEUE_NOTIFY_ENABLED", "must be 0 or 1")
+	}
+	c.BrainNotifyToken = strings.TrimSpace(getenv("RUYI_BRAIN_NOTIFY_TOKEN"))
+	if strings.ContainsAny(c.BrainNotifyToken, " \t\r\n") {
+		bad("RUYI_BRAIN_NOTIFY_TOKEN", "must not contain whitespace")
+	}
+	// the three tokens (read / write=grade / notify) are three different tokens
+	if c.BrainNotifyToken != "" && c.BrainNotifyToken == c.BrainToken {
+		bad("RUYI_BRAIN_NOTIFY_TOKEN", "must be a different token from RUYI_BRAIN_TOKEN")
+	}
+	if c.BrainNotifyToken != "" && c.BrainNotifyToken == c.BrainGradeToken {
+		bad("RUYI_BRAIN_NOTIFY_TOKEN", "must be a different token from RUYI_BRAIN_GRADE_TOKEN")
+	}
+	c.QueuePoll = 45 * time.Second
+	if v := strings.TrimSpace(getenv("RUYI_QUEUE_POLL_SECONDS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || time.Duration(n)*time.Second < MinQueuePoll || n > 600 {
+			bad("RUYI_QUEUE_POLL_SECONDS", "must be an integer from 40 to 600")
+		} else {
+			c.QueuePoll = time.Duration(n) * time.Second
+		}
+	}
+	c.QueueStateDir = strings.TrimSpace(getenv("RUYI_QUEUE_STATE_DIR"))
+	if c.QueueStateDir == "" {
+		c.QueueStateDir = DefaultQueueDir
+	} else if !strings.HasPrefix(c.QueueStateDir, "/") || strings.ContainsRune(c.QueueStateDir, 0) {
+		bad("RUYI_QUEUE_STATE_DIR", "must be an absolute path")
+	}
+	c.BrainPendingPath = pathVar("RUYI_BRAIN_PENDING_PATH")
+	if c.QueueEnabled && c.BrainGradeToken == "" {
+		bad("RUYI_QUEUE_ENABLED", "needs RUYI_BRAIN_GRADE_TOKEN (the write token queues the answers)")
+	}
+	if c.QueueNotifyEnabled {
+		switch {
+		case !c.QueueEnabled:
+			bad("RUYI_QUEUE_NOTIFY_ENABLED", "needs RUYI_QUEUE_ENABLED=1")
+		case c.BrainNotifyToken == "":
+			bad("RUYI_QUEUE_NOTIFY_ENABLED", "needs RUYI_BRAIN_NOTIFY_TOKEN")
+		case c.NtfyTopic == "":
+			bad("RUYI_QUEUE_NOTIFY_ENABLED", "needs RUYI_NTFY_TOPIC")
+		}
+	}
+
 	if len(errs) > 0 {
 		return nil, errors.New("invalid configuration: " + strings.Join(errs, "; "))
 	}
@@ -334,6 +401,9 @@ func (c *Config) Secrets() []string {
 	s := []string{c.FamilyCode, c.SessionSecret, c.BrainToken}
 	if c.BrainGradeToken != "" {
 		s = append(s, c.BrainGradeToken)
+	}
+	if c.BrainNotifyToken != "" {
+		s = append(s, c.BrainNotifyToken)
 	}
 	if c.NtfyTopic != "" {
 		s = append(s, c.NtfyTopic)

@@ -72,6 +72,8 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 | `RUYI_GRADE_MAX_PER_HOUR` | 否 | 每套每小时提交上限（会话与 IP 各限），默认 5，范围 1–1000 |
 | `RUYI_NTFY_BASE_URL` / `RUYI_NTFY_RETRY_DELAY` | 否 | ntfy 地址（默认 `https://ntfy.sh/`）/ 失败后第一次重试前的等待（默认 1m，第二次重试前翻倍）；一般不用配 |
 | `RUYI_AUTO_SOURCES` / `RUYI_AUTO_TTL` | 否 | 允许自动出题的 source（默认空=关）/ 自动套有效期（默认 6h） |
+| `RUYI_QUEUE_ENABLED` / `RUYI_QUEUE_NOTIFY_ENABLED` | 否 | `0`（默认）/`1`。S1 待解答队列 / 完成提醒轮询，见下「待解答队列」。队列需要 `RUYI_BRAIN_GRADE_TOKEN`；提醒需要 `RUYI_BRAIN_NOTIFY_TOKEN` 和 `RUYI_NTFY_TOPIC` |
+| `RUYI_BRAIN_NOTIFY_TOKEN` / `RUYI_QUEUE_POLL_SECONDS` / `RUYI_QUEUE_STATE_DIR` / `RUYI_BRAIN_PENDING_PATH` | 否 | 第三枚令牌（只用于 events/ack，必须与另两枚不同）/ 轮询秒数 40–600（默认 45）/ 队列本地状态目录（默认 `/var/lib/ruyi-site/queue`，0700）/ 入队路径（默认 `/v1/bank/pending-answers`） |
 | `RUYI_SETS_FILE` | 否 | 练习套配置 JSON（见下「通用套练习页」）。未设 → 没有套，`/api/practice/*` 404，其余功能不变。文件有误启动即退出，报错只写位置不写内容 |
 
 日志输出到 stderr（journald），只记方法、路径（不含 query）、状态码、耗时、来源 IP；另有一层写入器把所有已配置的秘密值（令牌、家庭码、会话密钥、topic）替换成 `[redacted]`。
@@ -149,6 +151,19 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 
 **自动出题（3.5）**：`GET /api/practice/new?source=&n=1..20[&order=random|seq][&seed=N]`（需登录；`RUYI_AUTO_SOURCES` 为空时整个入口 404）。
 返回 `{set_id:"auto-<8位>",url,title,requested,count,truncated,note?,expires_at}`；题不够 n 就全给并带 `note`；套存在内存里，`RUYI_AUTO_TTL` 后失效，其 qref 白名单同样约束判分与取图。新增 `mode=due_first|wrong_only|random`（缺省 = random，**默认关，仍需 `RUYI_AUTO_SOURCES`**）：`due_first`/`wrong_only` 走大脑 `pick-practice`，题文用 lookup 取；返回多 `mode`、`deferred`（带参考答案待核/不支持题型/缺图的题数）；每题带 `origin`（页面显示「复习」/「错题」）和 `ref_pending`（页面标「参考答案待核，不自动判」，是否保留由 `RUYI_PICK_SKIP_DEFERRED` 决定）。选题接口未部署 → 501「大脑接口未就绪」。旧参数 `wrong_only=1` / `due_first=1` 仍然接受（等价于对应 `mode`）；旧的"没有大脑接口就返回 501"的草稿路径已删除——有接口就用，没接口才 501。lookup 里没有的 qref 被丢弃，不崩。
+
+## 待解答队列（S1，`RUYI_QUEUE_ENABLED`，默认关）
+
+基于大脑接口契约 v1.0（`pending-answers` 入队、批量/单条读、`capabilities`、`events` + `ack`）。**开关关闭时站点行为与 #22 完全一致**（`golden_off_test.go` 用 #22 代码生成的黄金文件逐字节对照；`/api/practice/attempts/*` 不被路由，和旧版一样 400）。
+
+- **入队**：提交判分后，`pending_key` / `needs_review` / `unsupported` 且 `queueable≠false` 的答案再入队（顶层 `session_ref`=`client_attempt_id`、`session_total`=本次入队题数；整批原子，被拒就按逐项 `queueable_reason` 剔除永久不可入队的题，`session_total` 相应减小后重发一次）。已判分（graded）的不入队；网站自判（本地套）不入队。每次调用 3 秒超时，整个提交最多多花 7 秒；入队失败**不影响提交成功**，之后由后台（30 秒一轮）和页面触发的一次幂等补发自动重试，**没有手动按钮**。
+- **答案由入队写入时**（`unsupported` 在 grade 里不落库）：网站把它当作已记录、计入「今天约还剩 N 次」；剩余次数优先取入队响应里的 `daily_remaining`。
+- **状态页数据**：`GET /api/practice/attempts/<cid>/queue`（纯读，永不入队；5 秒缓存；批量读 `GET /v1/brains/ruyi/pending?session_ref=<cid>&include=result`，路由未部署时退化为逐条读）。页面 15 秒轮询，5 分钟后 60 秒，标签页隐藏时不轮询，全部处理完停止。状态映射见 `internal/server/queue_view.go`（待解答（排队中）→ AI 判卷中 → **AI 初评 · 待家长核**（显示 AI 全文，含数学拟答案，不折叠）→ 家长已核；超时文案数学 24 小时 / 开放题 48 小时；purged = 「家长已删除这道题的解析」，不显示正文）。`POST /api/practice/attempts/<cid>/enqueue`（每个提交每分钟最多 2 次）只重发入队失败的那几题，幂等。
+- **完成提醒**（`RUYI_QUEUE_NOTIFY_ENABLED=1`）：独立 goroutine 每约 45 秒（±10%）读 `GET /v1/queue/events`（**只用第三枚 notify 令牌**）。顺序固定：**本地落盘（fsync + 原子替换 `notify.json`）→ `ack` → 才发 ntfy**，每套（`session_ref`）只发一条；发之前先把「发送中」落盘，发成功再追加 `sent.jsonl`。唯一可能重复的窗口：ntfy 返回 2xx 但「已发送」还没落盘就崩溃。重启后从本地状态补发，不会漏。
+- **本地状态丢失 / 损坏的对账**：`notify.json` 缺失而 `sent.jsonl` 或 `links.jsonl` 非空，或 `notify.json` 解析失败（改名为 `notify.json.corrupt-<unix时间>` 留存，不删），启动日志写 `reconciling`，对最近 4 天里**没发过**提醒的提交各读一次大脑（批量读）补齐终态，再按正常流程发（已在 `sent.jsonl` 的不会重发）。事件被大脑丢失/从未到达的提交，在预期截止 + 1 小时后也会触发同样的一次对账。`links.jsonl` 丢失时，旧提交的状态接口返回 404（页面不再显示状态；大脑那边的数据不受影响，家长仍可在大脑里核）。
+- **令牌**：读 / 写（`RUYI_BRAIN_GRADE_TOKEN`，也是入队令牌）/ notify 两两必须不同，启动时校验，错误只写变量名；令牌不进日志、页面、归档、状态文件。notify 令牌 403 只打 warn，**不会回退到写令牌**。
+
+新增环境变量见 `deploy/ruyi-site.env.example` 和 `DEPLOY-P3.md` §9。
 
 ## 本地测试套（smoke-test）
 

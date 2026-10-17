@@ -58,6 +58,18 @@ a{color:var(--accent)}
 .vd.cap{background:#fffbeb;color:#92400e}
 .vd{margin-top:12px;padding:8px 12px;border-radius:10px;font-weight:700;font-size:.95rem}
 .vd.ok{background:#ecfdf5;color:#047857}.vd.wrong{background:#fef2f2;color:#b91c1c}.vd.pend{background:#fffbeb;color:#92400e}.vd.none{background:#f5f5f4;color:#57534e}
+.qst{margin:10px 0 0;padding:10px 12px;border-radius:10px;background:#f5f5f4;color:#44403c;font-size:.92rem}
+.qst .qst-l{font-weight:700}
+.qst.ai_first_pass,.qst.reviewed{background:#eff6ff;color:#1e3a8a}
+.qst.failed,.qst.expired,.qst.overdue_hint,.qst.not_queued,.qst.enqueue_retry{background:#fffbeb;color:#92400e}
+.qst.purged,.qst.unknown{background:#f5f5f4;color:#57534e}
+.qst .qst-c{margin-top:4px}
+.aibox{margin-top:8px;padding:10px 12px;border:1.5px dashed #93c5fd;border-radius:10px;background:#fff;color:var(--ink)}
+.aibox .ailabel{font-size:.78rem;font-weight:700;color:#1d4ed8;margin-bottom:4px}
+.aibox .aians,.aibox .aiwhy{word-break:break-word;margin:4px 0 0}
+.aibox .aik{font-weight:700;color:#57534e;font-size:.85rem}
+.qbanner{margin:8px 0;padding:10px 12px;border-radius:10px;background:#eff6ff;color:#1e3a8a;font-size:.95rem}
+.qbanner.done{background:#ecfdf5;color:#047857}
 .resbox h2{margin:0 0 6px;font-size:1.2rem}
 .resbox .sum{font-size:1.05rem;margin:6px 0}
 .resbox.done{border:2px solid #14b8a6}.resbox.soft2{border:2px solid #f59e0b}
@@ -549,9 +561,10 @@ function setLocked(on){
 // archive-only / pending / not auto-graded, never as recorded in the brain.
 function brainConfirmed(r){ return !!r && r.mode==='graded' && r.brain_recorded===true; }
 function applyResult(){
-  document.querySelectorAll('#qs .vd').forEach(function(n){ n.remove(); });
+  document.querySelectorAll('#qs .vd,#qs .qst').forEach(function(n){ n.remove(); });
   var box=$('resultCard'); box.innerHTML='';
-  if(!result){ setLocked(false); showSubmitArea(); return; }
+  if(!result){ qStop(); setLocked(false); showSubmitArea(); return; }
+  var qOK={}; if(result.queue && Array.isArray(result.queue.items)) result.queue.items.forEach(function(x){ if(x && x.enq==='ok') qOK[x.qref]=1; });
   var confirmed=brainConfirmed(result);
   var byRef={}; result.results.forEach(function(r){ if(r && typeof r.qref==='string') byRef[r.qref]=r; });
   document.querySelectorAll('#qs section[data-qref]').forEach(function(card){
@@ -566,7 +579,7 @@ function applyResult(){
       // local test set: judged by the server, never recorded in the brain
       if(r.correct){ cls='ok'; txt='✓ 答对了（测试）'; } else { cls='wrong'; txt='✗ 不对（测试）'; }
     }
-    if(cls==='pend' && r.recorded!==true) txt+='（不入大脑）';   // only an answer the brain confirmed recorded is "in the brain"
+    if(cls==='pend' && r.recorded!==true && !qOK[r.qref]) txt+='（不入大脑）';   // only an answer the brain confirmed recorded is "in the brain"
     card.appendChild(el('div','vd '+cls,txt));
   });
   var sm=result.summary||{};
@@ -599,8 +612,102 @@ function applyResult(){
   again.onclick=resetAll;
   box.appendChild(again);
   setLocked(true); showSubmitArea();
+  qStart();
 }
+
+// ---- S1: AI first-pass status of queued answers ------------------------------------
+// result.queue (from the grade reply) says which answers were queued; GET
+// /api/practice/attempts/<cid>/queue is a pure read (it never queues anything) with the
+// per-answer status. Polling: every 15 s for the first 5 minutes, then every 60 s; only
+// while something is still pending and the tab is visible. When the grade reply or the
+// status says an enqueue is still being retried the page asks ONCE for an immediate
+// retry (POST .../enqueue; there is no manual button). AI text is only ever shown as
+// "AI初评·待家长核", through the same escaping markdown renderer as the questions.
+var Q={timer:null,t0:0,cid:null,busy:false,posted:false,gen:0,last:null};
+var Q_FAST=15000, Q_SLOW=60000, Q_SWITCH=300000;
+function qDelay(elapsed){ return elapsed<Q_SWITCH?Q_FAST:Q_SLOW; }
+window.__ruyiQ={delay:qDelay,state:function(){ return {cid:Q.cid,active:!!Q.timer,posts:Q.posted?1:0}; }};
+function qStop(){ Q.gen++; if(Q.timer){ clearTimeout(Q.timer); Q.timer=null; } Q.cid=null; Q.last=null; Q.posted=false; }
+function qSeed(){
+  var rq=result&&result.queue; if(!rq||!Array.isArray(rq.items)) return null;
+  var items=rq.items.map(function(x){
+    var ui=x.enq==='ok'?'waiting':(x.enq==='failed'?'enqueue_retry':'not_queued');
+    var label=x.enq==='ok'?'已排队，等 AI 判卷':(x.enq==='failed'?'已提交，正在排队（会自动重试）':'未排队：答案已存档，家长会核对（不入大脑）');
+    return {qref:x.qref,ui_state:ui,label:label};
+  });
+  return {items:items,summary:{any_pending:items.some(function(i){return i.ui_state!=='not_queued';})}};
+}
+function qPaint(view){
+  if(!view||!Array.isArray(view.items)) return;
+  Q.last=view;
+  var byRef={}; view.items.forEach(function(i){ if(i&&typeof i.qref==='string') byRef[i.qref]=i; });
+  document.querySelectorAll('#qs section[data-qref]').forEach(function(card){
+    var old=card.querySelector('.qst'); if(old) old.remove();
+    var it=byRef[card.getAttribute('data-qref')]; if(!it) return;
+    var ui=/^[a-z_]{1,20}$/.test(it.ui_state||'')?it.ui_state:'unknown';
+    var box=el('div','qst '+ui); box.setAttribute('data-ui',ui);
+    box.appendChild(el('div','qst-l',typeof it.label==='string'?it.label:'状态更新中'));
+    if(it.compare_text) box.appendChild(el('div','qst-c',it.compare_text));
+    if(it.result && (it.result.proposed_answer||it.result.rationale) && (ui==='ai_first_pass'||ui==='reviewed')){
+      var ai=el('div','aibox'); ai.appendChild(el('div','ailabel','AI初评·待家长核（AI 可能出错，以家长核对为准）'));
+      if(it.result.proposed_answer){ var a=el('div','aians'); a.appendChild(el('span','aik','AI 的答案：')); var as=el('span'); a.appendChild(as); ai.appendChild(a); mdInto(as,String(it.result.proposed_answer),true); }
+      if(it.result.rationale){ var w=el('div','aiwhy'); w.appendChild(el('span','aik','AI 的解析：')); var ws=el('div'); w.appendChild(ws); ai.appendChild(w); mdInto(ws,String(it.result.rationale),false); }
+      box.appendChild(ai);
+    }
+    card.appendChild(box);
+  });
+  var b=$('qBanner'); if(!b){ b=el('div','qbanner'); b.id='qBanner'; b.setAttribute('role','status'); var box=$('resultCard'); box.insertBefore(b,box.querySelector('#btnAgain')); }
+  var sm=view.summary||{}, parts=[];
+  if(+sm.ai_first_pass>0) parts.push('AI 初评已出 '+(+sm.ai_first_pass)+' 题（待家长核）');
+  if(+sm.reviewed>0) parts.push('家长已核 '+(+sm.reviewed)+' 题');
+  var wait=(+sm.waiting||0)+(+sm.ai_working||0)+(+sm.enqueue_retry||0)+(+sm.unknown||0);
+  if(wait>0) parts.push('还在等 '+wait+' 题');
+  if(+sm.manual>0) parts.push((+sm.manual)+' 题转人工');
+  if(+sm.purged>0) parts.push((+sm.purged)+' 题的解析已被家长删除');
+  if(+sm.not_queued>0) parts.push((+sm.not_queued)+' 题未排队（答案已存档，不入大脑）');
+  b.className='qbanner'+(sm.any_pending?'':' done');
+  b.textContent=parts.length?parts.join(' · ')+(sm.any_pending?'。可以关掉页面，AI 初评出来后家长手机会收到提醒。':'。'):'';
+  if(view.stale) b.textContent+=' （状态更新慢，稍后自动刷新）';
+}
+function qPending(view){ return !view || !view.summary || view.summary.any_pending!==false; }
+function qFetch(gen){
+  if(gen!==Q.gen || !Q.cid) return Promise.resolve();
+  var c=Q.cid;
+  return api('GET','/api/practice/attempts/'+encodeURIComponent(c)+'/queue').then(function(r){
+    if(gen!==Q.gen) return;
+    if(r.status===200 && r.json && Array.isArray(r.json.items)){
+      qPaint(r.json);
+      var retrying=r.json.items.some(function(i){return i.ui_state==='enqueue_retry';});
+      if(retrying && !Q.posted){ Q.posted=true; return api('POST','/api/practice/attempts/'+encodeURIComponent(c)+'/enqueue',{}).then(function(){ if(gen===Q.gen) return qFetch(gen); }); }
+      return;
+    }
+    if(r.status===401){ showGate('登录已过期，请重新输入家庭码。'); qStop(); }
+  }).catch(function(){});
+}
+function qSchedule(gen){
+  if(gen!==Q.gen) return;
+  if(Q.last && !qPending(Q.last)){ Q.timer=null; return; }   // everything processed: stop
+  Q.timer=setTimeout(function(){
+    Q.timer=null;
+    if(gen!==Q.gen) return;
+    if(document.visibilityState==='hidden'){ Q.timer=null; return; }   // resumed by visibilitychange
+    qFetch(gen).then(function(){ qSchedule(gen); });
+  },qDelay(Date.now()-Q.t0));
+}
+function qStart(){
+  qStop();
+  if(!result || !result.queue || !cid) return;
+  Q.cid=cid; Q.t0=Date.now(); Q.posted=false;
+  var gen=Q.gen;
+  qPaint(qSeed());
+  qFetch(gen).then(function(){ qSchedule(gen); });
+}
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState!=='visible' || !Q.cid || Q.timer || (Q.last && !qPending(Q.last))) return;
+  var gen=Q.gen; qFetch(gen).then(function(){ qSchedule(gen); });
+});
 function resetAll(){
+  qStop();
   answers={}; cid=null; cidSig=null; cidAt=null; result=null;
   try{ localStorage.removeItem(DRAFT_KEY); }catch(e){}
   render(); $('savedHint').textContent=''; submitMsg('');
@@ -707,7 +814,7 @@ $('btnSubmit').onclick=function(){ submit(false); };
 $('btnCheck').onclick=checkAnswers;
 $('btnLogout').onclick=function(){
   api('POST','/api/logout').then(function(){
-    items=[]; $('qs').innerHTML=''; $('submitCard').style.display='none'; $('resultCard').style.display='none'; $('countPill').textContent='已退出'; showGate('');
+    qStop(); items=[]; $('qs').innerHTML=''; $('submitCard').style.display='none'; $('resultCard').style.display='none'; $('countPill').textContent='已退出'; showGate('');
   },function(){});
 };
 window.addEventListener('pagehide',saveDraftNow);

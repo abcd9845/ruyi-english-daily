@@ -99,3 +99,10 @@ merge 之后的提交（都不改功能）：
 ## 后续（单 E，不属于上面的合并清单）
 
 `feat/daily-limit-ux`（基于 `release/integ-1017b` @ `29ff748`）：每题每天 3 次的页面提示 / 二次确认、大脑 429 `daily_cap` 也留档、`GET /api/practice/<set>/quota`、「（不入大脑）」文案。需换二进制并重启；无新环境变量。详见该 PR 与 `README.md`「大脑的拒绝映射」。
+
+## 8. S1 `feat/queue-s1`（基于 `feat/daily-limit-ux` #22；依赖链 #18/#19 → #22 → S1）
+
+- 依据：`/workspace/loop/ruyi-brain/site-interface-contract.md`（大脑接口契约 v1.0）。实现、mock（`internal/mockqueue`，`cmd/mockbrain` 在 `MOCK_QUEUE=1` 时启用）和测试都按它对齐。
+- 范围：入队 + 状态页 + 完成提醒（见 README「待解答队列」）。不含：图片上传（S2）、重新分析按钮（S3，`reanalyze_enabled=false` 时隐藏；站点不调用 reanalyze / review / void / stats）。
+- 与已批准 S1-plan 的差异（只列冲突）：（a）详情默认不带正文 → 站点用 `include=result`；（b）`session_ref`/`session_total` 顶层发送（plan A1 原为不发/不确定）；（c）ack 只收 `{up_to_id}`（plan 备选的 `ids[]` 不用）；（d）新增 `capabilities`，用于判定 judged 是否开启、超时小时数，**不盲试** `kind_not_enabled`；（e）入队响应的 `daily_remaining` / `new_attempt_written` 成为「约还剩 N 次」的首选来源（plan A3 原为推断）；（f）`purged` 是独立状态且 purged 事件仍会发出（plan 按 expired+purged 处理）；（g）`retry_after_s` 在 `error.details`，另有 `Retry-After` 头；（h）批量读默认 `limit=100`；（i）stats 对站点三枚令牌 403，站点不用；（j）events 单页最大 200，站点用 100。
+- 与大脑终稿可能不同、已集中在 `internal/brain/queue.go` 头部注释的假设（C1–C6，只影响该文件）：C1 入队成功项缺 `ok` / `new_attempt_written` / `daily_remaining` 时，按 grade 状态推断「新写作答」（unsupported）并退回本地估算「约还剩 N 次」；C2 `result` 只在 `include=result` 时出现，`review.verdict` 在 ①b 前恒为 none；C3 `kinds.<kind>.deadline_hours` 只作文案兜底（入队响应的 `deadline_at` 优先）；C4 未知 state → 页面「状态更新中」，未知 reason → 视为该条永久不可入队；C5 `item_id` 整数 / 字符串都收，统一为字符串；C6 `session_total` = 本次批内条数（剔除坏条目重提时同步改小；后台重试同值）。另：逐项原因 `daily_cap` 站点按「该题今天不可入队」处理（剔除并标「未排队」），契约把它归为批次级/暂时性——**需 PM/大脑确认这一取舍**。

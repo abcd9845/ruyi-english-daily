@@ -598,8 +598,13 @@ gpost m4 "$RB" mix-4 "$(rbody "$(rcid 3)" "$MIXANS")" -b "$WORK/jarR"
 expect "R4 daily cap: 3rd write of the same questions the same day is still fine" "$CODE_HTTP" 200
 L1=$(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' '); N2=$(ntfy_n)
 gpost m5 "$RB" mix-4 "$(rbody "$(rcid 4)" "$MIXANS")" -b "$WORK/jarR"
-expect "R4b 4th write the same day -> 429 for the whole batch, with the page copy 今天这题提交次数到上限" "$CODE_HTTP $(jq -r '[.error,(.message|contains("今天这题提交次数到上限"))]|@json' "$WORK/resp/m5.b")" '429 ["daily_cap",true]'
-expect "R4c ... nothing archived and nothing notified for the refused batch" "$(( $(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' ') - L1 )) $(( $(ntfy_n) - N2 ))" "0 0"
+expect "R4b 4th write the same day -> 429 for the whole batch, with the page copy 今天这题的次数已用完，已留档，未记入大脑" "$CODE_HTTP $(jq -r '[.error,(.message|contains("今天这题的次数已用完，已留档，未记入大脑")),.archived,.brain_recorded,.brain_note,.mode,.recorded_count]|@json' "$WORK/resp/m5.b")" '429 ["daily_cap",true,true,false,"daily_cap","archive_only",0]'
+expect "R4c ... but archived (exactly one new line: archive_only/daily_cap, no item recorded) and NOT notified" "$(( $(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' ') - L1 )) $(( $(ntfy_n) - N2 )) $(tail -1 "$WORK/att-R/attempts.jsonl" | jq -c '[.mode,.brain_note,([.items[].recorded]|any),([.items[]|select(.capped)]|length>0)]')" '1 0 ["archive_only","daily_cap",false,true]'
+G5=$(mstat grade "$RM"); L5=$(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' ')
+gpost m5c "$RB" mix-4 "$(rbody "$(rcid 4)" "$MIXANS")" -b "$WORK/jarR"
+expect "R4c2 replay of the refused id -> 429 again (replayed:true), brain not called, no second line" "$CODE_HTTP $(jq -c '[.error,.replayed]' "$WORK/resp/m5c.b") $(( $(mstat grade "$RM") - G5 )) $(( $(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' ') - L5 ))" '429 ["daily_cap",true] 0 0'
+get qt "$RB/api/practice/mix-4/quota" -b "$WORK/jarR"
+expect "R4c3 quota estimate: limit 3, basis site_archive, the most-used asked question is at 3, the refused attempt not counted" "$CODE_HTTP $(jq -c '[.limit,.basis,(.used|to_entries|map(.value)|max)]' "$WORK/resp/qt.b")" '200 [3,"site_archive",3]'
 gpost m5b "$RB" mix-4 "$(rbody "$(rcid 1)" "$MIXANS" ',"answered_at":"2026-10-17T08:00:00Z"')" -b "$WORK/jarR"
 expect "R4d replay of an accepted attempt is still served after the cap (site archive, no brain call)" "$(jq -c '[.replayed,.mode]' "$WORK/resp/m5b.b")" '[true,"graded"]'
 curl -s -X POST "$RMB/_mock/bump-rev?qref=example.set:math:2" >/dev/null
@@ -725,7 +730,7 @@ nextday "$SM"
 for i in 11 12 13; do gpost sc$i "$SB" one-s "$(sbody "$(scid $i)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarS"; done
 L1=$(wc -l < "$WORK/att-S/attempts.jsonl" | tr -d ' ')
 gpost s7 "$SB" one-s "$(sbody "$(scid 14)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarS"
-expect "S2 4th write the same Shanghai day -> 429 daily_cap, one unified message, Retry-After passed through (seconds), nothing archived" "$CODE_HTTP $(jq -r .error "$WORK/resp/s7.b") $(grep -i '^retry-after:' "$WORK/resp/s7.h" | tr -d '\r' | awk '{print ($2>0 && $2<=86401)?"ok":"bad"}') $(( $(wc -l < "$WORK/att-S/attempts.jsonl" | tr -d ' ') - L1 ))" "429 daily_cap ok 0"
+expect "S2 4th write the same Shanghai day -> 429 daily_cap, one unified message, Retry-After passed through (seconds), archived as one daily_cap line" "$CODE_HTTP $(jq -r .error "$WORK/resp/s7.b") $(grep -i '^retry-after:' "$WORK/resp/s7.h" | tr -d '\r' | awk '{print ($2>0 && $2<=86401)?"ok":"bad"}') $(( $(wc -l < "$WORK/att-S/attempts.jsonl" | tr -d ' ') - L1 ))" "429 daily_cap ok 1"
 # --- 3./4. answered_at: only sent when valid
 nextday "$SM"
 gpost s8 "$SB" one-s "$(sbody "$(scid 21)" '[{"qref":"example.set:math:2","answer":"B"}]' ',"answered_at":"2020-01-01T00:00:00Z"')" -b "$WORK/jarS"
@@ -982,6 +987,18 @@ if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/d
   expect "L9b the brain got 0 requests during the whole browser run (grade token configured)" "$(( $(curl -s "http://127.0.0.1:18262/_mock/stats" | jq -r '[.[]|numbers]|add // 0') - SM0 ))" 0
   expect "L9c the browser run was archived with test:true and pushed once, with 【测试】" "$(tail -1 "$WORK/att-SM/attempts.jsonl" | jq -c '.test') $(( $(ntfy_n) - NS0 )) $(tail -1 "$WORK/ntfy.jsonl" | jq -r '.body' | head -c 12)" 'true 1 【测试】'
   kill "$PID_SM" "$PID_mockSM" 2>/dev/null
+  # --- daily limit UX: N left today, confirm, 3 ok then 429 daily_cap archived, wording
+  start_mock mockDL 18296 "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "http://127.0.0.1:18296/_mock/stats"
+  start_site DL 18297 "http://127.0.0.1:18296" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-DL" "RUYI_GRADE_MAX_PER_HOUR=200"; wait_http "http://127.0.0.1:18297/healthz"
+  ND0=$(ntfy_n)
+  BROWSER_FLOW=dailylimit BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18297" "$SHOTS" > "$WORK/browser9.out" 2>&1; BRC=$?
+  cat "$WORK/browser9.out" | tee -a "$RESULTS"
+  [ "$BRC" = 0 ] && ok "L10 daily-limit UX in headless Chrome: N left, confirm (cancel keeps the draft), 3 ok + 4th 429 daily_cap, rate_limited wording, 不入大脑 badge (all passed)" || bad "L10 daily-limit browser checks"
+  sleep 1.2
+  expect "L10b the browser run archived 3 graded + 2 refused (daily_cap) + 1 unsupported(graded mode) attempts, in that order" "$(jq -r '[.mode,.brain_note]|join("/")' "$WORK/att-DL/attempts.jsonl" | paste -sd' ')" 'graded/ graded/ graded/ archive_only/daily_cap archive_only/daily_cap graded/'
+  expect "L10c refused attempts recorded nothing in the brain (recorded:false on every item) and only the 4 non-refused ones were announced (3 + 1)" "$(jq -c 'select(.brain_note=="daily_cap")|[.items[].recorded]|any' "$WORK/att-DL/attempts.jsonl" | sort -u | paste -sd' ') $(( $(ntfy_n) - ND0 ))" 'false 4'
+  grep -qiE "$CODE|$TOKEN|$GTOKEN" "$WORK/DL.log" && bad "L10d secrets in the log of the daily-limit browser run" || ok "L10d no code/token in the log of the daily-limit browser run"
+  kill "$PID_DL" "$PID_mockDL" 2>/dev/null
 fi
 
 kill "$PID_P" 2>/dev/null

@@ -45,6 +45,8 @@ type gradeResult struct {
 	Recorded  bool  `json:"recorded"`
 	AttemptID int64 `json:"attempt_id,omitempty"`
 	Duplicate bool  `json:"duplicate,omitempty"`
+	// Capped: the brain named this question in a 429 daily_cap refusal.
+	Capped bool `json:"capped,omitempty"`
 }
 
 type gradeOut struct {
@@ -57,7 +59,7 @@ type gradeOut struct {
 	// RecordedCount says how many. The page says "submitted to the brain" only then.
 	BrainRecorded bool             `json:"brain_recorded"`
 	RecordedCount int              `json:"recorded_count"`
-	BrainNote     string           `json:"brain_note,omitempty"` // not_configured | not_ready | unavailable | not_sent
+	BrainNote     string           `json:"brain_note,omitempty"` // not_configured | not_ready | unavailable | not_sent | daily_cap
 	Results       []gradeResult    `json:"results"`
 	Summary       attempts.Summary `json:"summary"`
 	Archived      bool             `json:"archived"`
@@ -66,6 +68,10 @@ type gradeOut struct {
 	// Test is set for a local test set: archive_only, judged on the server,
 	// never recorded in the brain. Absent for real sets.
 	Test bool `json:"test,omitempty"`
+	// Error/Message are set only on the daily_cap outcome, which is answered
+	// with HTTP 429 and this full body (the attempt IS archived, see grade()).
+	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // ---- idempotency by client_attempt_id --------------------------------------
@@ -151,11 +157,26 @@ type gradeReq struct {
 
 const (
 	maxRev = 1_000_000_000
+	// noteDailyCap is the archive/response brain_note of a batch the brain refused with 429 daily_cap.
+	noteDailyCap = "daily_cap"
 )
+
+// isDailyCap tells the brain's "same question already written 3 times today"
+// 429 (code rate_limited, message "daily grade limit reached", details.qrefs)
+// from any other 429. Anything that does not look like it is NOT treated as
+// a daily cap (it is not archived and the page says so differently).
+func isDailyCap(be *brain.Error) bool {
+	return be != nil && be.Kind == brain.KindRateLimited && be.Code == "rate_limited" &&
+		(len(be.Qrefs) > 0 || strings.Contains(strings.ToLower(be.Message), "daily"))
+}
 
 // Page-facing messages for the brain's error replies.
 const (
-	msgDailyCap     = "今天这题提交次数到上限了（同一题每天最多记 3 次），明天再试。答案还在。"
+	// daily cap: the brain refused the whole batch (same question, 3 writes per
+	// Shanghai day). The attempt is archived by this site, not recorded in the brain.
+	msgDailyCap = "今天这题的次数已用完，已留档，未记入大脑。（每题每天只能提交 3 次，明天再提交才会记入大脑。）"
+	// any other brain 429 (a general rate limit): nothing archived, answers stay.
+	msgBrainBusy    = "大脑这会儿请求太多，这次没有提交成功。答案还在，过几分钟再点一次「提交」。"
 	msgRevMismatch  = "题目已更新，请刷新页面后再提交。你的答案还在。"
 	msgIdemConflict = "这次提交的编号和上一次对不上，请再点一次「提交」（会换新编号）。"
 	msgUnknownQref  = "有题目在大脑里找不到了，请刷新页面；还不行请告诉家长。"
@@ -484,7 +505,11 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		out := outFromRecord(e.rec)
 		out.Replayed = true
-		writeJSON(w, http.StatusOK, out)
+		status := http.StatusOK
+		if out.Error != "" { // a daily_cap outcome replays as it was answered (429, archived)
+			status = http.StatusTooManyRequests
+		}
+		writeJSON(w, status, out)
 		return
 	}
 	finished := false
@@ -525,6 +550,7 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 	verdict := map[string]gradeResult{}
 	var gresp *brain.GradeResponse
 	var gerr error
+	capped := map[string]bool{} // questions named in a 429 daily_cap refusal
 	switch {
 	case set.Local:
 		// a local test set NEVER calls the brain, whatever is configured
@@ -557,12 +583,25 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		if be != nil {
 			switch {
-			case be.Kind == brain.KindRateLimited:
-				s.Log.Warn("brain refused the batch: rate limited", "set", set.ID, "err", desc)
+			case isDailyCap(be):
+				// The whole batch was refused and nothing was written to the brain.
+				// The attempt is still archived below (archive_only, brain_note
+				// daily_cap, recorded:false), answered with 429 + the full body.
+				s.Log.Warn("brain refused the batch: daily cap", "set", set.ID, "err", desc)
 				if be.RetryAfter > 0 { // passed on as the brain gave it (seconds)
 					w.Header().Set("Retry-After", fmt.Sprint(int(be.RetryAfter/time.Second)))
 				}
-				writeErr(w, http.StatusTooManyRequests, "daily_cap", msgDailyCap)
+				note = noteDailyCap
+				for _, q := range be.Qrefs {
+					capped[q] = true
+				}
+			case be.Kind == brain.KindRateLimited:
+				// some other 429 (not "daily grade limit"): not archived, answers stay
+				s.Log.Warn("brain refused the batch: rate limited", "set", set.ID, "err", desc)
+				if be.RetryAfter > 0 {
+					w.Header().Set("Retry-After", fmt.Sprint(int(be.RetryAfter/time.Second)))
+				}
+				writeErr(w, http.StatusTooManyRequests, "brain_rate_limited", msgBrainBusy)
 				return
 			case be.Kind == brain.KindConflict && be.Code == "rev_mismatch":
 				s.Log.Warn("brain refused the batch: question revision changed", "set", set.ID, "err", desc)
@@ -581,7 +620,9 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 				note = "not_ready"
 			}
 		}
-		s.Log.Warn("grading unavailable; archive-only", "set", set.ID, "note", note, "err", desc)
+		if note != noteDailyCap {
+			s.Log.Warn("grading unavailable; archive-only", "set", set.ID, "note", note, "err", desc)
+		}
 	}
 
 	rec := &attempts.Record{
@@ -612,8 +653,9 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		default:
 			res = gradeResult{QRef: q, Status: brain.StatusPendingKey}
 		}
+		res.Capped = capped[q] && res.Status != statusUnanswer && res.Status != brain.StatusUnsupport
 		out.Results = append(out.Results, res)
-		it := attempts.Item{QRef: q, Status: res.Status, Correct: res.Correct, Recorded: res.Recorded, AttemptID: res.AttemptID, Duplicate: res.Duplicate, Rev: g.rev}
+		it := attempts.Item{QRef: q, Status: res.Status, Correct: res.Correct, Recorded: res.Recorded, AttemptID: res.AttemptID, Duplicate: res.Duplicate, Capped: res.Capped, Rev: g.rev}
 		if asked && g.ans != nil {
 			it.Answer = g.ans
 		}
@@ -642,16 +684,26 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 
 	rec.Archived = s.Attempts != nil && s.Attempts.Append(rec) == nil
 	out.Archived = rec.Archived
+	s.quotaT.add(rec) // the "N left today" estimate counts what the brain confirmed
 
 	// The parent notification is sent in the background (notify.go). It is
 	// started before the attempt is published to the idempotency store, which
 	// is finished right away, so a concurrent duplicate request is never held
 	// up by ntfy; only THIS response waits (at most ntfyRequestWait) to report
 	// how the first send went. A replay of this attempt never notifies again.
-	job, nstatus := s.startNotify(rec)
+	var job *notifyJob
+	nstatus := "off" // a daily_cap refusal is archived but, like before, not announced to the parent
+	if note != noteDailyCap {
+		job, nstatus = s.startNotify(rec)
+	}
 	s.idem.finish(e, rec)
 	finished = true
 	out.Notify = job.wait(nstatus, s.ntfyWait)
+	if note == noteDailyCap {
+		out.Error, out.Message = "daily_cap", msgDailyCap
+		writeJSON(w, http.StatusTooManyRequests, out)
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -674,12 +726,15 @@ func outFromRecord(r *attempts.Record) *gradeOut {
 		if r.V < 2 && r.Mode == modeGraded && it.Status != statusUnanswer && it.Status != brain.StatusUnsupport {
 			rec = true // v1 archives: "graded" meant the brain confirmed the whole attempt
 		}
-		out.Results = append(out.Results, gradeResult{QRef: it.QRef, Status: it.Status, Correct: it.Correct, Recorded: rec, AttemptID: it.AttemptID, Duplicate: it.Duplicate})
+		out.Results = append(out.Results, gradeResult{QRef: it.QRef, Status: it.Status, Correct: it.Correct, Recorded: rec, AttemptID: it.AttemptID, Duplicate: it.Duplicate, Capped: it.Capped})
 		if rec {
 			out.RecordedCount++
 		}
 	}
 	out.BrainRecorded = out.RecordedCount > 0
+	if r.BrainNote == noteDailyCap {
+		out.Error, out.Message = "daily_cap", msgDailyCap
+	}
 	return out
 }
 

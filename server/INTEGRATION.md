@@ -95,3 +95,7 @@ merge 之后的提交（都不改功能）：
 - 与 `ruyi-site-integ-linux-amd64` 的行为差异只有上表两项；没有新增环境变量（`RUYI_NTFY_RETRY_DELAY` 含义变为「第一次重试前的等待，第二次翻倍」）。
 - 验证：`gofmt`、`go vet`、`go test`、`CGO_ENABLED=1 go test -race`、`test/acceptance.sh`（`SHOTS=<dir>`，含无头 Chrome 页面检查）462 通过 / 0 失败。
 - 部署提示：关机时 `ruyi-site` 会再等最多 12 s 排空通知；systemd 默认 `TimeoutStopSec=90s` 足够。线上日志出现 `ntfy attempt failed … kind=… phase=… ms=…` 即可区分 TCP 卡住 / TLS 卡住 / 超时 / HTTP 状态码。
+
+## 后续（单 E，不属于上面的合并清单）
+
+`feat/daily-limit-ux`（基于 `release/integ-1017b` @ `29ff748`）：每题每天 3 次的页面提示 / 二次确认、大脑 429 `daily_cap` 也留档、`GET /api/practice/<set>/quota`、「（不入大脑）」文案。需换二进制并重启；无新环境变量。详见该 PR 与 `README.md`「大脑的拒绝映射」。

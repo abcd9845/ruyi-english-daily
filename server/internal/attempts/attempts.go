@@ -40,6 +40,9 @@ type Item struct {
 	Recorded  bool  `json:"recorded"`
 	AttemptID int64 `json:"attempt_id,omitempty"`
 	Duplicate bool  `json:"duplicate,omitempty"`
+	// Capped marks a question the brain named in a 429 daily_cap refusal (the
+	// whole batch was refused: nothing was written, Recorded is false).
+	Capped bool `json:"capped,omitempty"`
 }
 
 // Summary counts the verdicts.
@@ -68,7 +71,8 @@ type Record struct {
 	Source          string    `json:"source"`
 	SubmittedAt     time.Time `json:"submitted_at"`
 	Mode            string    `json:"mode"` // "graded" (the brain replied) or "archive_only"
-	// BrainNote says why the brain was not used: not_configured | not_ready | unavailable.
+	// BrainNote says why the brain was not used: not_configured | not_ready |
+	// unavailable | not_sent | test_set | daily_cap (the brain refused the batch: 429).
 	BrainNote string `json:"brain_note,omitempty"`
 	// Sig fingerprints the submitted answers (+revs), so the same
 	// client_attempt_id with different answers is refused, not silently replayed.

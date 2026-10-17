@@ -81,6 +81,7 @@ type Server struct {
 	gradeSess  *auth.Limiter
 	gradeIP    *auth.Limiter
 	idem       *idemStore
+	quotaT     *quotaTally
 	ntfyClient *http.Client
 
 	// background parent notifications (notify.go)
@@ -127,6 +128,7 @@ func New(d Deps) *Server {
 	s.gradeSess = auth.NewLimiter(s.GradeMaxPerHour, time.Hour, d.Now)
 	s.gradeIP = auth.NewLimiter(s.GradeMaxPerHour, time.Hour, d.Now)
 	s.idem = newIdemStore(d.Attempts)
+	s.quotaT = newQuotaTally(d.Attempts)
 	s.nstop = make(chan struct{})
 	s.notified = map[string]bool{}
 	s.ntfyTimeout, s.ntfyWait = d.NtfyAttemptTimeout, d.NtfyRequestWait
@@ -242,6 +244,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		case strings.HasSuffix(rest, "/check"):
 			id := strings.TrimSuffix(rest, "/check")
 			s.need(w, r, http.MethodPost, s.authed(func(w http.ResponseWriter, r *http.Request) { s.checkLocal(w, r, id) }))
+		case strings.HasSuffix(rest, "/quota"):
+			id := strings.TrimSuffix(rest, "/quota")
+			s.need(w, r, http.MethodGet, s.authed(func(w http.ResponseWriter, r *http.Request) { s.quota(w, r, id) }))
 		case strings.HasSuffix(rest, "/grade"):
 			id := strings.TrimSuffix(rest, "/grade")
 			s.need(w, r, http.MethodPost, s.authed(func(w http.ResponseWriter, r *http.Request) { s.grade(w, r, id) }))

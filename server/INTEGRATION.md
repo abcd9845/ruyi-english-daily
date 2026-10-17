@@ -81,3 +81,17 @@ merge 之后的提交（都不改功能）：
 `gofmt -l`（不含 vendor）无输出；`go vet ./...` 通过；`CGO_ENABLED=0 go test ./... -count=1` 全包通过；`CGO_ENABLED=1 go test -race ./... -count=1` 全包通过；`test/acceptance.sh`（带 SHOTS 与 headless Chrome、mockbrain）全过。另跑了集成专项断言：`/api/config` 的 `ntfy_url` 跟随 `RUYI_NTFY_BASE_URL`；本地套提交 0 次调大脑；`RUYI_BRAIN_ID=qa-practice` 时 grade body / pick 查询的 brain 正确、pick 用判分令牌；契约错误映射；对 main 新增行的公开库安全 grep。
 
 `2fa464f` 之后全部重跑并通过：gofmt、vet、`go test`、`-race`、acceptance（458 通过 / 0 失败，其中样例模板检查为 U4i–U4l 四条）。
+
+## 7. `release/integ-1017b`（= `release/integ-1017` + #18 + #19）
+
+`release/integ-1017` 本身未改动（head `ef90301`）。`release/integ-1017b` 从它起，依次 `--no-ff` 并入两个 PR，**无冲突**：
+
+| 顺序 | PR | 分支 | 并入时的 head | 内容 |
+|---|---|---|---|---|
+| 1 | #18 | `feat/answer-limit-2000` | `abd17c2` | 自由作答上限 500 → 2000 字符（Unicode 码点；`brain.MaxAnswerLen`） |
+| 2 | #19 | `feat/ntfy-async-concise` | `6f805e5` | 家长通知异步（提交最多等 1 s）、单次 10 s 超时、最多 3 次尝试、正文简洁、失败日志带类别与耗时、关机排空 12 s |
+
+- 二进制：`/workspace/ruyi-plan/dist/ruyi-site-integ1017b-linux-amd64`（+ `.sha256`），构建机上，不进仓库；构建参数同 §4，Go `go1.27.2`。**sha256 以 `.sha256` 文件与交付报告为准**（文中不写自身 hash）。
+- 与 `ruyi-site-integ-linux-amd64` 的行为差异只有上表两项；没有新增环境变量（`RUYI_NTFY_RETRY_DELAY` 含义变为「第一次重试前的等待，第二次翻倍」）。
+- 验证：`gofmt`、`go vet`、`go test`、`CGO_ENABLED=1 go test -race`、`test/acceptance.sh`（`SHOTS=<dir>`，含无头 Chrome 页面检查）462 通过 / 0 失败。
+- 部署提示：关机时 `ruyi-site` 会再等最多 12 s 排空通知；systemd 默认 `TimeoutStopSec=90s` 足够。线上日志出现 `ntfy attempt failed … kind=… phase=… ms=…` 即可区分 TCP 卡住 / TLS 卡住 / 超时 / HTTP 状态码。

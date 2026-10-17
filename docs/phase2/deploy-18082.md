@@ -12,6 +12,10 @@
 - 不用 root 跑新服务。
 - 本仓库是公开的：任何密钥、家庭码、令牌、服务器地址都不要贴到 Issue、PR、聊天里。
 
+> **⚠️ 注意：`ruyi` 用户和 `/etc/ruyi/ruyi.env` 属于如意大脑服务（ruyi.service），本站绝不使用、不修改、不读取；练习站进程拿不到大脑的数据库连接串和密钥。**
+>
+> 本站一律使用专用用户 `ruyi-site`、目录 `/etc/ruyi-site/` 与环境文件 `/etc/ruyi-site/ruyi-site.env`，不得复用大脑服务的用户或路径。
+
 ## 2. 已知现状（来自 ECS运维 核对）
 
 - 18081 是 root 启动的 `python3 -m http.server` 裸进程。
@@ -50,46 +54,48 @@ curl -sS -o /dev/null -w '%{http_code}\n' <BASE>/healthz
 
 ## 4. 创建用户与目录
 
-不要用 root 跑服务。创建专用低权限用户 `ruyi`。
+不要用 root 跑服务。创建专用低权限用户 `ruyi-site`（与大脑服务的用户完全隔离，见上方注意事项）。
 
 ```bash
 # 专用用户，不可登录，无家目录
-useradd --system --shell /sbin/nologin --no-create-home ruyi
+useradd --system --shell /sbin/nologin --no-create-home ruyi-site
 
-# 二进制目录（属主 root，ruyi 只读执行）
+# 二进制目录（属主 root，ruyi-site 只读执行）
 mkdir -p /opt/ruyi-site
 chown root:root /opt/ruyi-site
 chmod 755 /opt/ruyi-site
 
-# 配置目录
-mkdir -p /etc/ruyi
-chown root:root /etc/ruyi
-chmod 750 /etc/ruyi
+# 配置目录（仅 root 可进入；服务进程不需要读取）
+mkdir -p /etc/ruyi-site
+chown root:root /etc/ruyi-site
+chmod 750 /etc/ruyi-site
 
 # 日志目录
 mkdir -p /var/log/ruyi-site
-chown ruyi:ruyi /var/log/ruyi-site
+chown ruyi-site:ruyi-site /var/log/ruyi-site
 chmod 750 /var/log/ruyi-site
 ```
 
 静态目录 `RUYI_STATIC_DIR`（默认 `/opt/ruyi-english-daily`）：
 
-- 属主是 root 也可以，但 `ruyi` 用户必须可读：目录 755，文件 644。
+- 属主是 root 也可以，但 `ruyi-site` 用户必须可读：目录 755，文件 644。
 - 服务只读该目录，不会写入。
 
 ```bash
-# 检查 ruyi 用户能否读取
-sudo -u ruyi ls /opt/ruyi-english-daily >/dev/null && echo readable
+# 检查 ruyi-site 用户能否读取
+sudo -u ruyi-site ls /opt/ruyi-english-daily >/dev/null && echo readable
 ```
 
-## 5. 环境文件 /etc/ruyi/ruyi.env
+## 5. 环境文件 /etc/ruyi-site/ruyi-site.env
 
-权限 600。属主 root 或 ruyi 均可（systemd 以 root 读取 `EnvironmentFile`，root 属主最稳妥）。
+属主 root:root，权限 600；所在目录 `/etc/ruyi-site` 权限 750。
+
+systemd 以 root 读取 `EnvironmentFile`，再把变量注入服务进程；`ruyi-site` 服务进程**不需要**也不应直接读取该文件，因此不要把文件属主改成 `ruyi-site`，也不要给其他用户/组读权限。
 
 ```bash
-touch /etc/ruyi/ruyi.env
-chown root:root /etc/ruyi/ruyi.env
-chmod 600 /etc/ruyi/ruyi.env
+touch /etc/ruyi-site/ruyi-site.env
+chown root:root /etc/ruyi-site/ruyi-site.env
+chmod 600 /etc/ruyi-site/ruyi-site.env
 ```
 
 模板如下。尖括号内是占位符，请替换为真实值，且不要把真实值贴到任何聊天或 Issue 里。
@@ -133,9 +139,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=ruyi
-Group=ruyi
-EnvironmentFile=/etc/ruyi/ruyi.env
+User=ruyi-site
+Group=ruyi-site
+EnvironmentFile=/etc/ruyi-site/ruyi-site.env
 ExecStart=/opt/ruyi-site/ruyi-site
 Restart=on-failure
 RestartSec=3
@@ -194,7 +200,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18081/
 
 再确认：
 
-- `ss -ltnp | grep -E '18081|18082'` 能看到两个监听，且 18082 的进程是 `ruyi` 用户。
+- `ss -ltnp | grep -E '18081|18082'` 能看到两个监听，且 18082 的进程是 `ruyi-site` 用户。
 - `journalctl -u ruyi-site` 里没有令牌、Cookie、家庭码。
 
 ## 8. 回滚

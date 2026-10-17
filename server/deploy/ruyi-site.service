@@ -1,0 +1,31 @@
+# /etc/systemd/system/ruyi-site.service
+# Practice site, phase 2 (trial on 18082). Written for systemd 219 (CentOS 7):
+# only directives that exist in 219 are used. See docs/phase2/deploy-18082.md.
+[Unit]
+Description=Ruyi English Daily site (phase 2)
+After=network.target
+
+[Service]
+Type=simple
+User=ruyi-site
+Group=ruyi-site
+# Read by systemd (root) and injected into the service; the service user cannot read it.
+EnvironmentFile=/etc/ruyi-site/ruyi-site.env
+ExecStart=/opt/ruyi-site/ruyi-site
+Restart=on-failure
+RestartSec=3
+SyslogIdentifier=ruyi-site
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/ruyi-english-daily
+ReadWritePaths=/var/log/ruyi-site
+CapabilityBoundingSet=
+LimitNOFILE=4096
+# SIGTERM -> graceful shutdown (10 s inside the program); give it a bit more.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

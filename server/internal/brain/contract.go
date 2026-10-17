@@ -101,8 +101,9 @@ func (c *Client) id() string {
 	return c.brainID
 }
 
-// doJSON reads a bounded JSON reply; any non-200 becomes a classified Error.
-func (c *Client) doJSON(ctx context.Context, method, rawURL string, body []byte, limit int64) ([]byte, error) {
+// doJSON reads a bounded JSON reply (tok is the bearer token: the read token for lookup, the
+// grade token for pick-practice); any non-200 becomes a classified Error.
+func (c *Client) doJSON(ctx context.Context, tok, method, rawURL string, body []byte, limit int64) ([]byte, error) {
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)
@@ -111,7 +112,7 @@ func (c *Client) doJSON(ctx context.Context, method, rawURL string, body []byte,
 	if err != nil {
 		return nil, &Error{Kind: KindUnavailable, What: "bad upstream request"}
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token) // read token only
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "ruyi-site/1")
 	if body != nil {
@@ -178,7 +179,7 @@ func (c *Client) LookupByQrefs(ctx context.Context, source string, qrefs []strin
 		chunk := sent[i:min(i+MaxLookupQrefs, len(sent))]
 		body, _ := json.Marshal(map[string]any{"qrefs": chunk})
 		cctx, cancel := context.WithTimeout(ctx, lookupTimeout)
-		b, err := c.doJSON(cctx, http.MethodPost, c.endpoint(path, nil), body, MaxListBytes)
+		b, err := c.doJSON(cctx, c.token, http.MethodPost, c.endpoint(path, nil), body, MaxListBytes)
 		cancel()
 		if err != nil {
 			if notDeployedAny(err) {
@@ -276,7 +277,7 @@ func (c *Client) ProbeLookup(ctx context.Context) (deployed bool, err error) {
 	body, _ := json.Marshal(map[string]any{"qrefs": []string{probeQRef}})
 	cctx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
-	b, err := c.doJSON(cctx, http.MethodPost, c.endpoint(path, nil), body, MaxListBytes)
+	b, err := c.doJSON(cctx, c.token, http.MethodPost, c.endpoint(path, nil), body, MaxListBytes)
 	if err != nil {
 		if notDeployedAny(err) {
 			c.mu.Lock()
@@ -310,11 +311,16 @@ func (c *Client) pick(ctx context.Context, source string, n int, o SelectOpts) (
 	if path == "" {
 		path = DefaultPickPath
 	}
+	// The contract wants the target brain's "write" scope for pick-practice, which the
+	// bank:read token does not have: it is sent with the grade token (never the read token).
+	if c.gradeToken == "" {
+		return nil, ErrPickNoToken
+	}
 	n = max(1, min(n, MaxPickN)) // contract: n is 1..10
 	q := url.Values{"source": {source}, "n": {strconv.Itoa(n)}, "mode": {o.Mode}, "brain": {c.id()}}
 	ctx, cancel := context.WithTimeout(ctx, pickTimeout)
 	defer cancel()
-	b, err := c.doJSON(ctx, http.MethodGet, c.endpoint(path, q), nil, maxPickBytes)
+	b, err := c.doJSON(ctx, c.gradeToken, http.MethodGet, c.endpoint(path, q), nil, maxPickBytes)
 	if err != nil {
 		if NotReady(err) {
 			return nil, ErrUnsupported

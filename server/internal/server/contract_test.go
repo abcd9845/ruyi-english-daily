@@ -353,8 +353,8 @@ func TestContractPickPracticeModes(t *testing.T) {
 	if q.Get("source") != practiceSrc || q.Get("n") != "6" || q.Get("mode") != "due_first" || q.Get("brain") != "ruyi" || len(q) != 4 {
 		t.Errorf("pick query: %v", q)
 	}
-	if e.brain.pickAuths[0] != "Bearer "+e.brain.token {
-		t.Error("pick-practice must use the read token")
+	if e.brain.pickAuths[0] != "Bearer "+e.brain.gradeToken {
+		t.Error("pick-practice must use the grade token (the brain's write scope), not the read token")
 	}
 	_, p, _ := getPractice(t, e, ck, a.SetID)
 	// the brain's duplicate (math:2 twice) is dropped; the order of the brain is kept
@@ -471,11 +471,11 @@ func TestContractTokensNeverLeak(t *testing.T) {
 		}
 	}
 	for _, a := range e.brain.pickAuths {
-		if a != "Bearer "+e.brain.token {
-			t.Errorf("pick call with a non-read token")
+		if a != "Bearer "+e.brain.gradeToken {
+			t.Errorf("pick call with a non-grade token")
 		}
 	}
-	if e.brain.gradeBank != 0 || len(e.brain.gradeAuths) == 0 || len(e.brain.pickAuths) == 0 {
+	if e.brain.pickBank != 0 || e.brain.gradeBank != 0 || len(e.brain.gradeAuths) == 0 || len(e.brain.pickAuths) == 0 {
 		t.Errorf("grade calls with the read token: %d (calls %d/%d)", e.brain.gradeBank, len(e.brain.gradeAuths), len(e.brain.pickAuths))
 	}
 }

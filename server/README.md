@@ -57,15 +57,16 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 | `RUYI_COOKIE_SECURE` | 否 | `0`（默认）/`1`。http 下必须 0 |
 | `RUYI_BRAIN_BASE_URL` | 是 | 如 `scheme://host:port`，不含路径尾斜杠/query |
 | `RUYI_BRAIN_TOKEN` | 是 | `bank:read` 令牌 |
+| `RUYI_BRAIN_ID` | 否 | 发给大脑 `grade` 请求体 `brain` 和 `pick-practice` 查询串 `brain` 的练习脑 id，默认（不设）`ruyi`；格式 `^[a-z0-9][a-z0-9_-]{0,63}$`，不合规启动即退出（只报变量名）。用途：联调时指向测试脑（如 `qa-practice`）。**两枚令牌（`RUYI_BRAIN_TOKEN` 读、`RUYI_BRAIN_GRADE_TOKEN` 判分/选题）的 scope 必须与它匹配**，否则大脑会拒绝。`lookup`（取题文）本身不带 brain 参数。站点自己的 URL 上多带的 `brain=` 一律忽略 |
 | `RUYI_BRAIN_INSECURE_TLS` | 否 | `1` = 对大脑跳过证书校验。**仅当大脑地址是回环（127.0.0.1/::1/localhost）且为 https 时允许**，否则启动报错 |
 | `RUYI_BRAIN_CA_FILE` | 否 | 指定信任的 CA/证书 PEM（`ruyi-site` 用户须可读）。与 INSECURE 二选一，同时设置报错 |
 | `RUYI_LOG_LEVEL` | 否 | `debug`/`info`（默认）/`warn`/`error` |
 | `RUYI_NTFY_TOPIC` | 否 | 动态页提交用的 ntfy topic，登录后由 `/api/config` 下发；未设则按钮显示「提交通道未配置」 |
 | `RUYI_ALLOWED_SOURCES` | 否 | 逗号分隔的 source 白名单 |
-| `RUYI_BRAIN_GRADE_TOKEN` | 否 | **练习站令牌**，只在服务端、只用于 `POST /v1/bank/grade`（读题仍用 `RUYI_BRAIN_TOKEN`）。大脑侧要给它「读题库 + 只写 ruyi 一个脑」的范围；**scope 名由大脑定，本站不写死**（以后可能换成更窄的 `bank:grade`，换令牌即可，代码不用改）。**不能等于 `RUYI_BRAIN_TOKEN`**（启动即校验，报错只写变量名）。空 = 不判分，提交走降级（只归档 + 提醒）。令牌绝不下发浏览器、不入归档、不进日志/响应/ntfy |
+| `RUYI_BRAIN_GRADE_TOKEN` | 否 | **练习站令牌**，只在服务端，用于 `POST /v1/bank/grade` 以及 `GET /v1/brain/pick-practice`（读题/lookup/列表/媒体仍用 `RUYI_BRAIN_TOKEN`）。契约要目标练习脑的 write 权限，`bank:read` 令牌调它是 403）。**要用 `mode=due_first|wrong_only` 选题就必须配判分令牌**；没配 → 选题返回 501 `due_first_unavailable`/`wrong_only_unavailable`「大脑接口未就绪（选题需要配置判分令牌）」，**不会**偷偷改用读令牌；令牌被大脑 403 拒 → 502 `pick_forbidden`「选题令牌无权限」。大脑侧要给它「读题库 + 只写 ruyi 一个脑」的范围；**scope 名由大脑定，本站不写死**（以后可能换成更窄的 `bank:grade`，换令牌即可，代码不用改）。**不能等于 `RUYI_BRAIN_TOKEN`**（启动即校验，报错只写变量名）。空 = 不判分，提交走降级（只归档 + 提醒）。令牌绝不下发浏览器、不入归档、不进日志/响应/ntfy |
 | `RUYI_BRAIN_GRADE_PATH` | 否 | 判分接口路径，默认 `/v1/bank/grade`（契约见 `internal/brain/grade.go`） |
 | `RUYI_BRAIN_LOOKUP_PATH` | 否 | 按 qref 取题文，默认 `/v1/bank/questions/lookup`（用读令牌） |
-| `RUYI_BRAIN_PICK_PATH` | 否 | 选题接口，默认 `/v1/brain/pick-practice`（用读令牌） |
+| `RUYI_BRAIN_PICK_PATH` | 否 | 选题接口，默认 `/v1/brain/pick-practice`（用判分令牌 `RUYI_BRAIN_GRADE_TOKEN`） |
 | `RUYI_PICK_SKIP_DEFERRED` | 否 | `0`（默认）/`1`。选题结果里带 `deferred:*` 的题（参考答案待核/不支持题型/缺图）：`0` = 保留并在页面标「参考答案待核，不自动判」；`1` = 直接跳过 |
 | `RUYI_ATTEMPTS_DIR` | 否 | 作答归档目录，默认 `/var/lib/ruyi-site/attempts`（0700，文件 0600） |
 | `RUYI_GRADE_MAX_PER_HOUR` | 否 | 每套每小时提交上限（会话与 IP 各限），默认 5，范围 1–1000 |
@@ -85,6 +86,8 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 一套题 = 一个页面：`/m/practice/?set=<id>`，题目由 `RUYI_SETS_FILE` 配置，公式用本地 KaTeX 渲染。P0 只作答并把草稿存在本机；**提交 / 判分 / 归档 / 提醒见下一节（P1–P3）**。
 
 套配置（样例 `deploy/sets.example.json`，只有占位 qref；真实套的 qref 只放在部署环境的文件里，不进仓库）：
+
+联调用的另一份样例 `deploy/sets.qa-practice.example.json`（**联调用，非线上**）：只含大脑测试库的标识（套 `qa-practice-1/2/alt`），配合 `RUYI_BRAIN_ID=qa-practice` 使用；题目都是 pending_key，只验提交 / 落库 / 幂等 / 每日 3 次上限，不验判对错；`qa-practice` 的选题预期返回空。不要用于线上。
 
 ```json
 {"sets":[{"id":"demo-1","title":"示例套","source":"<大脑 source key>","qrefs":["<qref>","<qref>"]}]}

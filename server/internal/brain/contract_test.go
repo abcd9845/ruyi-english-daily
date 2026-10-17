@@ -123,7 +123,7 @@ func TestPickPracticeWireAndParsing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotAuth != "Bearer read-tok" || gotPath != DefaultPickPath || len(q) != 4 || q["source"][0] != "s.x" || q["n"][0] != "10" || q["mode"][0] != "wrong_only" || q["brain"][0] != "ruyi" {
+	if gotAuth != "Bearer grade-tok" || gotPath != DefaultPickPath || len(q) != 4 || q["source"][0] != "s.x" || q["n"][0] != "10" || q["mode"][0] != "wrong_only" || q["brain"][0] != "ruyi" {
 		t.Errorf("auth=%q path=%q q=%v", gotAuth, gotPath, q)
 	}
 	if picks(got) != "a,b,c,d" {
@@ -187,5 +187,47 @@ func TestCustomLookupAndPickPaths(t *testing.T) {
 	_, _ = c.SelectForPractice(context.Background(), "s.x", 1, SelectOpts{Mode: ModeDueFirst})
 	if strings.Join(paths, ",") != "/x/lookup,/x/pick" {
 		t.Errorf("%v", paths)
+	}
+}
+
+// pick-practice needs the brain's write scope: it is sent with the grade token, never the read token;
+// lookup keeps the read token.
+func TestPickUsesGradeTokenAndLookupUsesReadToken(t *testing.T) {
+	var auths []string
+	c := gradeClient(t, func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Method+" "+r.Header.Get("Authorization"))
+		if r.Method == "POST" {
+			reply(w, "application/json", `{"items":[],"missing":["a"]}`)
+			return
+		}
+		reply(w, "application/json", `{"items":[]}`)
+	}, "grade-tok", "")
+	_, _, _ = c.LookupByQrefs(context.Background(), "s.x", []string{"a"})
+	_, _ = c.SelectForPractice(context.Background(), "s.x", 1, SelectOpts{Mode: ModeDueFirst})
+	if strings.Join(auths, "|") != "POST Bearer read-tok|GET Bearer grade-tok" {
+		t.Errorf("%v", auths)
+	}
+}
+
+func TestPickWithoutGradeTokenSendsNothing(t *testing.T) {
+	calls := 0
+	c := gradeClient(t, func(w http.ResponseWriter, r *http.Request) { calls++; reply(w, "application/json", `{"items":[]}`) }, "", "")
+	for _, m := range []string{ModeDueFirst, ModeWrongOnly} {
+		_, err := c.SelectForPractice(context.Background(), "s.x", 3, SelectOpts{Mode: m})
+		if !errors.Is(err, ErrPickNoToken) || errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: %v", m, err)
+		}
+	}
+	if calls != 0 {
+		t.Errorf("the brain received %d requests (the read token must never be used for pick)", calls)
+	}
+}
+
+func TestPick403IsAnAuthError(t *testing.T) {
+	c := gradeClient(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) }, "g", "")
+	_, err := c.SelectForPractice(context.Background(), "s.x", 3, SelectOpts{Mode: ModeDueFirst})
+	var be *Error
+	if !errors.As(err, &be) || be.Kind != KindAuth || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrPickNoToken) {
+		t.Errorf("%v", err)
 	}
 }

@@ -1,0 +1,32 @@
+{
+  "sets": [
+    {
+      "id": "qa-practice-1",
+      "title": "联调1（联调用，非线上）",
+      "source": "math-intake.bsd-g7a-err",
+      "qrefs": [
+        "bsd-g7a-err.ch4.q7",
+        "bsd-g7a-err.ch4.q6"
+      ]
+    },
+    {
+      "id": "qa-practice-2",
+      "title": "联调2（联调用，非线上）",
+      "source": "en.exam.tj-ernankai.7a.yuekao1",
+      "qrefs": [
+        "en.exam.tj-ernankai.7a.yuekao1:english:54",
+        "en.exam.tj-ernankai.7a.yuekao1:english:53"
+      ]
+    },
+    {
+      "id": "qa-practice-alt",
+      "title": "联调备选（联调用，非线上）",
+      "source": "gen.chatgpt.2026-10-14.busy-sunday",
+      "qrefs": [
+        "gen.chatgpt.2026-10-14.busy-sunday:english:busy-sunday-1",
+        "gen.chatgpt.2026-10-14.busy-sunday:english:busy-sunday-2",
+        "gen.chatgpt.2026-10-14.busy-sunday:english:busy-sunday-3"
+      ]
+    }
+  ]
+}

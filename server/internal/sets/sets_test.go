@@ -139,6 +139,32 @@ func TestExampleFileParses(t *testing.T) {
 	}
 }
 
+// The integration-testing sets file (qa-practice; "联调用，非线上") loads through the real validation.
+func TestQAPracticeExampleFileParses(t *testing.T) {
+	b, err := os.ReadFile("../../deploy/sets.qa-practice.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := parse(string(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Len() != 3 {
+		t.Fatalf("sets: %d", r.Len())
+	}
+	for _, id := range []string{"qa-practice-1", "qa-practice-2", "qa-practice-alt"} {
+		s, _ := r.Get(id)
+		if s == nil || len(s.QRefs) < 2 || !strings.Contains(s.Title, "联调用，非线上") {
+			t.Errorf("%s: %+v", id, s)
+		}
+		for _, q := range s.QRefs {
+			if q != strings.ToLower(q) {
+				t.Errorf("%s: qref not lowercase: %s", id, q)
+			}
+		}
+	}
+}
+
 func TestValidID(t *testing.T) {
 	for id, want := range map[string]bool{"a": true, "a-b_c9": true, "": false, "A": false, "a b": false, "a.b": false, strings.Repeat("z", 64): true, strings.Repeat("z", 65): false} {
 		if sets.ValidID(id) != want {

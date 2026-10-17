@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex" />
+<title>如意 · 练习</title>
+<link rel="stylesheet" href="/vendor/katex/katex.min.css" />
+<style>
+:root{--bg:#f6f3ee;--card:#fff;--ink:#1c1917;--muted:#78716c;--accent:#0f766e;--accent-soft:#ccfbf1;--line:#d6d3d1;--warn:#b45309;--ok:#15803d;--bad:#b91c1c;--radius:16px;--shadow:0 8px 24px rgba(28,25,23,.06)}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;padding:14px 14px 96px;font-size:18px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans SC",sans-serif;background:radial-gradient(1200px 600px at 10% -10%,#d1fae5 0%,transparent 50%),radial-gradient(900px 500px at 100% 0%,#fde68a 0%,transparent 45%),var(--bg);color:var(--ink);line-height:1.65}
+.wrap{max-width:820px;margin:0 auto}
+header,.card{background:var(--card);border-radius:var(--radius);padding:20px 20px;box-shadow:var(--shadow);margin-bottom:14px}
+h1{font-size:1.3rem;margin:0 0 6px;line-height:1.35}
+.meta{color:var(--muted);font-size:.9rem}
+.pill{display:inline-block;background:var(--accent-soft);color:var(--accent);font-size:.8rem;font-weight:600;padding:3px 10px;border-radius:999px;margin-left:8px;vertical-align:middle}
+.bar{height:8px;background:var(--line);border-radius:999px;overflow:hidden;margin-top:12px}
+.bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#14b8a6,#0f766e);transition:width .2s}
+.qno{font-weight:700;color:var(--accent);margin:0 0 8px}
+.stem{word-break:break-word;margin:0 0 14px}
+.stem p{margin:0 0 .7em}.stem p:last-child{margin-bottom:0}
+.stem code,.opt code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f5f5f4;border-radius:6px;padding:1px 5px;font-size:.92em}
+.tex.disp{display:block;margin:.5em 0;overflow-x:auto;overflow-y:hidden;max-width:100%}
+.tex.raw{font-family:ui-monospace,Menlo,Consolas,monospace;color:#57534e;background:#f5f5f4;border-radius:6px;padding:1px 5px;font-size:.92em}
+.fig{margin:8px 0 14px}
+.fig img{display:block;max-width:100%;height:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
+.fig.optfig{margin:4px 0 4px 34px}
+.noimg{display:flex;align-items:center;justify-content:center;min-height:84px;background:#e7e5e4;color:#57534e;border-radius:12px;font-size:.92rem;font-weight:600;margin:8px 0 14px;text-align:center;padding:8px}
+.opt{display:flex;gap:10px;align-items:flex-start;min-height:48px;padding:10px 12px;border:1.5px solid var(--line);border-radius:12px;margin:8px 0 0;background:#fafaf9;cursor:pointer}
+.opt input{margin-top:.3em;width:22px;height:22px;flex:none}
+.opt .k{font-weight:700;color:var(--accent);flex:none;min-width:1.3em}
+.opt .t{word-break:break-word;min-width:0}
+.opt.sel{border-color:var(--accent);background:#f0fdfa}
+input.blank{display:inline-block;vertical-align:baseline;width:9em;max-width:100%;min-height:46px;margin:4px 6px;border:0;border-bottom:2.5px solid var(--accent);border-radius:8px 8px 0 0;padding:8px 12px;font-size:18px;font-family:inherit;background:#f0fdfa;color:var(--ink)}
+input.blank:focus{outline:none;background:#e6fffa;border-bottom-color:#0b5d56}
+textarea.ans{display:block;width:100%;min-height:9em;margin-top:6px;border:1.5px solid var(--line);border-radius:12px;padding:14px 16px;font-size:18px;line-height:1.6;font-family:inherit;background:#fafaf9;resize:vertical}
+textarea.ans:focus,#gateInput:focus{outline:none;border-color:var(--accent);background:#fff}
+.anslabel{font-size:.85rem;color:var(--muted);margin:10px 0 0}
+#gateInput{width:100%;border:1.5px solid var(--line);border-radius:12px;padding:12px 14px;min-height:48px;font-size:18px;font-family:inherit;background:#fafaf9}
+button{appearance:none;border:none;border-radius:999px;padding:12px 18px;min-height:46px;font-size:1rem;font-weight:600;cursor:pointer;font-family:inherit}
+button:disabled{opacity:.55;cursor:not-allowed}
+.btn-primary{background:var(--accent);color:#fff}.btn-ghost{background:#f5f5f4;color:var(--ink)}.btn-submit{background:#b45309;color:#fff}
+.sticky{position:fixed;left:0;right:0;bottom:0;padding:8px 12px calc(8px + env(safe-area-inset-bottom));display:flex;gap:10px;justify-content:center;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);border-top:1px solid var(--line);z-index:5}
+.sticky button{flex:1;min-width:96px;max-width:220px}
+.msg{margin-top:8px;font-size:.9rem}.bad{color:var(--bad)}.soft{color:var(--muted)}
+.notice{background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:14px 16px;font-size:.95rem;color:#9a3412}
+.notice button{margin-left:10px}
+#gate{position:fixed;inset:0;background:var(--bg);z-index:50;display:none;align-items:center;justify-content:center;padding:20px}
+#gate .box{background:#fff;border-radius:16px;padding:22px;max-width:380px;width:100%;box-shadow:0 8px 24px rgba(0,0,0,.08)}
+#gate h2{margin:0 0 8px;font-size:1.2rem}
+a{color:var(--accent)}
+.submitcard{text-align:center}
+.submitcard button{width:100%;max-width:340px}
+footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
+@media (max-width:480px){body{padding:10px 10px 96px}header,.card{padding:16px 14px}input.blank{width:7.5em}}
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <form class="box" id="gateForm" autocomplete="off">
+    <h2>家庭专用</h2>
+    <p class="meta" style="margin:0 0 12px">输入家庭码后才能查看练习。</p>
+    <input id="gateInput" type="password" placeholder="家庭码" autocomplete="off" autocapitalize="off" aria-label="家庭码" />
+    <button id="gateBtn" type="submit" class="btn-primary" style="margin-top:12px;width:100%">进入</button>
+    <p id="gateErr" class="msg bad" style="min-height:1.3em"></p>
+  </form>
+</div>
+
+<div class="wrap">
+  <header>
+    <h1><span id="title">练习</span><span class="pill" id="countPill">加载中</span></h1>
+    <div class="meta">作答区在每题下方 · 草稿自动保存在本机</div>
+    <div class="bar"><i id="bar"></i></div>
+    <div class="meta" id="savedHint" style="margin-top:8px"></div>
+  </header>
+  <div id="status"></div>
+  <div id="qs"></div>
+  <div class="card submitcard" id="submitCard" style="display:none">
+    <button type="button" class="btn-submit" id="btnSubmit" disabled>提交（即将开放）</button>
+    <p class="meta" style="margin:10px 0 0">本期仅作答和保存草稿；还不能提交，也不会显示对错。</p>
+  </div>
+  <p class="meta"><a href="/">每日一练</a></p>
+  <footer>如意 · 练习站</footer>
+</div>
+
+<div class="sticky" id="actions" style="display:none">
+  <button type="button" class="btn-ghost" id="btnClear">清空</button>
+  <button type="button" class="btn-ghost" id="btnLogout">退出</button>
+</div>
+
+<script src="/vendor/katex/katex.min.js"></script>
+<script>
+(function(){
+'use strict';
+var SET_ID=null, DRAFT_KEY=null;
+var $=function(id){return document.getElementById(id);};
+var items=[], answers={}, saveTimer=null;
+
+function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e;}
+function setStatus(text,retry){
+  var s=$('status'); s.innerHTML='';
+  if(!text) return;
+  var d=el('div','card notice',text);
+  if(retry){var b=el('button','btn-primary','重试');b.onclick=retry;d.appendChild(b);}
+  s.appendChild(d);
+}
+function showGate(msg){
+  $('gate').style.display='flex'; $('actions').style.display='none';
+  $('gateErr').textContent=msg||''; $('gateInput').value=''; setTimeout(function(){$('gateInput').focus();},50);
+}
+function hideGate(){ $('gate').style.display='none'; }
+
+// ---- api (the family code is only ever sent to /api/login, never stored) ------
+function api(method,path,body){
+  var opt={method:method,credentials:'same-origin',headers:{}};
+  if(body!==undefined){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(body);}
+  return fetch(path,opt).then(function(r){
+    return r.text().then(function(t){
+      var j=null; try{ j=JSON.parse(t); }catch(e){}
+      return {status:r.status,json:j};
+    });
+  });
+}
+
+// ---- text: math tokenizer (twin of internal/practice/blanks.go Segments) ------
+// Math: $$…$$  $…$  \(…\)  \[…\]. "\$" is a literal dollar; an opener with no
+// closer is plain text; empty fragments are not math.
+function segments(s){
+  var out=[], plain='', i=0;
+  function flush(){ if(plain){ out.push({t:plain}); plain=''; } }
+  function closeInline(rest){
+    for(var k=0;k<rest.length;k++){
+      if(rest[k]==='\\'){ k++; continue; }
+      if(rest[k]==='$') return k;
+    }
+    return -1;
+  }
+  while(i<s.length){
+    var c=s[i];
+    if(c==='\\' && i+1<s.length){
+      var n=s[i+1];
+      if(n==='$'){ plain+='\\$'; i+=2; continue; }
+      if(n==='(' || n==='['){
+        var close = n==='(' ? '\\)' : '\\]';
+        var j=s.indexOf(close,i+2);
+        if(j>i+2){ flush(); out.push({m:true,tex:s.slice(i+2,j),disp:n==='['}); i=j+2; continue; }
+      }
+      plain+=c+n; i+=2; continue;
+    }
+    if(c==='$'){
+      if(s.substr(i,2)==='$$'){
+        var j2=s.indexOf('$$',i+2);
+        if(j2>i+2){ flush(); out.push({m:true,tex:s.slice(i+2,j2),disp:true}); i=j2+2; continue; }
+        plain+='$$'; i+=2; continue;
+      }
+      var k=closeInline(s.slice(i+1));
+      if(k>0){ flush(); out.push({m:true,tex:s.substr(i+1,k),disp:false}); i+=1+k+1; continue; }
+    }
+    plain+=c; i++;
+  }
+  flush();
+  return out;
+}
+
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+// Minimal safe Markdown: HTML is escaped first; math is cut out before that and
+// put back as empty .tex spans (filled in by katex afterwards); then
+// `code`, **bold**, paragraphs and line breaks. Runs of >=4 underscores outside
+// math become fill-in boxes (<input class="blank">).
+// Returns {html, maths:[{tex,disp}], blanks:n}.
+function renderMD(src,inline){
+  src=String(src==null?'':src).replace(/[\uE000-\uE0FF]/g,'');
+  var maths=[], codes=[], blanks=0, buf='';
+  segments(src).forEach(function(sg){
+    if(sg.m){ buf+='\uE001'+maths.length+'\uE002'; maths.push({tex:sg.tex,disp:sg.disp}); return; }
+    var t=sg.t.replace(/\\\$/g,'$');
+    var parts=t.split(/[_\uFF3F]{4,}/);
+    var runs=t.match(/[_\uFF3F]{4,}/g)||[];
+    parts.forEach(function(p,ix){ buf+=p; if(ix<runs.length){ buf+='\uE000'; } });
+  });
+  buf=esc(buf);
+  buf=buf.replace(/`([^`\n]+)`/g,function(_,c){ codes.push(c); return '\uE003'+(codes.length-1)+'\uE004'; });
+  buf=buf.replace(/\*\*([^*\n]+?)\*\*/g,'<strong>$1</strong>');
+  var html;
+  if(inline){ html=buf.replace(/\r?\n/g,'<br>'); }
+  else{
+    html=buf.split(/\n{2,}/).map(function(p){ return '<p>'+p.replace(/\r?\n/g,'<br>')+'</p>'; }).join('');
+  }
+  html=html.replace(/\uE003(\d+)\uE004/g,function(_,i){ return '<code>'+codes[+i]+'</code>'; });
+  html=html.replace(/\uE000/g,function(){
+    var n=blanks++;
+    return '<input type="text" class="blank" data-b="'+n+'" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="第 '+(n+1)+' 空">';
+  });
+  html=html.replace(/\uE001(\d+)\uE002/g,function(_,i){
+    return '<span class="tex'+(maths[+i].disp?' disp':'')+'" data-k="'+i+'"></span>';
+  });
+  return {html:html,maths:maths,blanks:blanks};
+}
+
+// Fill the .tex spans with katex output; if katex is missing or rejects the
+// formula, show the original text instead.
+function typeset(root,maths){
+  root.querySelectorAll('.tex[data-k]').forEach(function(sp){
+    var m=maths[+sp.getAttribute('data-k')]; if(!m) return;
+    var ok=false;
+    if(typeof katex!=='undefined'){
+      try{
+        katex.render(m.tex,sp,{displayMode:!!m.disp,throwOnError:false,trust:false,strict:'ignore',output:'htmlAndMathml',maxExpand:1000});
+        ok=!sp.querySelector('.katex-error');
+      }catch(e){ ok=false; }
+    }
+    if(!ok){
+      sp.textContent=(m.disp?'$$':'$')+m.tex+(m.disp?'$$':'$');
+      sp.className='tex raw'+(m.disp?' disp':'');
+    }
+  });
+}
+
+function mdInto(node,src,inline){
+  var r=renderMD(src,inline);
+  node.innerHTML=r.html;
+  typeset(node,r.maths);
+  return r;
+}
+
+// ---- start ------------------------------------------------------------------
+function parseSet(){
+  var m=/[?&]set=([^&#]*)/.exec(location.search);
+  if(!m) return null;
+  var v; try{ v=decodeURIComponent(m[1]); }catch(e){ return null; }
+  return /^[a-z0-9_-]{1,64}$/.test(v)?v:null;
+}
+
+function start(){
+  setStatus('');
+  SET_ID=parseSet();
+  if(!SET_ID){
+    $('countPill').textContent='缺少套号';
+    setStatus('这个链接缺少练习套的编号，或编号不对。请从家长发的链接进入（形如 /m/practice/?set=……）。');
+    return;
+  }
+  DRAFT_KEY='ruyi-practice-'+SET_ID+'-v1';
+  api('GET','/api/session').then(function(r){
+    if(r.status!==200 || !r.json || typeof r.json.authenticated!=='boolean'){
+      $('countPill').textContent='不可用';
+      setStatus('这个页面需要在家庭练习站（带服务端的地址）打开。');
+      return;
+    }
+    if(!r.json.authenticated){ showGate(''); return; }
+    hideGate(); load();
+  }).catch(function(){
+    $('countPill').textContent='离线';
+    setStatus('连不上练习站服务，请检查网络后重试。',start);
+  });
+}
+
+function load(){
+  $('countPill').textContent='加载中';
+  setStatus('');
+  api('GET','/api/practice/'+SET_ID).then(function(r){
+    if(r.status===401){ showGate('登录已过期，请重新输入家庭码'); return; }
+    if(r.status===404 || r.status===400){
+      $('countPill').textContent='没有这套题';
+      setStatus('没有找到这套练习。请确认链接是否正确，或问问家长。');
+      $('qs').innerHTML=''; $('actions').style.display='none'; $('submitCard').style.display='none';
+      return;
+    }
+    if(r.status!==200 || !r.json || !Array.isArray(r.json.items)){
+      $('countPill').textContent='题库不可用';
+      setStatus(((r.json&&r.json.message)||'题库暂时连不上')+'。稍后点「重试」。',load);
+      $('qs').innerHTML=''; $('actions').style.display='none'; $('submitCard').style.display='none';
+      return;
+    }
+    items=r.json.items;
+    $('title').textContent=r.json.title||'练习';
+    document.title=(r.json.title||'练习')+' · 如意';
+    var miss=Array.isArray(r.json.missing_qrefs)?r.json.missing_qrefs.length:0;
+    if(miss>0) setStatus('有 '+miss+' 道题暂时没取到，已先跳过；请告诉家长。');
+    loadDraft();
+    render();
+    $('actions').style.display='flex'; $('submitCard').style.display='block';
+  }).catch(function(){
+    $('countPill').textContent='离线';
+    setStatus('连不上练习站服务，请检查网络后重试。',load);
+  });
+}
+
+// ---- draft (never contains the family code) ---------------------------------
+function loadDraft(){
+  answers={};
+  try{
+    var d=JSON.parse(localStorage.getItem(DRAFT_KEY)||'{}');
+    if(d && d.a && typeof d.a==='object'){
+      items.forEach(function(q){ if(Object.prototype.hasOwnProperty.call(d.a,q.qref)) answers[q.qref]=d.a[q.qref]; });
+    }
+  }catch(e){}
+}
+function saveDraftNow(){
+  if(!DRAFT_KEY) return;
+  try{
+    localStorage.setItem(DRAFT_KEY,JSON.stringify({v:1,set:SET_ID,a:answers,t:new Date().toISOString()}));
+    $('savedHint').textContent='已自动保存 · '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+  }catch(e){}
+  updateProgress();
+}
+function saveDraft(){ clearTimeout(saveTimer); saveTimer=setTimeout(saveDraftNow,250); }
+function filled(q){
+  var v=answers[q.qref];
+  if(Array.isArray(v)) return v.some(function(x){ return typeof x==='string' && x.trim()!==''; });
+  return typeof v==='string' && v.trim()!=='';
+}
+function updateProgress(){
+  var n=0; items.forEach(function(q){ if(filled(q)) n++; });
+  $('bar').style.width=items.length?Math.round(n/items.length*100)+'%':'0';
+  $('countPill').textContent='已答 '+n+' / '+items.length;
+}
+
+// ---- render ------------------------------------------------------------------
+function safeSrc(u){ return typeof u==='string' && u.indexOf('/api/media/')===0 && u.indexOf('..')<0 && u.indexOf('?')<0 ? u : null; }
+
+function makeImg(m,cls){
+  var src=safeSrc(m.url); if(!src) return null;
+  var wrap=el('div','fig '+(cls||''));
+  var img=document.createElement('img');
+  img.loading='lazy'; img.decoding='async'; img.alt=m.alt||'题目配图'; img.src=src;
+  img.onerror=function(){
+    var box=el('div','noimg','图加载失败');
+    var b=el('button','btn-ghost','重试'); b.style.marginLeft='10px';
+    b.onclick=function(){ box.replaceWith(wrap); img.src=src+'?r='+Date.now().toString(36); };
+    box.appendChild(b); wrap.replaceWith(box);
+  };
+  wrap.appendChild(img);
+  return wrap;
+}
+
+function render(){
+  var root=$('qs'); root.innerHTML='';
+  items.forEach(function(q){
+    var card=el('section','card'); card.id='q'+q.ordinal; card.setAttribute('data-qref',q.qref);
+    card.appendChild(el('div','qno','第 '+q.ordinal+' 题'));
+    var stem=el('div','stem'); card.appendChild(stem);
+    var r=mdInto(stem,q.stem_md||'',false);
+
+    var media=Array.isArray(q.media)?q.media:[];
+    var stemMedia=media.filter(function(m){return m.slot==='stem'||m.slot==='figure';});
+    var optMedia=media.filter(function(m){return m.slot==='option';});
+    var shown=0;
+    stemMedia.forEach(function(m){ var f=makeImg(m); if(f){ card.appendChild(f); shown++; } });
+    // Figures are not expected in this phase. Only a figure the brain says is
+    // missing gets a grey placeholder; unknown/none/ok-without-media stay quiet.
+    if(shown===0 && optMedia.length===0 && q.figure_status==='missing'){ card.appendChild(el('div','noimg','图未入库')); }
+
+    var opts=Array.isArray(q.options)?q.options:[];
+    if(opts.length){
+      var multi=q.qtype==='multi_choice';
+      var used={};
+      opts.forEach(function(o){
+        var lab=el('label','opt'); var inp=document.createElement('input');
+        inp.type=multi?'checkbox':'radio'; inp.name='r'+q.ordinal; inp.value=o.key;
+        var cur=(typeof answers[q.qref]==='string'?answers[q.qref]:'').split(',');
+        if(cur.indexOf(o.key)>=0){ inp.checked=true; lab.classList.add('sel'); }
+        inp.onchange=function(){
+          var picked=[]; card.querySelectorAll('input[name="r'+q.ordinal+'"]').forEach(function(x){
+            x.parentNode.classList.toggle('sel',x.checked); if(x.checked) picked.push(x.value); });
+          answers[q.qref]=picked.join(','); saveDraft();
+        };
+        lab.appendChild(inp); lab.appendChild(el('span','k',o.key+'.'));
+        var t=el('span','t'); mdInto(t,o.text_md||'',true); lab.appendChild(t);
+        card.appendChild(lab);
+        optMedia.forEach(function(m){ if(m.option_key===o.key){ var f=makeImg(m,'optfig'); if(f){ card.appendChild(f); used[m.url]=1; } } });
+      });
+      optMedia.forEach(function(m){ if(!used[m.url]){ var f=makeImg(m); if(f) card.appendChild(f); } });
+    } else {
+      optMedia.forEach(function(m){ var f=makeImg(m); if(f) card.appendChild(f); });
+      if(r.blanks>0){
+        var saved=Array.isArray(answers[q.qref])?answers[q.qref]:[];
+        var vals=[]; for(var i=0;i<r.blanks;i++) vals.push(typeof saved[i]==='string'?saved[i]:'');
+        stem.querySelectorAll('input.blank').forEach(function(inp){
+          var idx=+inp.getAttribute('data-b');
+          inp.value=vals[idx]||'';
+          inp.oninput=function(){ vals[idx]=inp.value; answers[q.qref]=vals.slice(); saveDraft(); };
+        });
+      } else {
+        card.appendChild(el('div','anslabel','作答区（过程和答案都可以写在这里）'));
+        var ta=document.createElement('textarea'); ta.className='ans'; ta.rows=5; ta.setAttribute('aria-label','第 '+q.ordinal+' 题作答区');
+        ta.autocapitalize='off'; ta.spellcheck=false;
+        ta.value=typeof answers[q.qref]==='string'?answers[q.qref]:'';
+        ta.oninput=function(){ answers[q.qref]=ta.value; saveDraft(); };
+        card.appendChild(ta);
+      }
+    }
+    root.appendChild(card);
+  });
+  updateProgress();
+}
+
+// ---- wiring --------------------------------------------------------------------
+$('gateForm').addEventListener('submit',function(ev){
+  ev.preventDefault();
+  var code=$('gateInput').value; if(!code.trim()) return;
+  $('gateBtn').disabled=true; $('gateErr').textContent='';
+  api('POST','/api/login',{code:code}).then(function(r){
+    $('gateInput').value='';
+    if(r.status===200){ hideGate(); load(); }
+    else if(r.status===429){ $('gateErr').textContent='尝试次数太多，请一分钟后再试'; }
+    else if(r.status===401){ $('gateErr').textContent='家庭码不对'; }
+    else { $('gateErr').textContent='登录失败，请稍后再试'; }
+  }).catch(function(){ $('gateErr').textContent='连不上练习站服务'; })
+  .then(function(){ $('gateBtn').disabled=false; });
+});
+$('btnClear').onclick=function(){
+  if(!confirm('清空本页填写？')) return;
+  answers={}; try{ localStorage.removeItem(DRAFT_KEY); }catch(e){} render(); $('savedHint').textContent='';
+};
+$('btnLogout').onclick=function(){
+  api('POST','/api/logout').then(function(){
+    items=[]; $('qs').innerHTML=''; $('submitCard').style.display='none'; $('countPill').textContent='已退出'; showGate('');
+  },function(){});
+};
+window.addEventListener('pagehide',saveDraftNow);
+document.addEventListener('visibilitychange',function(){ if(document.hidden) saveDraftNow(); });
+start();
+})();
+</script>
+</body>
+</html>

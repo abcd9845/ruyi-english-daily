@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -141,5 +142,57 @@ func TestFamilyCodeMinLength(t *testing.T) {
 	m["RUYI_FAMILY_CODE"] = ""
 	if _, err := Load(env(m)); err == nil {
 		t.Error("empty must fail")
+	}
+}
+
+func TestSetsFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// unset: no sets, no error
+	m := valid(t)
+	c, err := Load(env(m))
+	if err != nil || c.Sets != nil {
+		t.Fatalf("unset: %v %v", err, c)
+	}
+	// valid
+	m = valid(t)
+	m["RUYI_SETS_FILE"] = write("ok.json", `{"sets":[{"id":"demo-1","title":"T","source":"src.one","qrefs":["q:1"]}]}`)
+	c, err = Load(env(m))
+	if err != nil || c.Sets == nil || c.Sets.Len() != 1 {
+		t.Fatalf("valid: %v", err)
+	}
+	// problems name the variable and never echo file content or the path
+	const marker = "REAL-QREF-MARKER"
+	for name, body := range map[string]string{
+		"dupid.json":   `{"sets":[{"id":"a","title":"T","source":"src.one","qrefs":["` + marker + `"]},{"id":"a","title":"T","source":"src.one","qrefs":["z"]}]}`,
+		"unknown.json": `{"sets":[{"id":"a","title":"T","source":"src.one","qrefs":["` + marker + `"],"` + marker + `":1}]}`,
+		"badid.json":   `{"sets":[{"id":"BAD ` + marker + `","title":"T","source":"src.one","qrefs":["q"]}]}`,
+	} {
+		m = valid(t)
+		path := write(name, body)
+		m["RUYI_SETS_FILE"] = path
+		_, err := Load(env(m))
+		if err == nil || !strings.Contains(err.Error(), "RUYI_SETS_FILE") {
+			t.Errorf("%s: want an error naming RUYI_SETS_FILE, got %v", name, err)
+			continue
+		}
+		if strings.Contains(err.Error(), marker) || strings.Contains(err.Error(), path) {
+			t.Errorf("%s: error echoes file content or path: %v", name, err)
+		}
+	}
+	m = valid(t)
+	m["RUYI_SETS_FILE"] = filepath.Join(dir, "does-not-exist.json")
+	if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "RUYI_SETS_FILE") || strings.Contains(err.Error(), "does-not-exist") {
+		t.Errorf("missing file: %v", err)
+	}
+	m["RUYI_SETS_FILE"] = dir
+	if _, err := Load(env(m)); err == nil {
+		t.Error("a directory must be refused")
 	}
 }

@@ -59,6 +59,30 @@ SHOTS=/some/dir test/acceptance.sh   # 约 12 秒；SHOTS 非空且有 node + go
 
 附加：A（白名单与目录遍历 404）、I（对大脑的 TLS 三种模式）、J（启动校验，报错不含值）、G5（优雅关闭）。
 
+## P0：通用套练习页（Issue #10）
+
+脚本 `test/acceptance.sh` 的 P 段（服务端/静态/KaTeX/回归）和 L4/L5（无头 Chrome，手机视口 390×844）。全部用合成数据：mock 大脑多一个 source `math.synthetic.p0-demo`（5 道合成数学题，每题都带 answer/explanation/solution 字段，用来证明站点会剥掉）。
+
+| 验收点 | 用例 | 结果 |
+|---|---|---|
+| 未设 `RUYI_SETS_FILE` → `/api/practice/*` 404，其余不变 | P1、P2 | 通过 |
+| 未登录 401；非法 id 400；未知 id 404；穿越形 id 被拒 | P3–P5b | 通过 |
+| 只返回 qrefs 白名单内的题（5 题里取 3 题），按配置顺序，ordinal 1..N | P7、P7b | 通过 |
+| `missing_qrefs`（配置有、库里没有 → 200 不 500）；配置顺序压过大脑顺序 | P9 | 通过 |
+| 响应无 answer/explanation/solution 字段；无令牌/Bearer/ticket；只含约定字段 | P10–P12 | 通过 |
+| `blanks` 由服务端按「非公式部分 ≥4 个 `_`/`＿`」计数 | P8，Go 单测 `TestCountBlanks` | 通过 |
+| 页面与 KaTeX 内嵌：静态目录里没有 `m/practice` 也能打开 | P14–P16 | 通过 |
+| `/vendor/katex/` 只放行内嵌精确文件，其余 404（含 `..`、`%2e%2e`、ttf/woff、目录） | P17，Go 单测 | 通过 |
+| 页面/CSS 无外部域名引用；CSS 只引用内嵌 woff2 | P18、P19、P19b | 通过 |
+| 旧 17 个静态文件字节与 `origin/main` 一致；数轴页与 API 回归 | P20–P24（以及 B1/H6） | 通过 |
+| 套文件有误 / 不存在 → 启动即退出，报错不含文件内容；示例文件可用 | P25–P27 | 通过 |
+| 日志不含令牌/家庭码/qref/题干 | P28、P29 | 通过 |
+| 公式渲染（`.katex` 15 个、无 `.katex-error`、$$ 块 2 个）；填空框 3/0/2；HTML 不执行 | L4（39 项） | 通过 |
+| 草稿写入 `ruyi-practice-<set>-v1`、刷新恢复、清空；不含家庭码 | L4 | 通过 |
+| 手机：无横向溢出、触控目标 ≥44px、输入框 ≥16px、请求全部同源 | L4 | 通过 |
+
+截图（不入库）：`practice-top.png`、`practice-q1.png`、`practice-q1-filled.png`、`practice-q3.png`、`practice-free.png`。
+
 ## 构建产物
 
 ```
@@ -67,10 +91,12 @@ dist/ruyi-site-linux-amd64: ELF 64-bit LSB executable, x86-64, version 1 (SYSV),
 $ ldd dist/ruyi-site-linux-amd64
 not a dynamic executable
 $ sha256sum dist/ruyi-site-linux-amd64
-cc43ee284d021f89cda73a85fe27e36a298541835b9e1c2390e5391515594ae9  dist/ruyi-site-linux-amd64
+c7d1dad9ceab7d832f4ac55c26056e0074792e4a9bffc84f144cf8c15eeead6c  dist/ruyi-site-linux-amd64
 ```
 
-同一源码、两次干净构建（`make clean && make build`）的 sha256 相同（`-trimpath -buildvcs=false`）。工具链 Go 1.26.9，`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`。
+P0 起内嵌了页面和 KaTeX：二进制比 `main` 上的版本大约 644 KiB（7,663,776 → 8,323,232 字节，同一工具链对比）。
+
+同一源码、两次干净构建（`make clean && make build`）的 sha256 相同（`-trimpath -buildvcs=false`）。工具链 Go 1.27.2，`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`。
 **未在真实的 CentOS 7.5 / 内核 3.10 上运行过**；依据是 Go 官方文档的最低内核要求（Go 1.24 及以后 ≥ 3.2）和静态链接。建议 ECS运维 先在目标机上空跑一次 `/opt/ruyi-site/ruyi-site`（缺环境变量时应打印配置错误并以 1 退出，说明二进制能在该内核上运行）。
 
 ## 完整运行日志（脚本输出，无秘密）
@@ -138,7 +164,7 @@ PASS  C6 brain not contacted by any unauthenticated request (=0)
 PASS  C7 wrong code -> 401 (=401)
 PASS  C8 wrong code: no Set-Cookie header
 PASS  C9 right code -> 200 (=200)
-     Set-Cookie (value elided): ruyi_sess=<value>; Path=/; Expires=Mon, 16 Nov 2026 08:39:33 GMT; Max-Age=2592000; HttpOnly; SameSite=Lax
+     Set-Cookie (value elided): ruyi_sess=<value>; Path=/; Expires=Mon, 16 Nov 2026 10:30:34 GMT; Max-Age=2592000; HttpOnly; SameSite=Lax
 PASS  C10 cookie name ruyi_sess
 PASS  C11 HttpOnly
 PASS  C12 SameSite=Lax
@@ -195,6 +221,7 @@ PASS  E7 Authorization never sent on ticketed image GET (=0)
 == F. Criterion 2 — no token / ticket / secrets in anything the browser can see ==
 PASS  F1 bearer token not in any response/header/Set-Cookie/page source (31 captures)
 PASS  F2 no 'Bearer'/'Authorization' strings in responses or page source
+grep: /tmp/tmp.ELIIXhHEVU/all-fresh/_api_media_math-intake.zz-yuekao-numberline-4y_19657038d590051de9672997cd2d38902c52a55392e28d7bc9410950d854e95a.raw: binary file matches
 PASS  F3 no ticket-shaped string (v1.<exp>.<mac>) in page/JSON/headers/bodies (our own session cookie in Set-Cookie excluded: it is the HMAC cookie, not a brain ticket)
 PASS  F4 session secret not in any response
 PASS  F5 family code not in page source or JSON
@@ -253,9 +280,69 @@ PASS  K4b the request itself was logged (path only)
 PASS  K6 inconsistent figure_status=ok/no media produced a warn log (qref only)
 PASS  K5 failure events are logged (sanity: logs are not empty)
      sample log lines (verbatim):
-       time=2026-10-17T16:39:33.862+08:00 level=WARN msg="login failed" ip=127.0.0.1
-       time=2026-10-17T16:39:34.623+08:00 level=WARN msg="brain request failed" op=media-lookup err="media not in source"
-       time=2026-10-17T16:39:33.256+08:00 level=DEBUG msg=request method=GET path=/healthz status=200 ms=0 ip=127.0.0.1
+       time=2026-10-17T18:30:34.109+08:00 level=WARN msg="login failed" ip=127.0.0.1
+       time=2026-10-17T18:30:34.784+08:00 level=WARN msg="brain request failed" op=media-lookup err="media not in source"
+       time=2026-10-17T18:30:33.617+08:00 level=DEBUG msg=request method=GET path=/healthz status=200 ms=0 ip=127.0.0.1
+
+== P. P0 practice page (Issue #10) — sets file, /api/practice, embedded page + KaTeX ==
+PASS  P1 no RUYI_SETS_FILE: /api/practice/demo-1 -> 404 (even logged in) (=404)
+PASS  P2 no RUYI_SETS_FILE: old /api/sets still 200 (=200)
+PASS  P3 anonymous /api/practice/demo-1 -> 401 (=401)
+PASS  P3b anonymous + illegal id -> still 401 (login first) (=401)
+PASS  P4 illegal set id -> 400 (=400)
+PASS  P5 unknown set id -> 404 (=404)
+PASS  P5b traversal-shaped id refused (400)
+PASS  P6 demo-1 -> 200 (=200)
+PASS  P7 whitelist + config order (3 questions of 5 in the brain; alternates excluded) (=example.set:math:1,example.set:math:2,example.set:math:3)
+PASS  P7b ordinals 1..N, set_id/title, empty missing_qrefs (=[[1,2,3],"demo-1","演示套",[]])
+PASS  P8 blanks counted by the server (3 / none / 2, full-width included) (=[3,0,2])
+PASS  P8b options delivered as {key,text_md} (=["A","B","C","D"])
+PASS  P9 config order beats brain order; configured-but-absent qref -> missing_qrefs (200, not 500) (=[["example.set:math:3","example.set:math:1"],["example.set:math:99"]])
+PASS  P10 d1 has no answer/explanation/solution (mock sends all three on every question)
+PASS  P10 d2 has no answer/explanation/solution (mock sends all three on every question)
+PASS  P10b control: the mock really does send the answer marker upstream
+PASS  P11 allowed item keys only (=["blanks","figure_status","media","options","ordinal","qref","qtype","stem_md"])
+PASS  P12 no token / Bearer / ticket in the practice response or headers
+PASS  P13 mock saw the practice source list requests (only source/limit/cursor accepted by the mock, else 400) (=true)
+PASS  P14 the static dir has no m/practice (nothing hand-copied to the server)
+PASS  P15 /m/practice/ -> 200 without login (page holds no data) (=200)
+PASS  P15b html content-type + restrictive CSP
+PASS  P15c /m/practice -> 301 (=301)
+PASS  P16 /vendor/katex/katex.min.js (=200)
+PASS  P16 /vendor/katex/katex.min.css (=200)
+PASS  P16 /vendor/katex/LICENSE (=200)
+PASS  P16 /vendor/katex/fonts/KaTeX_Main-Regular.woff2 (=200)
+PASS  P16 /vendor/katex/fonts/KaTeX_Math-Italic.woff2 (=200)
+PASS  P17 /vendor/ -> 404
+PASS  P17 /vendor/katex/ -> 404
+PASS  P17 /vendor/katex/fonts/ -> 404
+PASS  P17 /vendor/katex/fonts/KaTeX_Main-Regular.ttf -> 404
+PASS  P17 /vendor/katex/fonts/KaTeX_Main-Regular.woff -> 404
+PASS  P17 /vendor/katex/nope.js -> 404
+PASS  P17 /vendor/katex/../katex/katex.min.js -> 404
+PASS  P17 /vendor/katex/%2e%2e/katex.min.js -> 404
+PASS  P17 /vendor/other/x.js -> 404
+PASS  P17 /vendor/modules.txt -> 404
+PASS  P18 page source: no http(s):// or protocol-relative references (only site-relative paths)
+PASS  P19 katex css: no external references; fonts only /vendor/katex/fonts/*.woff2
+PASS  P19b every css url() is an embedded woff2
+PASS  P20 all 17 old static files still byte-identical to origin/main (diffs) (=0)
+PASS  P21 numberline page still served (=200)
+PASS  P21b numberline page byte-identical to the repo file
+PASS  P22 numberline API unchanged: 60 questions (=60)
+PASS  P23 a set-only source is NOT listable through the old /api/sets (=404)
+PASS  P24 junk files still 404 (=404)
+PASS  P25 invalid sets file -> exit 1, names RUYI_SETS_FILE, echoes none of its content
+PASS  P26 missing sets file -> refused
+PASS  P27 deploy/sets.example.json is accepted at startup (kept running until the 2 s timeout)
+PASS  P28 bearer token not in the practice-site log
+PASS  P28 family code not in the practice-site log
+PASS  P28 session secret not in the practice-site log
+PASS  P28 ntfy topic not in the practice-site log
+PASS  P28 qref not in the practice-site log
+PASS  P28 answer marker not in the practice-site log
+PASS  P28 stem text not in the practice-site log
+PASS  P29 log has the set count and a count-only warning for the missing qref
 
 == L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow ==
 PASS gate shown when not logged in
@@ -295,8 +382,54 @@ PASS brain down: retry button offered
 
 5/5 browser checks passed
 PASS  L2 brain-down page shows readable notice (all passed)
+PASS no ?set= : friendly message
+PASS illegal set id: friendly message, no cards
+PASS gate shown when not logged in
+PASS wrong code shows message
+PASS login through the form renders 3 question cards
+  dom: {"title":"演示套","docTitle":"演示套 · 如意","tex":15,"katex":15,"display":2,"err":0,"raw":0,"mathml":15,"blanks":[3,0,2],"radios":[0,4,0],"areas":[0,0,0],"script":0,"pwned":"undefined","q3code":["x<y"],"q3strong":["解方程组"],"optsHaveKatex":[true,true,true,true],"noOptionRawDollar":true,"stemRawDollar":false,"qno":["第 1 题","第 2 题","第 3 题"],"submit":{"disabled":true,"text":"提交（即将开放）","shown":true},"noteOnPage":true,"verdicts":0,"fontOk":true,"sameOrigin":true,"resources":["/vendor/katex/fonts/KaTeX_Main-Regular.woff2","/vendor/katex/fonts/KaTeX_Math-Italic.woff2","/vendor/katex/fonts/KaTeX_Size4-Regular.woff2","/vendor/katex/katex.min.css","/vendor/katex/katex.min.js"]}
+PASS title from the set config — 演示套
+PASS formulas rendered by local KaTeX (.katex present, none left as raw) — tex=15 katex=15 raw=0
+PASS no .katex-error anywhere
+PASS $$ blocks render as display math (2) — display=2
+PASS no raw $ delimiters left in stems or options
+PASS fill-in boxes: one per underscore run (3, 0, 2) — [3,0,2]
+PASS single-choice: 4 radios on question 2 only — [0,4,0]
+PASS options render math too
+PASS no free-form answer area on questions that have blanks/options
+PASS HTML is escaped, never executed (<script> text shown, no element, no side effect)
+PASS Markdown: `code` and **bold** rendered; x<y kept literally — [["x<y"],["解方程组"]]
+PASS question labels are plain ordinals
+PASS submit button is disabled and says 即将开放; page explains draft-only — {"disabled":true,"text":"提交（即将开放）","shown":true}
+PASS no correct/incorrect UI exists
+PASS KaTeX woff2 font actually loaded from this origin
+PASS every request is same-origin (nothing from a CDN) — ["/vendor/katex/fonts/KaTeX_Main-Regular.woff2","/vendor/katex/fonts/KaTeX_Math-Italic.woff2","/vendor/katex/fonts/KaTeX_Size4-Regular.woff2","/vendor/katex/katex.min.css","/vendor/katex/katex.min.js"]
+PASS only the embedded files were fetched (page assets) — ["/vendor/katex/fonts/KaTeX_Main-Regular.woff2","/vendor/katex/fonts/KaTeX_Math-Italic.woff2","/vendor/katex/fonts/KaTeX_Size4-Regular.woff2","/vendor/katex/katex.min.css","/vendor/katex/katex.min.js"]
+  layout: {"scrollW":390,"iw":390,"small":0,"minFont":18,"body":18,"wide":0,"blankW":135}
+PASS no horizontal page overflow at 390px — {"scrollW":390,"iw":390,"small":0,"minFont":18,"body":18,"wide":0,"blankW":135}
+PASS touch targets >= 44px (blanks, options, buttons) — too small: 0
+PASS inputs use >= 16px font (no iOS zoom); body is 18px — minFont=18 body=18
+PASS blank boxes are wide (>= 110px) — min width 135
+  draft keys: ["v","set","a","t"] ls keys: ["ruyi-practice-demo-1-v1"]
+PASS draft saved under ruyi-practice-demo-1-v1 with set, timestamp and qref-keyed answers — {"example.set:math:1":["5/4","","-3"],"example.set:math:2":"B","example.set:math:3":["","y=1"]}
+PASS family code not in localStorage / sessionStorage / document.cookie
+PASS session cookie is HttpOnly (invisible to JS)
+PASS progress shows answered count
+PASS after reload (cookie kept) the cards come back without the gate
+PASS draft restored after reload (blanks and the chosen option) — {"q1":["5/4","","-3"],"q2":[false,true,false,false],"q2sel":1,"q3":["","y=1"]}
+PASS 「清空」 removes the draft and the inputs — {"ls":null,"vals":"","checked":0}
+PASS config order wins (3 then 1) and the missing qref only yields a notice
+PASS free-form question gets a wide answer area (textarea)
+PASS textarea answer saved as a string under ruyi-practice-free-3-v1 — {"example.set:math:4":"1/2+1/3=5/6\n过程：通分"}
+PASS answer area is tall and full-width on a phone — {"h":173.984375,"w":342,"iw":390}
+PASS unknown set: friendly message, no cards
+PASS logout shows the gate and removes the questions
 
-TOTAL: 140 passed, 0 failed
+39/39 browser checks passed
+PASS  L4 practice page in headless Chrome (all passed)
+PASS  L5 no code/token in the log of the browser-driven practice run
+
+TOTAL: 200 passed, 0 failed
 ```
 
 ## 未覆盖 / 需要后续验证

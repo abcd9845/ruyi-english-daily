@@ -1,0 +1,14 @@
+{
+  "sets": [
+    {
+      "id": "demo-1",
+      "title": "示例套（占位，非真实题目）",
+      "source": "example.source",
+      "qrefs": [
+        "example.set:math:1",
+        "example.set:math:2",
+        "example.set:math:3"
+      ]
+    }
+  ]
+}

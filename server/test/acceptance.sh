@@ -373,6 +373,187 @@ for pair in "bearer token:$TOKEN" "family code:$CODE" "session secret:$SECRET" "
 done
 grep -q 'practice sets loaded' "$WORK/plogs" && grep -q 'practice set has qrefs the brain did not return' "$WORK/plogs" && ok "P29 log has the set count and a count-only warning for the missing qref" || bad "P29"
 
+section "Q. P1–P3 — grading through the brain, client_attempt_id idempotency, archive, ntfy heads-up, dynamic sets"
+GTOKEN="grade-$TOKEN"          # what the default mock accepts for POST /v1/bank/grade (it must NOT accept the read token)
+NTFY_PORT=18225
+cat > "$WORK/ntfy_stub.py" <<'PY'
+import http.server, json, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(s):
+        n = int(s.headers.get('Content-Length', 0)); b = s.rfile.read(n).decode('utf-8', 'replace')
+        with open(sys.argv[2], 'a') as f:
+            f.write(json.dumps({"path": s.path, "auth": s.headers.get('Authorization'), "cookie": s.headers.get('Cookie'), "body": b}, ensure_ascii=False) + "\n")
+        s.send_response(200); s.end_headers(); s.wfile.write(b'{}')
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+PY
+: > "$WORK/ntfy.jsonl"
+python3 "$WORK/ntfy_stub.py" $NTFY_PORT "$WORK/ntfy.jsonl" & PIDS+=($!)
+NTFYB="http://127.0.0.1:$NTFY_PORT"
+for _ in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/$NTFY_PORT) 2>/dev/null && break; sleep 0.1; done
+ntfy_n() { wc -l < "$WORK/ntfy.jsonl" | tr -d ' '; }
+mstat() { curl -s "http://127.0.0.1:${2:-$PORT_MOCK}/_mock/stats" | jq -r ".$1 // 0"; }
+QENV=("RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_NTFY_RETRY_DELAY=300ms" "RUYI_ATTEMPTS_DIR=$WORK/att-Q" "RUYI_GRADE_MAX_PER_HOUR=4" "RUYI_AUTO_SOURCES=$PSRC" "RUYI_AUTO_TTL=3s")
+start_site Q 18230 "http://127.0.0.1:$PORT_MOCK" "${QENV[@]}"; QA="http://127.0.0.1:18230"; wait_http "$QA/healthz"
+post_login q1 "$QA" "$CODE" -c "$WORK/jarQ"
+gpost() { # gpost NAME BASE SET BODY [curl args]
+  local n=$1 b=$2 s=$3 body=$4; shift 4
+  CODE_HTTP=$(curl -sS -D "$WORK/resp/$n.h" -o "$WORK/resp/$n.b" -w '%{http_code}' -H 'Content-Type: application/json' -d "$body" "$@" "$b/api/practice/$s/grade")
+}
+C1=11111111-1111-4111-8111-111111111111
+DEFANS='[{"qref":"example.set:math:1","answer":["1","2","3"]},{"qref":"example.set:math:2","answer":"A"},{"qref":"example.set:math:3","answer":["x","y"]}]'
+mkbody() { # mkbody CID [answers-json]   (the default answers: q1 right, q2 wrong, q3 has no key in the mock)
+  local a="${2:-$DEFANS}"; printf '{"client_attempt_id":"%s","answers":%s}' "$1" "$a"
+}
+# --- Q1 graded through the brain
+N0=$(ntfy_n); G0=$(mstat grade_new)
+gpost g1 "$QA" demo-1 "$(mkbody $C1)" -b "$WORK/jarQ"; expect "Q1 grade demo-1 -> 200" "$CODE_HTTP" 200
+expect "Q1b mode graded, brain confirmed, ids echoed" "$(jq -c '[.mode,.brain_recorded,.client_attempt_id,.set_id,(.replayed // false)]' "$WORK/resp/g1.b")" "[\"graded\",true,\"$C1\",\"demo-1\",false]"
+expect "Q1c per-question verdicts (wrong key->false is NOT leaked as an answer; 1 right, 1 wrong, 1 pending_key)" "$(jq -c '[.results[]|[.status,.correct]]' "$WORK/resp/g1.b")" '[["graded",true],["graded",false],["pending_key",null]]'
+expect "Q1d summary total/graded/correct/pending/unanswered" "$(jq -c '[.summary.total,.summary.graded,.summary.correct,.summary.pending,.summary.unanswered]' "$WORK/resp/g1.b")" '[3,2,1,1,0]'
+expect "Q1e archived and notified" "$(jq -c '[.archived,.notify]' "$WORK/resp/g1.b")" '[true,"sent"]'
+expect "Q1f the brain was asked exactly once (grade_new +1)" "$(( $(mstat grade_new) - G0 ))" 1
+expect "Q1g response has only the documented keys (replayed appears only on a replay)" "$(jq -c 'keys' "$WORK/resp/g1.b")" '["archived","brain_recorded","client_attempt_id","mode","notify","results","set_id","summary"]'
+# --- Q2 idempotent replay
+gpost g2 "$QA" demo-1 "$(mkbody $C1)" -b "$WORK/jarQ"
+expect "Q2 same client_attempt_id again -> 200 replayed:true with the stored result" "$(jq -c '[.replayed,.mode,.summary.correct]' "$WORK/resp/g2.b")" '[true,"graded",1]'
+gpost g2b "$QA" demo-1 "$(mkbody $C1 '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarQ"
+expect "Q2b replay ignores a different payload (stored result wins)" "$(jq -c '[.replayed,.summary.total,.summary.correct]' "$WORK/resp/g2b.b")" '[true,3,1]'
+expect "Q2c no second brain write, no second notification, one archive line" "$(( $(mstat grade_new) - G0 )) $(mstat grade_replay) $(( $(ntfy_n) - N0 )) $(wc -l < "$WORK/att-Q/attempts.jsonl" | tr -d ' ')" "1 0 1 1"
+gpost g2c "$QA" free-3 "$(mkbody $C1 '[{"qref":"example.set:math:4","answer":"x"}]')" -b "$WORK/jarQ"; expect "Q2d same id on another set -> 409" "$CODE_HTTP" 409
+# --- Q3 whitelist, shapes, auth
+G1=$(mstat grade)
+gpost v "$QA" demo-1 "$(mkbody 22222222-2222-4222-8222-222222222221 '[{"qref":"example.set:math:4","answer":"x"}]')" -b "$WORK/jarQ"; expect "Q3 qref of the same source but outside the set (alternate q4) -> 400" "$CODE_HTTP" 400
+gpost v "$QA" demo-1 "$(mkbody 22222222-2222-4222-8222-222222222222 '[{"qref":"example.set:math:5","answer":"B"}]')" -b "$WORK/jarQ"; expect "Q3b qref outside the set (q5) -> 400" "$CODE_HTTP" 400
+gpost v "$QA" demo-1 "$(mkbody 22222222-2222-4222-8222-222222222223 '[{"qref":"made:up:1","answer":"A"}]')" -b "$WORK/jarQ"; expect "Q3c invented qref -> 400" "$CODE_HTTP" 400
+gpost v "$QA" demo-1 "$(mkbody 22222222-2222-4222-8222-222222222224 '[{"qref":"example.set:math:2","answer":["A"]}]')" -b "$WORK/jarQ"; expect "Q3d choice answered with an array -> 400" "$CODE_HTTP" 400
+gpost v "$QA" demo-1 "$(mkbody 22222222-2222-4222-8222-222222222225 '[{"qref":"example.set:math:1","answer":["1","2"]}]')" -b "$WORK/jarQ"; expect "Q3e wrong blank count -> 400" "$CODE_HTTP" 400
+gpost v "$QA" demo-1 "$(mkbody 22222222-2222-4222-8222-222222222226 "[{\"qref\":\"example.set:math:3\",\"answer\":[\"$(head -c 300 /dev/zero | tr '\0' x)\",\"\"]}]")" -b "$WORK/jarQ"; expect "Q3f blank over the length cap -> 400" "$CODE_HTTP" 400
+gpost v "$QA" demo-1 "$(mkbody not-a-uuid)" -b "$WORK/jarQ"; expect "Q3g client_attempt_id must be a uuid -> 400" "$CODE_HTTP" 400
+gpost v "$QA" demo-1 "$(mkbody 22222222-2222-4222-8222-222222222227)" ; expect "Q3h anonymous -> 401" "$CODE_HTTP" 401
+gpost v "$QA" no-such-set "$(mkbody 22222222-2222-4222-8222-222222222228)" -b "$WORK/jarQ"; expect "Q3i unknown set -> 404" "$CODE_HTTP" 404
+CODE_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: text/plain' -d "$(mkbody 22222222-2222-4222-8222-222222222229)" -b "$WORK/jarQ" "$QA/api/practice/demo-1/grade"); expect "Q3j wrong content type -> 415" "$CODE_HTTP" 415
+CODE_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/jarQ" "$QA/api/practice/demo-1/grade"); expect "Q3k GET on the grade URL -> 405" "$CODE_HTTP" 405
+expect "Q3l none of the rejected requests reached the brain's grade endpoint" "$(( $(mstat grade) - G1 ))" 0
+# --- Q4 the archive
+expect "Q4 attempts dir is 700 and the file 600, owner is the site user" "$(stat -c '%a %a %U' "$WORK/att-Q" | head -1 | cut -d' ' -f1) $(stat -c %a "$WORK/att-Q/attempts.jsonl") $(stat -c %U "$WORK/att-Q/attempts.jsonl")" "700 600 $(id -un)"
+expect "Q4b record fields (JSON Lines, version 1, client_attempt_id naming, brain attempt id, mode)" "$(head -1 "$WORK/att-Q/attempts.jsonl" | jq -c '[.v,.client_attempt_id,.set_id,.set_title,.source,.mode,(.brain_attempt_id|length>0),(.items|length),(.attempt_id // "none")]')" "[1,\"$C1\",\"demo-1\",\"演示套\",\"$PSRC\",\"graded\",true,3,\"none\"]"
+expect "Q4c answers are archived as given (fill blanks as arrays)" "$(head -1 "$WORK/att-Q/attempts.jsonl" | jq -c '[.items[].answer]')" '[["1","2","3"],"A",["x","y"]]'
+for pair in "family code:$CODE" "bearer token:$TOKEN" "grade token:$GTOKEN" "session secret:$SECRET" "ntfy topic:$TOPIC" "cookie name:ruyi_sess" "Authorization header:Authorization"; do
+  name="${pair%%:*}"; val="${pair#*:}"; grep -qF -- "$val" "$WORK/att-Q/attempts.jsonl" && bad "Q4d $name found in the attempts archive" || ok "Q4d $name not in the attempts archive"
+done
+# --- Q5 ntfy heads-up
+expect "Q5 ntfy: one POST, to /<topic>, no credentials" "$(jq -rs '[length, (.[0].path == "/'"$TOPIC"'"), (.[0].auth == null), (.[0].cookie == null)]|@json' "$WORK/ntfy.jsonl")" '[1,true,true,true]'
+expect "Q5b ntfy summary line (heads-up wording, not an approval request)" "$(jq -rs '.[0].body|split("\n")[0]' "$WORK/ntfy.jsonl")" '如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。'
+expect "Q5c ntfy detail JSON carries client_attempt_id and mode, no secrets" "$(jq -rs '.[0].body|split("\n\n")[1]|fromjson|[.client_attempt_id,.mode]|@json' "$WORK/ntfy.jsonl")" "[\"$C1\",\"graded\"]"
+for pair in "family code:$CODE" "bearer token:$TOKEN" "grade token:$GTOKEN" "session secret:$SECRET"; do
+  name="${pair%%:*}"; val="${pair#*:}"; grep -qF -- "$val" "$WORK/ntfy.jsonl" && bad "Q5d $name found in the ntfy message" || ok "Q5d $name not in the ntfy message"
+done
+# --- Q6 nothing sensitive in any response
+for f in g1 g2 g2b; do
+  if grep -qiE 'explanation|solution|"answer"|MOCK-ANSWER|SECRET|brain-attempt|mock-' "$WORK/resp/$f.b"; then bad "Q6 $f leaks an answer/explanation/brain id"; else ok "Q6 grade response $f: no answer, explanation, key or brain attempt id"; fi
+done
+get s "$QA/api/practice/demo-1" -b "$WORK/jarQ"; grep -qiE 'explanation|"answer"|solution|MOCK-ANSWER' "$WORK/resp/s.b" && bad "Q6b practice response leaks answers" || ok "Q6b practice response still has no answers/explanations"
+# --- Q7 the read token can never be used for grading (separate token; mock counts such use)
+expect "Q7 the grade call never used the bank:read token (mock saw 0)" "$(mstat grade_with_bank_read_token)" 0
+# --- Q8 rate limit (4 / hour / session+IP / set; replays and rejected requests are free)
+for i in 2 3 4; do gpost r$i "$QA" demo-1 "$(mkbody 3333333$i-3333-4333-8333-333333333333)" -b "$WORK/jarQ"; [ "$CODE_HTTP" = 200 ] && ok "Q8 submission $i of 4 accepted" || bad "Q8 submission $i" "$CODE_HTTP"; done
+gpost r5 "$QA" demo-1 "$(mkbody 33333335-3333-4333-8333-333333333333)" -b "$WORK/jarQ"; expect "Q8b 5th fresh submission in the hour -> 429" "$CODE_HTTP" 429
+grep -qi '^retry-after: [0-9]' "$WORK/resp/r5.h" && ok "Q8c 429 carries Retry-After" || bad "Q8c Retry-After"
+gpost r6 "$QA" demo-1 "$(mkbody $C1)" -b "$WORK/jarQ"; expect "Q8d replay of an accepted attempt is still served while limited" "$(jq -r '.replayed' "$WORK/resp/r6.b")" true
+post_login q2 "$QA" "$CODE" -c "$WORK/jarQ2"; gpost r7 "$QA" demo-1 "$(mkbody 33333337-3333-4333-8333-333333333333)" -b "$WORK/jarQ2"; expect "Q8e a fresh login from the same address does not reset the limit" "$CODE_HTTP" 429
+gpost r8 "$QA" free-3 "$(mkbody 33333338-3333-4333-8333-333333333333 '[{"qref":"example.set:math:4","answer":"x"}]')" -b "$WORK/jarQ"; expect "Q8f another set has its own allowance" "$CODE_HTTP" 200
+# --- Q9 restart: idempotency survives (attempts file is reloaded)
+kill "$PID_Q" 2>/dev/null; sleep 0.4
+N1=$(ntfy_n); G2=$(mstat grade)
+start_site Q 18230 "http://127.0.0.1:$PORT_MOCK" "${QENV[@]}"; wait_http "$QA/healthz"
+post_login q3 "$QA" "$CODE" -c "$WORK/jarQ"
+gpost g3 "$QA" demo-1 "$(mkbody $C1)" -b "$WORK/jarQ"
+expect "Q9 after a restart the same client_attempt_id is replayed from the archive" "$(jq -c '[.replayed,.mode,.summary.correct]' "$WORK/resp/g3.b")" '[true,"graded",1]'
+expect "Q9b ... without grading, notifying or archiving again" "$(( $(mstat grade) - G2 )) $(( $(ntfy_n) - N1 ))" "0 0"
+# --- Q10 dynamic sets
+start_site QN 18231 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json"; wait_http "http://127.0.0.1:18231/healthz"
+post_login qn "http://127.0.0.1:18231" "$CODE" -c "$WORK/jarQN"
+get s "http://127.0.0.1:18231/api/practice/new?source=$PSRC&n=2" -b "$WORK/jarQN"; expect "Q10 RUYI_AUTO_SOURCES empty (default) -> /api/practice/new is off (404)" "$CODE_HTTP" 404
+get s "$QA/api/practice/new?source=$PSRC&n=2"; expect "Q10b dynamic sets require login (401)" "$CODE_HTTP" 401
+get s "$QA/api/practice/new?source=$SOURCE&n=2" -b "$WORK/jarQ"; expect "Q10c a source outside RUYI_AUTO_SOURCES -> 400" "$CODE_HTTP" 400
+for bad_n in 0 21 abc; do get s "$QA/api/practice/new?source=$PSRC&n=$bad_n" -b "$WORK/jarQ"; expect "Q10d n=$bad_n -> 400" "$CODE_HTTP" 400; done
+get dn "$QA/api/practice/new?source=$PSRC&n=2&order=seq" -b "$WORK/jarQ"; expect "Q10e n=2 -> 200" "$CODE_HTTP" 200
+DSET=$(jq -r .set_id "$WORK/resp/dn.b")
+[[ "$DSET" =~ ^auto-[a-z0-9]{8}$ ]] && ok "Q10f set id looks like auto-<8>" || bad "Q10f set id" "$DSET"
+expect "Q10g response: url, count, truncated, expiry present" "$(jq -c '[.url=="/m/practice/?set='"$DSET"'",.count,.truncated,(.expires_at|length>0)]' "$WORK/resp/dn.b")" '[true,2,false,true]'
+get d3 "$QA/api/practice/$DSET" -b "$WORK/jarQ"; expect "Q10h the dynamic set is a normal practice set (seq order 1,2)" "$(jq -r '[.items[].qref]|join(",")' "$WORK/resp/d3.b")" "example.set:math:1,example.set:math:2"
+gpost dg "$QA" "$DSET" "$(mkbody 44444444-4444-4444-8444-444444444444 '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarQ"
+expect "Q10i grading a dynamic set works (graded, 1 right)" "$(jq -c '[.mode,.summary.correct,.set_id=="'"$DSET"'"]' "$WORK/resp/dg.b")" '["graded",1,true]'
+get dn2 "$QA/api/practice/new?source=$PSRC&n=20" -b "$WORK/jarQ"
+expect "Q10j n larger than the source returns all (5) with truncated + note" "$(jq -c '[.count,.truncated,.requested,(.note|length>0)]' "$WORK/resp/dn2.b")" '[5,true,20,true]'
+get dn3 "$QA/api/practice/new?source=$PSRC&n=3&wrong_only=1" -b "$WORK/jarQ"
+expect "Q10k wrong_only -> 501 wrong_only_unavailable (no invented logic)" "$CODE_HTTP $(jq -r .error "$WORK/resp/dn3.b")" "501 wrong_only_unavailable"
+get dn4 "$QA/api/practice/new?source=$PSRC&n=3&seed=7" -b "$WORK/jarQ"; get dn5 "$QA/api/practice/new?source=$PSRC&n=3&seed=7" -b "$WORK/jarQ"
+get e1 "$QA/api/practice/$(jq -r .set_id "$WORK/resp/dn4.b")" -b "$WORK/jarQ"; get e2 "$QA/api/practice/$(jq -r .set_id "$WORK/resp/dn5.b")" -b "$WORK/jarQ"
+expect "Q10l same seed -> same selection" "$(jq -r '[.items[].qref]|join(",")' "$WORK/resp/e1.b")" "$(jq -r '[.items[].qref]|join(",")' "$WORK/resp/e2.b")"
+sleep 3.5
+get s "$QA/api/practice/$DSET" -b "$WORK/jarQ"; expect "Q10m after the TTL (3 s) the dynamic set is gone (404)" "$CODE_HTTP" 404
+get s "$QA/api/practice/auto-abcdefgh" -b "$WORK/jarQ"; expect "Q10n a made-up auto id -> 404" "$CODE_HTTP" 404
+# --- Q11 degraded paths: archive + notify only; the page API never claims a brain write
+check_degraded() { # name site-port brain-port-for-grade-count extra-label
+  local nm=$1 port=$2 base="http://127.0.0.1:$2"
+  post_login dq$nm "$base" "$CODE" -c "$WORK/jar$nm"
+  local n0=$(ntfy_n)
+  gpost dgr$nm "$base" demo-1 "$(mkbody 5555555$3-5555-4555-8555-555555555555)" -b "$WORK/jar$nm"
+  expect "Q11 [$4] -> 200 mode archive_only, brain_recorded false" "$CODE_HTTP $(jq -c '[.mode,.brain_recorded,.archived,.notify]' "$WORK/resp/dgr$nm.b")" '200 ["archive_only",false,true,"sent"]'
+  expect "Q11b [$4] every result is pending_key with correct:null, summary pending 3" "$(jq -c '[([.results[]|[.status,.correct]]|unique), .summary.pending, .summary.graded, .summary.correct]' "$WORK/resp/dgr$nm.b")" '[[["pending_key",null]],3,0,0]'
+  expect "Q11c [$4] ntfy says 未判分 and never 对/错/大脑" "$(jq -rs '.[-1].body|split("\n")[0]' "$WORK/ntfy.jsonl" | grep -c -E '未判分')$(jq -rs '.[-1].body' "$WORK/ntfy.jsonl" | grep -c -E '，对 |，错 |大脑')" "10"
+  expect "Q11d [$4] exactly one more notification" "$(( $(ntfy_n) - n0 ))" 1
+  grep -q '大脑' "$WORK/resp/dgr$nm.b" && bad "Q11e [$4] response mentions the brain" || ok "Q11e [$4] response never says the brain recorded anything"
+}
+start_site QD 18232 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-QD"; wait_http "http://127.0.0.1:18232/healthz"
+G3=$(mstat grade); check_degraded QD 18232 1 "grade token not configured"
+expect "Q11f [not configured] the brain grade endpoint was never called" "$(( $(mstat grade) - G3 ))" 0
+start_mock mockOff 18221 MOCK_GRADE=off "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "http://127.0.0.1:18221/_mock/stats"
+start_site QO 18233 "http://127.0.0.1:18221" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-QO"; wait_http "http://127.0.0.1:18233/healthz"
+check_degraded QO 18233 2 "grade endpoint missing (404)"
+start_mock mockFail 18222 MOCK_GRADE_FAIL=1 "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "http://127.0.0.1:18222/_mock/stats"
+start_site QF 18234 "http://127.0.0.1:18222" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-QF"; wait_http "http://127.0.0.1:18234/healthz"
+check_degraded QF 18234 3 "grade endpoint failing (500)"
+for d in QD QO QF; do expect "Q11g [$d] one archive line, mode archive_only, 600 perms" "$(jq -rs '[length,.[0].mode]|@json' "$WORK/att-$d/attempts.jsonl") $(stat -c %a "$WORK/att-$d/attempts.jsonl")" '[1,"archive_only"] 600'; done
+# --- Q12 the attempts dir cannot be written: the answer is still graded, archived:false, one error log
+echo x > "$WORK/afile"
+start_site QU 18235 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/afile/att"; wait_http "http://127.0.0.1:18235/healthz"
+post_login qu "http://127.0.0.1:18235" "$CODE" -c "$WORK/jarQU"
+gpost u1 "http://127.0.0.1:18235" demo-1 "$(mkbody 66666666-6666-4666-8666-666666666661)" -b "$WORK/jarQU"
+gpost u2 "http://127.0.0.1:18235" demo-1 "$(mkbody 66666666-6666-4666-8666-666666666662)" -b "$WORK/jarQU"
+expect "Q12 unwritable archive dir: still graded, archived:false (both submissions)" "$(jq -c '[.mode,.archived]' "$WORK/resp/u1.b")$(jq -c '[.mode,.archived]' "$WORK/resp/u2.b")" '["graded",false]["graded",false]'
+expect "Q12b exactly one error log line for it, without path or content" "$(grep -c 'attempts archive is not writable' "$WORK/QU.log") $(grep -c -e "$WORK/afile" -e 'example.set' "$WORK/QU.log")" "1 0"
+# --- Q13 ntfy down: grading result unaffected, one retry, nothing sensitive in the logs
+start_site QX 18236 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=http://127.0.0.1:1" "RUYI_NTFY_RETRY_DELAY=300ms" "RUYI_ATTEMPTS_DIR=$WORK/att-QX"; wait_http "http://127.0.0.1:18236/healthz"
+post_login qx "http://127.0.0.1:18236" "$CODE" -c "$WORK/jarQX"
+gpost x1 "http://127.0.0.1:18236" demo-1 "$(mkbody 77777777-7777-4777-8777-777777777771)" -b "$WORK/jarQX"
+expect "Q13 ntfy unreachable: 200, graded, notify:retrying, archived" "$CODE_HTTP $(jq -c '[.mode,.notify,.archived]' "$WORK/resp/x1.b")" '200 ["graded","retrying",true]'
+sleep 1.2
+expect "Q13b the retry failure is logged once as a warning" "$(grep -c 'ntfy notification failed after retry' "$WORK/QX.log")" 1
+grep -qE -e "$TOPIC" -e '127\.0\.0\.1:1([^0-9]|$)' "$WORK/QX.log" && bad "Q13c ntfy topic/address in the log" || ok "Q13c no ntfy topic or address in the log"
+# --- Q14 old files untouched, logs clean, config validation
+fails=0; while IFS= read -r f; do
+  want=$(git -C "$ROOT" show "$MAIN_REF:$f" | sha256sum | cut -d' ' -f1); get f "$QA/$f"; got=$(sha256sum < "$WORK/resp/f.b" | cut -d' ' -f1)
+  [ "$CODE_HTTP" = 200 ] && [ "$got" = "$want" ] || fails=$((fails+1)); done <<< "$MAIN_FILES"
+expect "Q14 all $(echo "$MAIN_FILES" | wc -l) old static files still byte-identical to $MAIN_REF with grading enabled (diffs)" "$fails" 0
+get f "$QA/m/numberline-4y/"; expect "Q14b numberline page unchanged" "$(sha256sum < "$WORK/resp/f.b" | cut -d' ' -f1)" "$(sha256sum < "$ROOT/m/numberline-4y/index.html" | cut -d' ' -f1)"
+sleep 0.3
+cat "$WORK/Q.log" "$WORK/QN.log" "$WORK/QD.log" "$WORK/QO.log" "$WORK/QF.log" "$WORK/QU.log" "$WORK/QX.log" > "$WORK/qlogs"
+for pair in "bearer token:$TOKEN" "grade token:$GTOKEN" "family code:$CODE" "session secret:$SECRET" "ntfy topic:$TOPIC" "qref:example.set:math" "answer text:free text" "stem text:dfrac" "client answer:\"x\",\"y\""; do
+  name="${pair%%:*}"; val="${pair#*:}"; grep -qF -- "$val" "$WORK/qlogs" && bad "Q15 $name appears in the logs of the P1–P3 sites" || ok "Q15 $name not in the logs of the P1–P3 sites"
+done
+grep -q 'grading unavailable; archive-only' "$WORK/qlogs" && ok "Q15b degraded grading is logged (kind only)" || bad "Q15b"
+run_bad x "${FULL[@]}" RUYI_BRAIN_GRADE_TOKEN="$TOKEN"
+[ "$RC" != 0 ] && echo "$OUT" | grep -q RUYI_BRAIN_GRADE_TOKEN && ! echo "$OUT" | grep -qF "$TOKEN" && ok "Q16 grade token equal to the read token -> refused, names the variable, no value" || bad "Q16" "rc=$RC"
+for kv in RUYI_GRADE_MAX_PER_HOUR=0 RUYI_ATTEMPTS_DIR=relative RUYI_AUTO_SOURCES=BAD%20SRC RUYI_NTFY_BASE_URL=ftp://x RUYI_BRAIN_GRADE_PATH=nope; do
+  run_bad x "${FULL[@]}" "${kv/\%20/ }"; [ "$RC" != 0 ] && echo "$OUT" | grep -q "${kv%%=*}" && ok "Q16b ${kv%%=*} invalid -> refused, variable named" || bad "Q16b ${kv%%=*}" "rc=$RC"
+done
+OUT=$(env -i PATH="$PATH" "${FULL[@]}" RUYI_LISTEN=127.0.0.1:18237 RUYI_ATTEMPTS_DIR="$WORK/att-never-created" timeout 2 "$BIN" 2>&1); RC=$?
+[ "$RC" = 124 ] && [ ! -e "$WORK/att-never-created" ] && ok "Q17 startup does not touch the attempts dir until the first submission (lazy create)" || bad "Q17" "rc=$RC"
+for p in "$PID_Q" "$PID_QN" "$PID_QD" "$PID_QO" "$PID_QF" "$PID_QU" "$PID_QX"; do kill "$p" 2>/dev/null; done
+
 if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/dev/null; then
   section "L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow"
   start_site BR 18199 "http://127.0.0.1:$PORT_MOCK"; wait_http "http://127.0.0.1:18199/healthz"
@@ -393,12 +574,18 @@ if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/d
   cat "$WORK/browser2.out" | tee -a "$RESULTS"
   [ "$BRC" = 0 ] && ok "L2 brain-down page shows readable notice (all passed)" || bad "L2 brain-down browser checks"
   kill "$PID_BRD" 2>/dev/null
-  start_site PB 18211 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json"; wait_http "http://127.0.0.1:18211/healthz"
+  start_site PB 18211 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-PB" "RUYI_GRADE_MAX_PER_HOUR=200"; wait_http "http://127.0.0.1:18211/healthz"
   BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18211" "$SHOTS" > "$WORK/browser4.out" 2>&1; BRC=$?
   cat "$WORK/browser4.out" | tee -a "$RESULTS"
-  [ "$BRC" = 0 ] && ok "L4 practice page in headless Chrome (all passed)" || bad "L4 practice browser checks"
-  grep -qiE "$CODE|$TOKEN" "$WORK/PB.log" && bad "L5 secrets in the log of the browser-driven run" || ok "L5 no code/token in the log of the browser-driven practice run"
+  [ "$BRC" = 0 ] && ok "L4 practice page + submit flow in headless Chrome, brain grades (all passed)" || bad "L4 practice browser checks"
+  grep -qiE "$CODE|$TOKEN|$GTOKEN" "$WORK/PB.log" && bad "L5 secrets in the log of the browser-driven run" || ok "L5 no code/token in the log of the browser-driven practice run"
+  expect "L5b the browser-driven attempts were archived (JSON Lines, 600)" "$(stat -c %a "$WORK/att-PB/attempts.jsonl")" 600
   kill "$PID_PB" 2>/dev/null
+  start_site PBA 18212 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-PBA" "RUYI_GRADE_MAX_PER_HOUR=200"; wait_http "http://127.0.0.1:18212/healthz"
+  BROWSER_FLOW=archive BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18212" "$SHOTS" > "$WORK/browser5.out" 2>&1; BRC=$?
+  cat "$WORK/browser5.out" | tee -a "$RESULTS"
+  [ "$BRC" = 0 ] && ok "L6 degraded (archive-only) submit flow: the page never claims the brain recorded it (all passed)" || bad "L6 archive-only browser checks"
+  kill "$PID_PBA" 2>/dev/null
 fi
 
 kill "$PID_P" 2>/dev/null

@@ -43,7 +43,22 @@ type Config struct {
 	AllowedSource []string
 	// Sets is the practice-set registry from RUYI_SETS_FILE (nil when unset).
 	Sets *sets.Registry
+
+	// P2/P3: grading, archive, notification, dynamic sets.
+	BrainGradeToken string
+	BrainGradePath  string
+	AttemptsDir     string
+	GradeMaxPerHour int
+	NtfyBaseURL     string
+	NtfyRetryDelay  time.Duration
+	AutoSources     []string
+	AutoTTL         time.Duration
 }
+
+// DefaultAttemptsDir is where attempts are archived unless RUYI_ATTEMPTS_DIR says otherwise.
+const DefaultAttemptsDir = "/var/lib/ruyi-site/attempts"
+
+var gradePathRe = regexp.MustCompile(`^/[A-Za-z0-9/_.-]{1,100}$`)
 
 var (
 	topicRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
@@ -184,6 +199,71 @@ func Load(getenv func(string) string) (*Config, error) {
 		}
 	}
 
+	// ---- grading / archive / notification / dynamic sets (all optional) ----
+	c.BrainGradeToken = strings.TrimSpace(getenv("RUYI_BRAIN_GRADE_TOKEN"))
+	if strings.ContainsAny(c.BrainGradeToken, " \t\r\n") {
+		bad("RUYI_BRAIN_GRADE_TOKEN", "must not contain whitespace")
+	}
+	if c.BrainGradeToken != "" && c.BrainGradeToken == c.BrainToken {
+		bad("RUYI_BRAIN_GRADE_TOKEN", "must be a different token from RUYI_BRAIN_TOKEN")
+	}
+	c.BrainGradePath = strings.TrimSpace(getenv("RUYI_BRAIN_GRADE_PATH"))
+	if c.BrainGradePath != "" && (!gradePathRe.MatchString(c.BrainGradePath) || strings.Contains(c.BrainGradePath, "..") || strings.Contains(c.BrainGradePath, "//")) {
+		bad("RUYI_BRAIN_GRADE_PATH", "must be an absolute URL path like /v1/bank/grade")
+	}
+	c.AttemptsDir = strings.TrimSpace(getenv("RUYI_ATTEMPTS_DIR"))
+	if c.AttemptsDir == "" {
+		c.AttemptsDir = DefaultAttemptsDir
+	} else if !strings.HasPrefix(c.AttemptsDir, "/") || strings.ContainsRune(c.AttemptsDir, 0) {
+		bad("RUYI_ATTEMPTS_DIR", "must be an absolute path")
+	}
+	c.GradeMaxPerHour = 5
+	if v := strings.TrimSpace(getenv("RUYI_GRADE_MAX_PER_HOUR")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 1000 {
+			bad("RUYI_GRADE_MAX_PER_HOUR", "must be an integer from 1 to 1000")
+		} else {
+			c.GradeMaxPerHour = n
+		}
+	}
+	c.NtfyBaseURL = "https://ntfy.sh/"
+	if v := strings.TrimSpace(getenv("RUYI_NTFY_BASE_URL")); v != "" {
+		u, err := url.Parse(v)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			bad("RUYI_NTFY_BASE_URL", "must be an absolute http(s) URL without userinfo/query")
+		} else {
+			c.NtfyBaseURL = strings.TrimRight(u.String(), "/") + "/"
+		}
+	}
+	c.NtfyRetryDelay = time.Minute
+	if v := strings.TrimSpace(getenv("RUYI_NTFY_RETRY_DELAY")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 100*time.Millisecond || d > time.Hour {
+			bad("RUYI_NTFY_RETRY_DELAY", "must be a Go duration between 100ms and 1h")
+		} else {
+			c.NtfyRetryDelay = d
+		}
+	}
+	if v := strings.TrimSpace(getenv("RUYI_AUTO_SOURCES")); v != "" {
+		for _, x := range strings.Split(v, ",") {
+			x = strings.TrimSpace(x)
+			if !sourceRe.MatchString(x) {
+				bad("RUYI_AUTO_SOURCES", "contains an invalid source key")
+				break
+			}
+			c.AutoSources = append(c.AutoSources, x)
+		}
+	}
+	c.AutoTTL = 6 * time.Hour
+	if v := strings.TrimSpace(getenv("RUYI_AUTO_TTL")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Second || d > 48*time.Hour {
+			bad("RUYI_AUTO_TTL", "must be a Go duration between 1s and 48h")
+		} else {
+			c.AutoTTL = d
+		}
+	}
+
 	if p := strings.TrimSpace(getenv("RUYI_SETS_FILE")); p != "" {
 		st, err := os.Stat(p)
 		switch {
@@ -215,6 +295,9 @@ func Load(getenv func(string) string) (*Config, error) {
 // Secrets lists the values that must never appear in any log line.
 func (c *Config) Secrets() []string {
 	s := []string{c.FamilyCode, c.SessionSecret, c.BrainToken}
+	if c.BrainGradeToken != "" {
+		s = append(s, c.BrainGradeToken)
+	}
 	if c.NtfyTopic != "" {
 		s = append(s, c.NtfyTopic)
 	}

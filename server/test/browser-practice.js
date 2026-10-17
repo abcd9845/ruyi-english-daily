@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Headless-Chrome check of the generic practice page (/m/practice/?set=<id>),
 // driven over --remote-debugging-pipe (Node built-ins only). Usage:
-//   BROWSER_CODE=<family code> node test/browser-practice.js <base-url> <out-dir> [chrome-binary]
+//   BROWSER_CODE=<family code> [BROWSER_FLOW=full|archive] node test/browser-practice.js <base-url> <out-dir> [chrome-binary]
+// BROWSER_FLOW=full (default): page checks + submit flow against a site whose brain GRADES (mode graded).
+// BROWSER_FLOW=archive: submit flow against a site WITHOUT grading (mode archive_only): the page must never say the brain recorded it.
 // Against the mock brain's synthetic questions. Logs in through the real form, fills
 // answers, reloads, clears; writes mobile-viewport screenshots to <out-dir>.
 const { spawn } = require('child_process');
@@ -11,6 +13,7 @@ const path = require('path');
 
 const base = process.argv[2], outDir = process.argv[3], chromeBin = process.argv[4] || 'google-chrome';
 const code = process.env.BROWSER_CODE || '';
+const flow = process.env.BROWSER_FLOW || 'full';
 if (!base || !outDir || !code) { console.error('usage: BROWSER_CODE=… node browser.js <base> <outdir> [chrome]'); process.exit(2); }
 fs.mkdirSync(outDir, { recursive: true });
 
@@ -56,6 +59,125 @@ async function shotEl(name, sel) {
 }
 const nav = async url => { await send('Page.navigate', { url }, sid); await sleep(300); };
 
+
+const fillDemo = () => ev(`(() => {
+  const set = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', {bubbles: true})); };
+  const b = [...document.querySelectorAll('#q1 input.blank')]; set(b[0], '5/4'); set(b[2], '-3');
+  const r = document.querySelectorAll('#q2 input[type=radio]')[1]; r.checked = true; r.dispatchEvent(new Event('change', {bubbles: true}));
+  set(document.querySelectorAll('#q3 input.blank')[1], 'y=1'); return 1; })()`);
+// count grade requests / capture their bodies; optionally delay or fail the first one
+const hookFetch = (delayMs, failFirst) => ev(`(() => {
+  window.__bodies = []; window.__fail = ${failFirst ? 'true' : 'false'};
+  if (!window.__origFetch) window.__origFetch = window.fetch;
+  const of = window.__origFetch;
+  window.fetch = (u, o) => {
+    if (!String(u).includes('/grade')) return of(u, o);
+    window.__bodies.push(o && o.body);
+    if (window.__fail) { window.__fail = false; return Promise.reject(new TypeError('offline')); }
+    return new Promise(r => setTimeout(r, ${delayMs})).then(() => of(u, o));
+  };
+  return 1; })()`);
+const gateLogin = async () => {
+  await ev(`document.getElementById('gateInput').value=${JSON.stringify(code)}; document.getElementById('gateForm').requestSubmit(); 1`);
+};
+const bodyText = () => ev(`document.body.innerText`);
+
+async function finish() {
+  console.log(`\n${results.length - failed}/${results.length} browser checks passed`);
+  chrome.kill('SIGKILL'); await sleep(400); try { fs.rmSync(prof, { recursive: true, force: true }); } catch (_) {}
+  process.exit(failed ? 1 : 0);
+}
+
+// Submit flow shared by both modes. graded=true: the brain confirms; false: archive-only.
+async function submitFlow(base, graded, tag) {
+  const cards = `document.querySelectorAll('#qs section.card').length`;
+  await nav(base + '/m/practice/?set=demo-1');
+  if (await ev(`getComputedStyle(document.getElementById('gate')).display==='flex'`)) await gateLogin();
+  check(tag + 'demo set loads for the submit flow', await waitFor(`${cards}===3`));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid);
+  await waitFor(`${cards}===3`);
+
+  // nothing answered: message, no request
+  await hookFetch(0, false);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await sleep(300);
+  check(tag + 'submitting nothing shows a hint and sends no request', (await ev(`document.getElementById('submitMsg').textContent`)).includes('还没有作答') && (await ev(`window.__bodies.length`)) === 0);
+
+  // slow request: the button is disabled and says 提交中…, a second click does not send a second request
+  await fillDemo(); await sleep(400);
+  await hookFetch(900, false);
+  await ev(`document.getElementById('btnSubmit').click(); document.getElementById('btnSubmit').click(); 1`);
+  const busy = await ev(`({dis: document.getElementById('btnSubmit').disabled, text: document.getElementById('btnSubmit').textContent, n: window.__bodies.length, clear: document.getElementById('btnClear').disabled})`);
+  check(tag + 'while submitting the button is disabled (提交中…) and a double click sends one request', busy.dis && busy.text === '提交中…' && busy.n === 1 && busy.clear, JSON.stringify(busy));
+  check(tag + 'result card appears', await waitFor(`getComputedStyle(document.getElementById('resultCard')).display==='block'`));
+  await sleep(300);
+  const sent = JSON.parse(await ev(`window.__bodies[0]`));
+  check(tag + 'request carries client_attempt_id (uuid) and only qref/answer pairs; multi-key answers are arrays/strings by type',
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(sent.client_attempt_id) && Object.keys(sent).sort().join() === 'answers,client_attempt_id' &&
+    JSON.stringify(sent.answers) === JSON.stringify([
+      {qref: 'example.set:math:1', answer: ['5/4', '', '-3']}, {qref: 'example.set:math:2', answer: 'B'}, {qref: 'example.set:math:3', answer: ['', 'y=1']}]), JSON.stringify(sent));
+  const res = await ev(`(() => ({
+    h: document.querySelector('#resultCard h2').textContent, sum: document.querySelector('#resultCard .sum').textContent,
+    vd: [1, 2, 3].map(n => { const v = document.querySelector('#q' + n + ' .vd'); return v ? v.textContent + '|' + v.className : null; }),
+    locked: [...document.querySelectorAll('#qs input,#qs textarea')].every(e => e.disabled),
+    again: !!document.getElementById('btnAgain'), submitHidden: getComputedStyle(document.getElementById('submitCard')).display === 'none',
+    page: document.body.innerText }))()`);
+  if (graded) {
+    check(tag + 'graded mode: 「已提交到大脑」 with the brain-confirmed summary', res.h === '已提交到大脑' && res.sum === '共 3 题 · 答对 1 · 答错 1 · 待核对 1 · 未作答 0', res.h + ' / ' + res.sum);
+    check(tag + 'graded mode: per-question badges (wrong, right, pending) and no answer key anywhere',
+      res.vd[0].startsWith('✗ 不对|vd wrong') && res.vd[1].startsWith('✓ 答对了|vd ok') && res.vd[2].startsWith('待核对|vd pend') && !/正确答案|参考答案|解析/.test(res.page), JSON.stringify(res.vd));
+  } else {
+    check(tag + 'archive-only: heading says 已提交（暂未判分）', res.h === '已提交（暂未判分）' && res.sum === '共 3 题 · 已作答 3 · 未作答 0', res.h + ' / ' + res.sum);
+    check(tag + 'archive-only: every question is 待核对 — no ✓/✗ verdict at all', res.vd.every(v => v && v.startsWith('待核对|vd pend')) && !/[✓✗]/.test(res.page), JSON.stringify(res.vd));
+    check(tag + 'archive-only: page never says 已记入大脑 / 已提交到大脑 / mentions 大脑', !res.page.includes('已记入大脑') && !res.page.includes('已提交到大脑') && !res.page.includes('大脑'), 'text scanned: ' + res.page.length + ' chars');
+  }
+  check(tag + 'inputs locked after submitting, 再做一次 offered, submit button hidden', res.locked && res.again && res.submitHidden);
+  const ls = await ev(`JSON.parse(localStorage.getItem('ruyi-practice-demo-1-v1'))`);
+  check(tag + 'draft keeps client_attempt_id and the stored result (no family code, no tokens)', ls.cid === sent.client_attempt_id && ls.res && ls.res.client_attempt_id === ls.cid && !JSON.stringify(ls).includes(code));
+  await shot('practice-result-' + (graded ? 'graded' : 'archive') + '.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
+  await ev(`document.getElementById('resultCard').scrollIntoView(); 1`);
+  await sleep(200);
+  await shot('practice-result-card-' + (graded ? 'graded' : 'archive') + '.png');
+
+  // reload: the result is restored from the draft, nothing is re-sent
+  await send('Page.reload', {}, sid);
+  check(tag + 'after reload the result is shown again without a new request', await waitFor(`${cards}===3 && getComputedStyle(document.getElementById('resultCard')).display==='block'`) &&
+    (await ev(`performance.getEntriesByType('resource').filter(r => r.name.includes('/grade')).length`)) === 0);
+
+  // 再做一次: back to a blank form with a new attempt
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+  await sleep(300);
+  const again = await ev(`({ls: localStorage.getItem('ruyi-practice-demo-1-v1'), vals: [...document.querySelectorAll('#qs input.blank')].map(e => e.value).join(''),
+    locked: [...document.querySelectorAll('#qs input,#qs textarea')].some(e => e.disabled), submit: getComputedStyle(document.getElementById('submitCard')).display, result: getComputedStyle(document.getElementById('resultCard')).display, vd: document.querySelectorAll('.vd').length, btnOk: !document.getElementById('btnSubmit').disabled && document.getElementById('btnSubmit').textContent === '提交'})`);
+  check(tag + '「再做一次」 clears answers, result and attempt id; form is editable again', again.ls === null && again.vals === '' && !again.locked && again.submit === 'block' && again.result === 'none' && again.vd === 0 && again.btnOk, JSON.stringify(again));
+
+  // network failure: answers stay, the retry re-sends the SAME client_attempt_id
+  await fillDemo(); await sleep(400);
+  await hookFetch(0, true);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  check(tag + 'offline submit: message, button usable again, answers kept', await waitFor(`document.getElementById('submitMsg').textContent.includes('连不上练习站服务') && !document.getElementById('btnSubmit').disabled`) &&
+    (await ev(`document.querySelectorAll('#q1 input.blank')[0].value`)) === '5/4');
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  check(tag + 'retry succeeds', await waitFor(`getComputedStyle(document.getElementById('resultCard')).display==='block'`));
+  const ids = JSON.parse(await ev(`JSON.stringify(window.__bodies.map(b => JSON.parse(b).client_attempt_id))`));
+  check(tag + 'the retry reused the same client_attempt_id (idempotent)', ids.length === 2 && ids[0] === ids[1], JSON.stringify(ids));
+  // changing the answers after a failed attempt gives a new id
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+  await sleep(200);
+  await fillDemo(); await sleep(300);
+  await hookFetch(0, true);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(`document.getElementById('submitMsg').textContent.includes('连不上')`);
+  await ev(`(() => { const e = document.querySelectorAll('#q1 input.blank')[1]; e.value = '9'; e.dispatchEvent(new Event('input', {bubbles: true})); return 1; })()`);
+  await sleep(300);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(`getComputedStyle(document.getElementById('resultCard')).display==='block'`);
+  const ids2 = JSON.parse(await ev(`JSON.stringify(window.__bodies.map(b => JSON.parse(b).client_attempt_id))`));
+  check(tag + 'edited answers after a failed attempt use a fresh client_attempt_id', ids2.length === 2 && ids2[0] !== ids2[1], JSON.stringify(ids2));
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+}
+
 (async () => {
   const { targetInfos } = await send('Target.getTargets');
   const page = targetInfos.find(t => t.type === 'page');
@@ -65,6 +187,14 @@ const nav = async url => { await send('Page.navigate', { url }, sid); await slee
   await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.confirm = () => true; window.alert = () => {};` }, sid);
   const cards = `document.querySelectorAll('#qs section.card').length`;
   const status = `document.getElementById('status').textContent`;
+
+  if (flow === 'archive') {
+    await nav(base + '/m/practice/?set=demo-1');
+    await waitFor(`getComputedStyle(document.getElementById('gate')).display==='flex'`);
+    await gateLogin();
+    await submitFlow(base, false, '[archive] ');
+    return finish();
+  }
 
   // --- friendly messages for a missing / illegal set id (no login needed) ---
   await nav(base + '/m/practice/');
@@ -101,8 +231,9 @@ const nav = async url => { await send('Page.navigate', { url }, sid); await slee
       noOptionRawDollar: !cs[1].textContent.includes('$'), stemRawDollar: cs.some(c => c.querySelector('.stem').textContent.includes('$')),
       qno: cs.map(c => c.querySelector('.qno').textContent),
       submit: (() => { const b = document.getElementById('btnSubmit'); return {disabled: b.disabled, text: b.textContent, shown: getComputedStyle(document.getElementById('submitCard')).display !== 'none'}; })(),
-      noteOnPage: document.getElementById('submitCard').textContent.includes('本期仅作答和保存草稿'),
-      verdicts: document.querySelectorAll('.correct, .wrong, .verdict, .answer-key').length,
+      noteOnPage: document.getElementById('submitCard').textContent.includes('提交前答案只保存在本机'),
+      resultShown: getComputedStyle(document.getElementById('resultCard')).display !== 'none',
+      verdicts: document.querySelectorAll('.vd, .correct, .verdict, .answer-key').length,
       fontOk: document.fonts.check('16px KaTeX_Main'),
       sameOrigin: performance.getEntriesByType('resource').every(r => r.name.startsWith(location.origin + '/')),
       resources: performance.getEntriesByType('resource').map(r => new URL(r.name).pathname).filter(p => !p.startsWith('/api/')).sort()
@@ -121,8 +252,8 @@ const nav = async url => { await send('Page.navigate', { url }, sid); await slee
   check('HTML is escaped, never executed (<script> text shown, no element, no side effect)', dom.script === 0 && dom.pwned === 'undefined' && dom.q3text.includes('<script>window.__pwned=1</script>'));
   check('Markdown: `code` and **bold** rendered; x<y kept literally', dom.q3code.includes('x<y') && dom.q3strong.includes('解方程组'), JSON.stringify([dom.q3code, dom.q3strong]));
   check('question labels are plain ordinals', dom.qno[0].includes('第 1 题') && dom.qno[2].includes('第 3 题'));
-  check('submit button is disabled and says 即将开放; page explains draft-only', dom.submit.disabled && dom.submit.text.includes('即将开放') && dom.submit.shown && dom.noteOnPage, JSON.stringify(dom.submit));
-  check('no correct/incorrect UI exists', dom.verdicts === 0);
+  check('submit button is enabled and says 提交; no result UI before submitting', !dom.submit.disabled && dom.submit.text === '提交' && dom.submit.shown && dom.noteOnPage && dom.resultShown === false, JSON.stringify(dom.submit));
+  check('no correct/incorrect UI before submitting', dom.verdicts === 0);
   check('KaTeX woff2 font actually loaded from this origin', dom.fontOk);
   check('every request is same-origin (nothing from a CDN)', dom.sameOrigin, JSON.stringify(dom.resources));
   check('only the embedded files were fetched (page assets)', dom.resources.every(p => p === '/m/practice/' || p.startsWith('/vendor/katex/')), JSON.stringify(dom.resources));
@@ -179,6 +310,9 @@ const nav = async url => { await send('Page.navigate', { url }, sid); await slee
   const cleared = await ev(`({ls: localStorage.getItem('ruyi-practice-demo-1-v1'), vals: [...document.querySelectorAll('#qs input.blank')].map(e => e.value).join(''), checked: document.querySelectorAll('#qs input:checked').length})`);
   check('「清空」 removes the draft and the inputs', cleared.ls === null && cleared.vals === '' && cleared.checked === 0, JSON.stringify(cleared));
 
+  // --- submit flow (the brain grades) ---
+  await submitFlow(base, true, '[graded] ');
+
   // --- a set whose paper is partly missing, and a free-form answer area ---
   await nav(base + '/m/practice/?set=reorder-2');
   check('config order wins (3 then 1) and the missing qref only yields a notice', await waitFor(`${cards}===2`) &&
@@ -203,7 +337,5 @@ const nav = async url => { await send('Page.navigate', { url }, sid); await slee
   await ev(`document.getElementById('btnLogout').click(); 1`);
   check('logout shows the gate and removes the questions', await waitFor(`getComputedStyle(document.getElementById('gate')).display==='flex' && ${cards}===0`));
 
-  console.log(`\n${results.length - failed}/${results.length} browser checks passed`);
-  chrome.kill('SIGKILL'); await sleep(400); try { fs.rmSync(prof, { recursive: true, force: true }); } catch (_) {}
-  process.exit(failed ? 1 : 0);
+  return finish();
 })().catch(e => { console.error('FATAL', e.message); try { chrome.kill('SIGKILL'); } catch (_) {} process.exit(1); });

@@ -26,7 +26,7 @@ mock 覆盖：序号 17=`missing`、25=`none`（无图）、26=缺键（无图�
 cd server
 make test                      # 单元测试
 make build mockbrain           # dist/ruyi-site-linux-amd64、dist/mockbrain
-SHOTS=/some/dir test/acceptance.sh   # 约 12 秒；SHOTS 非空且有 node + google-chrome 时追加无头浏览器检查并截图
+SHOTS=/some/dir test/acceptance.sh   # 约 3 分钟；SHOTS 非空且有 node + google-chrome 时追加无头浏览器检查并截图
 ```
 
 `test/acceptance.sh` 起 mock 大脑（随机令牌）与新服务（随机家庭码/密钥/topic），静态目录 = `git archive origin/main` 解出的 17 个旧文件 + 动态页 + 故意放进去的 `server.log`、`server.pid`、`*.sh`、`.env`、`.git/config`，全程用 `curl` 访问。
@@ -83,6 +83,34 @@ SHOTS=/some/dir test/acceptance.sh   # 约 12 秒；SHOTS 非空且有 node + go
 
 截图（不入库）：`practice-top.png`、`practice-q1.png`、`practice-q1-filled.png`、`practice-q3.png`、`practice-free.png`。
 
+## P1–P3：提交 / 判分 / 归档 / 提醒 / 自动出题
+
+脚本 `test/acceptance.sh` 的 Q 段（curl + jq，对 mock 大脑、本地 ntfy 桩）、L4/L6（无头 Chrome，手机视口）。全部合成数据；mock 大脑多了**草案**判分接口 `POST /v1/bank/grade`（独立判分令牌、按 `client_attempt_id` 幂等；答案键只存在于 mock 里，且 mock 会记录是否有人拿 `bank:read` 令牌调判分口）。本地 ntfy 桩把每条 POST 写成一行 JSON，用来核对摘要。
+
+| 验收点 | 用例 | 结果 |
+|---|---|---|
+| 判分走大脑：`mode:"graded"`、`brain_recorded:true`；结果为 对/错/待核对；摘要 `[总,已判,对,待核对,未答]` | Q1–Q1g | 通过 |
+| `client_attempt_id` 幂等：同 id 再来 → `replayed:true`、大脑不重复写、ntfy 不重复、归档不重复；换载荷仍返回旧结果；跨套复用 → 409 | Q2–Q2d | 通过 |
+| 校验：套外 qref（同 source 的备选题、别的题、编造）、题型与形状不符、空格数不对、超长、非 uuid、未登录、未知套、错误 Content-Type、GET；**全部不到达大脑** | Q3–Q3l | 通过 |
+| 归档：目录 700、文件 600、属主；JSON Lines 字段（`client_attempt_id`，没有旧名）；答案原样；不含家庭码/令牌/判分令牌/会话密钥/topic/cookie/Authorization | Q4–Q4d | 通过 |
+| ntfy：一条 POST 到 `/<topic>`、不带凭据；摘要 `如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。`；明细 JSON；无秘密 | Q5–Q5d | 通过 |
+| 响应无答案/解析/标准答案/大脑内部 id；`/api/practice` 仍无答案 | Q6、Q6b | 通过 |
+| 判分只用判分令牌，从未用 `bank:read` 令牌调判分口（mock 计数为 0） | Q7 | 通过 |
+| 限速（每套每小时 4 次，会话 + IP）：第 5 次 429 + `Retry-After`；重放不占额度；换 cookie 不重置；别的套另算 | Q8–Q8f | 通过 |
+| 重启后同一个 `client_attempt_id` 从归档恢复为重放，不重判、不重发、不重写 | Q9、Q9b | 通过 |
+| 自动出题：默认关（404）；需登录；source 须在 `RUYI_AUTO_SOURCES`；n 越界 400；`auto-<8>`；顺序/随机/同 seed 可复现；n 大于库存返回全部 + note；动态套可判分；TTL 后 404；`wrong_only=1` → 501 `wrong_only_unavailable` | Q10–Q10n | 通过 |
+| **降级** `mode:"archive_only"`：判分令牌未配 / 判分接口 404 / 判分接口 500 三种，全部题 `pending_key`、`correct:null`；仍归档、仍提醒（「未判分」，无对/错/大脑）；响应不提「大脑」 | Q11–Q11g | 通过 |
+| 归档目录不可写：照常判分，`archived:false`，日志只有一条 error，不含路径/内容 | Q12、Q12b | 通过 |
+| ntfy 不可达：200、`notify:"retrying"`，重试失败只记一条 warn，日志无 topic/地址 | Q13–Q13c | 通过 |
+| 旧 17 个静态文件字节不变（开着判分功能时）；数轴页不变；日志无秘密/qref/答案/题干 | Q14–Q15b | 通过 |
+| 配置：判分令牌等于读令牌 → 拒绝；非法值 → 退出且只报变量名；启动不碰归档目录 | Q16–Q17 | 通过 |
+| 页面（大脑判分）：提交按钮 提交中…禁用、双击只发 1 个请求；请求体形状；「已提交到大脑」+ 摘要；逐题 ✓/✗/待核对；输入锁定；刷新后恢复结果且不重发；「再做一次」；断网重试沿用同一 id、改答案换新 id | L4（54 项） | 通过 |
+| 页面（降级）：显示「已提交（暂未判分）」，逐题「待核对」，**页面文字里不含「已记入大脑」「已提交到大脑」，也没有「大脑」二字，无 ✓/✗** | L6（16 项） | 通过 |
+
+Go 单测另覆盖：判分线上契约编解码与"必须有大脑确认"、答案形状（单选/多选/填空/自由）、`SelectForPractice`（seq/random/seed/unsupported）、归档并发与撕裂行、幂等的并发（8 个并发同 id 只判一次）、限速、降级三态、ntfy 重试、配置解析、保留 id（`new`、`auto-*`）；`-race` 通过。
+
+截图（不入库）：`practice-result-graded.png`、`practice-result-card-graded.png`、`practice-result-archive.png`、`practice-result-card-archive.png`。
+
 ## 构建产物
 
 ```
@@ -91,10 +119,10 @@ dist/ruyi-site-linux-amd64: ELF 64-bit LSB executable, x86-64, version 1 (SYSV),
 $ ldd dist/ruyi-site-linux-amd64
 not a dynamic executable
 $ sha256sum dist/ruyi-site-linux-amd64
-c7d1dad9ceab7d832f4ac55c26056e0074792e4a9bffc84f144cf8c15eeead6c  dist/ruyi-site-linux-amd64
+913cdb81573c82bd54795f7665b4d660d5e81e3da4e159daf5d4b8c83e085607  dist/ruyi-site-linux-amd64
 ```
 
-P0 起内嵌了页面和 KaTeX：二进制比 `main` 上的版本大约 644 KiB（7,663,776 → 8,323,232 字节，同一工具链对比）。
+P0 起内嵌了页面和 KaTeX：二进制比 `main` 上的版本大约 644 KiB（7,663,776 → 8,323,232 字节，同一工具链对比）；P1–P3 再增加约 112 KiB（→ 8,437,920 字节）。
 
 同一源码、两次干净构建（`make clean && make build`）的 sha256 相同（`-trimpath -buildvcs=false`）。工具链 Go 1.27.2，`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`。
 **未在真实的 CentOS 7.5 / 内核 3.10 上运行过**；依据是 Go 官方文档的最低内核要求（Go 1.24 及以后 ≥ 3.2）和静态链接。建议 ECS运维 先在目标机上空跑一次 `/opt/ruyi-site/ruyi-site`（缺环境变量时应打印配置错误并以 1 退出，说明二进制能在该内核上运行）。
@@ -164,7 +192,7 @@ PASS  C6 brain not contacted by any unauthenticated request (=0)
 PASS  C7 wrong code -> 401 (=401)
 PASS  C8 wrong code: no Set-Cookie header
 PASS  C9 right code -> 200 (=200)
-     Set-Cookie (value elided): ruyi_sess=<value>; Path=/; Expires=Mon, 16 Nov 2026 10:30:34 GMT; Max-Age=2592000; HttpOnly; SameSite=Lax
+     Set-Cookie (value elided): ruyi_sess=<value>; Path=/; Expires=Mon, 16 Nov 2026 10:53:36 GMT; Max-Age=2592000; HttpOnly; SameSite=Lax
 PASS  C10 cookie name ruyi_sess
 PASS  C11 HttpOnly
 PASS  C12 SameSite=Lax
@@ -221,7 +249,7 @@ PASS  E7 Authorization never sent on ticketed image GET (=0)
 == F. Criterion 2 — no token / ticket / secrets in anything the browser can see ==
 PASS  F1 bearer token not in any response/header/Set-Cookie/page source (31 captures)
 PASS  F2 no 'Bearer'/'Authorization' strings in responses or page source
-grep: /tmp/tmp.ELIIXhHEVU/all-fresh/_api_media_math-intake.zz-yuekao-numberline-4y_19657038d590051de9672997cd2d38902c52a55392e28d7bc9410950d854e95a.raw: binary file matches
+grep: /tmp/tmp.0R7cIwlxk2/all-fresh/_api_media_math-intake.zz-yuekao-numberline-4y_19657038d590051de9672997cd2d38902c52a55392e28d7bc9410950d854e95a.raw: binary file matches
 PASS  F3 no ticket-shaped string (v1.<exp>.<mac>) in page/JSON/headers/bodies (our own session cookie in Set-Cookie excluded: it is the HMAC cookie, not a brain ticket)
 PASS  F4 session secret not in any response
 PASS  F5 family code not in page source or JSON
@@ -280,9 +308,9 @@ PASS  K4b the request itself was logged (path only)
 PASS  K6 inconsistent figure_status=ok/no media produced a warn log (qref only)
 PASS  K5 failure events are logged (sanity: logs are not empty)
      sample log lines (verbatim):
-       time=2026-10-17T18:30:34.109+08:00 level=WARN msg="login failed" ip=127.0.0.1
-       time=2026-10-17T18:30:34.784+08:00 level=WARN msg="brain request failed" op=media-lookup err="media not in source"
-       time=2026-10-17T18:30:33.617+08:00 level=DEBUG msg=request method=GET path=/healthz status=200 ms=0 ip=127.0.0.1
+       time=2026-10-17T18:53:36.173+08:00 level=WARN msg="login failed" ip=127.0.0.1
+       time=2026-10-17T18:53:36.927+08:00 level=WARN msg="brain request failed" op=media-lookup err="media not in source"
+       time=2026-10-17T18:53:35.525+08:00 level=DEBUG msg=request method=GET path=/healthz status=200 ms=0 ip=127.0.0.1
 
 == P. P0 practice page (Issue #10) — sets file, /api/practice, embedded page + KaTeX ==
 PASS  P1 no RUYI_SETS_FILE: /api/practice/demo-1 -> 404 (even logged in) (=404)
@@ -344,6 +372,122 @@ PASS  P28 answer marker not in the practice-site log
 PASS  P28 stem text not in the practice-site log
 PASS  P29 log has the set count and a count-only warning for the missing qref
 
+== Q. P1–P3 — grading through the brain, client_attempt_id idempotency, archive, ntfy heads-up, dynamic sets ==
+PASS  Q1 grade demo-1 -> 200 (=200)
+PASS  Q1b mode graded, brain confirmed, ids echoed (=["graded",true,"11111111-1111-4111-8111-111111111111","demo-1",false])
+PASS  Q1c per-question verdicts (wrong key->false is NOT leaked as an answer; 1 right, 1 wrong, 1 pending_key) (=[["graded",true],["graded",false],["pending_key",null]])
+PASS  Q1d summary total/graded/correct/pending/unanswered (=[3,2,1,1,0])
+PASS  Q1e archived and notified (=[true,"sent"])
+PASS  Q1f the brain was asked exactly once (grade_new +1) (=1)
+PASS  Q1g response has only the documented keys (replayed appears only on a replay) (=["archived","brain_recorded","client_attempt_id","mode","notify","results","set_id","summary"])
+PASS  Q2 same client_attempt_id again -> 200 replayed:true with the stored result (=[true,"graded",1])
+PASS  Q2b replay ignores a different payload (stored result wins) (=[true,3,1])
+PASS  Q2c no second brain write, no second notification, one archive line (=1 0 1 1)
+PASS  Q2d same id on another set -> 409 (=409)
+PASS  Q3 qref of the same source but outside the set (alternate q4) -> 400 (=400)
+PASS  Q3b qref outside the set (q5) -> 400 (=400)
+PASS  Q3c invented qref -> 400 (=400)
+PASS  Q3d choice answered with an array -> 400 (=400)
+PASS  Q3e wrong blank count -> 400 (=400)
+PASS  Q3f blank over the length cap -> 400 (=400)
+PASS  Q3g client_attempt_id must be a uuid -> 400 (=400)
+PASS  Q3h anonymous -> 401 (=401)
+PASS  Q3i unknown set -> 404 (=404)
+PASS  Q3j wrong content type -> 415 (=415)
+PASS  Q3k GET on the grade URL -> 405 (=405)
+PASS  Q3l none of the rejected requests reached the brain's grade endpoint (=0)
+PASS  Q4 attempts dir is 700 and the file 600, owner is the site user (=700 600 box)
+PASS  Q4b record fields (JSON Lines, version 1, client_attempt_id naming, brain attempt id, mode) (=[1,"11111111-1111-4111-8111-111111111111","demo-1","演示套","math.synthetic.p0-demo","graded",true,3,"none"])
+PASS  Q4c answers are archived as given (fill blanks as arrays) (=[["1","2","3"],"A",["x","y"]])
+PASS  Q4d family code not in the attempts archive
+PASS  Q4d bearer token not in the attempts archive
+PASS  Q4d grade token not in the attempts archive
+PASS  Q4d session secret not in the attempts archive
+PASS  Q4d ntfy topic not in the attempts archive
+PASS  Q4d cookie name not in the attempts archive
+PASS  Q4d Authorization header not in the attempts archive
+PASS  Q5 ntfy: one POST, to /<topic>, no credentials (=[1,true,true,true])
+PASS  Q5b ntfy summary line (heads-up wording, not an approval request) (=如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。)
+PASS  Q5c ntfy detail JSON carries client_attempt_id and mode, no secrets (=["11111111-1111-4111-8111-111111111111","graded"])
+PASS  Q5d family code not in the ntfy message
+PASS  Q5d bearer token not in the ntfy message
+PASS  Q5d grade token not in the ntfy message
+PASS  Q5d session secret not in the ntfy message
+PASS  Q6 grade response g1: no answer, explanation, key or brain attempt id
+PASS  Q6 grade response g2: no answer, explanation, key or brain attempt id
+PASS  Q6 grade response g2b: no answer, explanation, key or brain attempt id
+PASS  Q6b practice response still has no answers/explanations
+PASS  Q7 the grade call never used the bank:read token (mock saw 0) (=0)
+PASS  Q8 submission 2 of 4 accepted
+PASS  Q8 submission 3 of 4 accepted
+PASS  Q8 submission 4 of 4 accepted
+PASS  Q8b 5th fresh submission in the hour -> 429 (=429)
+PASS  Q8c 429 carries Retry-After
+PASS  Q8d replay of an accepted attempt is still served while limited (=true)
+PASS  Q8e a fresh login from the same address does not reset the limit (=429)
+PASS  Q8f another set has its own allowance (=200)
+PASS  Q9 after a restart the same client_attempt_id is replayed from the archive (=[true,"graded",1])
+PASS  Q9b ... without grading, notifying or archiving again (=0 0)
+PASS  Q10 RUYI_AUTO_SOURCES empty (default) -> /api/practice/new is off (404) (=404)
+PASS  Q10b dynamic sets require login (401) (=401)
+PASS  Q10c a source outside RUYI_AUTO_SOURCES -> 400 (=400)
+PASS  Q10d n=0 -> 400 (=400)
+PASS  Q10d n=21 -> 400 (=400)
+PASS  Q10d n=abc -> 400 (=400)
+PASS  Q10e n=2 -> 200 (=200)
+PASS  Q10f set id looks like auto-<8>
+PASS  Q10g response: url, count, truncated, expiry present (=[true,2,false,true])
+PASS  Q10h the dynamic set is a normal practice set (seq order 1,2) (=example.set:math:1,example.set:math:2)
+PASS  Q10i grading a dynamic set works (graded, 1 right) (=["graded",1,true])
+PASS  Q10j n larger than the source returns all (5) with truncated + note (=[5,true,20,true])
+PASS  Q10k wrong_only -> 501 wrong_only_unavailable (no invented logic) (=501 wrong_only_unavailable)
+PASS  Q10l same seed -> same selection (=example.set:math:3,example.set:math:2,example.set:math:4)
+PASS  Q10m after the TTL (3 s) the dynamic set is gone (404) (=404)
+PASS  Q10n a made-up auto id -> 404 (=404)
+PASS  Q11 [grade token not configured] -> 200 mode archive_only, brain_recorded false (=200 ["archive_only",false,true,"sent"])
+PASS  Q11b [grade token not configured] every result is pending_key with correct:null, summary pending 3 (=[[["pending_key",null]],3,0,0])
+PASS  Q11c [grade token not configured] ntfy says 未判分 and never 对/错/大脑 (=10)
+PASS  Q11d [grade token not configured] exactly one more notification (=1)
+PASS  Q11e [grade token not configured] response never says the brain recorded anything
+PASS  Q11f [not configured] the brain grade endpoint was never called (=0)
+PASS  Q11 [grade endpoint missing (404)] -> 200 mode archive_only, brain_recorded false (=200 ["archive_only",false,true,"sent"])
+PASS  Q11b [grade endpoint missing (404)] every result is pending_key with correct:null, summary pending 3 (=[[["pending_key",null]],3,0,0])
+PASS  Q11c [grade endpoint missing (404)] ntfy says 未判分 and never 对/错/大脑 (=10)
+PASS  Q11d [grade endpoint missing (404)] exactly one more notification (=1)
+PASS  Q11e [grade endpoint missing (404)] response never says the brain recorded anything
+PASS  Q11 [grade endpoint failing (500)] -> 200 mode archive_only, brain_recorded false (=200 ["archive_only",false,true,"sent"])
+PASS  Q11b [grade endpoint failing (500)] every result is pending_key with correct:null, summary pending 3 (=[[["pending_key",null]],3,0,0])
+PASS  Q11c [grade endpoint failing (500)] ntfy says 未判分 and never 对/错/大脑 (=10)
+PASS  Q11d [grade endpoint failing (500)] exactly one more notification (=1)
+PASS  Q11e [grade endpoint failing (500)] response never says the brain recorded anything
+PASS  Q11g [QD] one archive line, mode archive_only, 600 perms (=[1,"archive_only"] 600)
+PASS  Q11g [QO] one archive line, mode archive_only, 600 perms (=[1,"archive_only"] 600)
+PASS  Q11g [QF] one archive line, mode archive_only, 600 perms (=[1,"archive_only"] 600)
+PASS  Q12 unwritable archive dir: still graded, archived:false (both submissions) (=["graded",false]["graded",false])
+PASS  Q12b exactly one error log line for it, without path or content (=1 0)
+PASS  Q13 ntfy unreachable: 200, graded, notify:retrying, archived (=200 ["graded","retrying",true])
+PASS  Q13b the retry failure is logged once as a warning (=1)
+PASS  Q13c no ntfy topic or address in the log
+PASS  Q14 all 17 old static files still byte-identical to origin/main with grading enabled (diffs) (=0)
+PASS  Q14b numberline page unchanged (=12c9b7a7b6e78b3b33206717ee52bf2fe03f84768c02b99413f101dac022c02d)
+PASS  Q15 bearer token not in the logs of the P1–P3 sites
+PASS  Q15 grade token not in the logs of the P1–P3 sites
+PASS  Q15 family code not in the logs of the P1–P3 sites
+PASS  Q15 session secret not in the logs of the P1–P3 sites
+PASS  Q15 ntfy topic not in the logs of the P1–P3 sites
+PASS  Q15 qref not in the logs of the P1–P3 sites
+PASS  Q15 answer text not in the logs of the P1–P3 sites
+PASS  Q15 stem text not in the logs of the P1–P3 sites
+PASS  Q15 client answer not in the logs of the P1–P3 sites
+PASS  Q15b degraded grading is logged (kind only)
+PASS  Q16 grade token equal to the read token -> refused, names the variable, no value
+PASS  Q16b RUYI_GRADE_MAX_PER_HOUR invalid -> refused, variable named
+PASS  Q16b RUYI_ATTEMPTS_DIR invalid -> refused, variable named
+PASS  Q16b RUYI_AUTO_SOURCES invalid -> refused, variable named
+PASS  Q16b RUYI_NTFY_BASE_URL invalid -> refused, variable named
+PASS  Q16b RUYI_BRAIN_GRADE_PATH invalid -> refused, variable named
+PASS  Q17 startup does not touch the attempts dir until the first submission (lazy create)
+
 == L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow ==
 PASS gate shown when not logged in
 PASS wrong code shows message
@@ -387,7 +531,7 @@ PASS illegal set id: friendly message, no cards
 PASS gate shown when not logged in
 PASS wrong code shows message
 PASS login through the form renders 3 question cards
-  dom: {"title":"演示套","docTitle":"演示套 · 如意","tex":15,"katex":15,"display":2,"err":0,"raw":0,"mathml":15,"blanks":[3,0,2],"radios":[0,4,0],"areas":[0,0,0],"script":0,"pwned":"undefined","q3code":["x<y"],"q3strong":["解方程组"],"optsHaveKatex":[true,true,true,true],"noOptionRawDollar":true,"stemRawDollar":false,"qno":["第 1 题","第 2 题","第 3 题"],"submit":{"disabled":true,"text":"提交（即将开放）","shown":true},"noteOnPage":true,"verdicts":0,"fontOk":true,"sameOrigin":true,"resources":["/vendor/katex/fonts/KaTeX_Main-Regular.woff2","/vendor/katex/fonts/KaTeX_Math-Italic.woff2","/vendor/katex/fonts/KaTeX_Size4-Regular.woff2","/vendor/katex/katex.min.css","/vendor/katex/katex.min.js"]}
+  dom: {"title":"演示套","docTitle":"演示套 · 如意","tex":15,"katex":15,"display":2,"err":0,"raw":0,"mathml":15,"blanks":[3,0,2],"radios":[0,4,0],"areas":[0,0,0],"script":0,"pwned":"undefined","q3code":["x<y"],"q3strong":["解方程组"],"optsHaveKatex":[true,true,true,true],"noOptionRawDollar":true,"stemRawDollar":false,"qno":["第 1 题","第 2 题","第 3 题"],"submit":{"disabled":false,"text":"提交","shown":true},"noteOnPage":true,"resultShown":false,"verdicts":0,"fontOk":true,"sameOrigin":true,"resources":["/vendor/katex/fonts/KaTeX_Main-Regular.woff2","/vendor/katex/fonts/KaTeX_Math-Italic.woff2","/vendor/katex/fonts/KaTeX_Size4-Regular.woff2","/vendor/katex/katex.min.css","/vendor/katex/katex.min.js"]}
 PASS title from the set config — 演示套
 PASS formulas rendered by local KaTeX (.katex present, none left as raw) — tex=15 katex=15 raw=0
 PASS no .katex-error anywhere
@@ -400,8 +544,8 @@ PASS no free-form answer area on questions that have blanks/options
 PASS HTML is escaped, never executed (<script> text shown, no element, no side effect)
 PASS Markdown: `code` and **bold** rendered; x<y kept literally — [["x<y"],["解方程组"]]
 PASS question labels are plain ordinals
-PASS submit button is disabled and says 即将开放; page explains draft-only — {"disabled":true,"text":"提交（即将开放）","shown":true}
-PASS no correct/incorrect UI exists
+PASS submit button is enabled and says 提交; no result UI before submitting — {"disabled":false,"text":"提交","shown":true}
+PASS no correct/incorrect UI before submitting
 PASS KaTeX woff2 font actually loaded from this origin
 PASS every request is same-origin (nothing from a CDN) — ["/vendor/katex/fonts/KaTeX_Main-Regular.woff2","/vendor/katex/fonts/KaTeX_Math-Italic.woff2","/vendor/katex/fonts/KaTeX_Size4-Regular.woff2","/vendor/katex/katex.min.css","/vendor/katex/katex.min.js"]
 PASS only the embedded files were fetched (page assets) — ["/vendor/katex/fonts/KaTeX_Main-Regular.woff2","/vendor/katex/fonts/KaTeX_Math-Italic.woff2","/vendor/katex/fonts/KaTeX_Size4-Regular.woff2","/vendor/katex/katex.min.css","/vendor/katex/katex.min.js"]
@@ -410,7 +554,7 @@ PASS no horizontal page overflow at 390px — {"scrollW":390,"iw":390,"small":0,
 PASS touch targets >= 44px (blanks, options, buttons) — too small: 0
 PASS inputs use >= 16px font (no iOS zoom); body is 18px — minFont=18 body=18
 PASS blank boxes are wide (>= 110px) — min width 135
-  draft keys: ["v","set","a","t"] ls keys: ["ruyi-practice-demo-1-v1"]
+  draft keys: ["v","set","a","t","cid","sig","res"] ls keys: ["ruyi-practice-demo-1-v1"]
 PASS draft saved under ruyi-practice-demo-1-v1 with set, timestamp and qref-keyed answers — {"example.set:math:1":["5/4","","-3"],"example.set:math:2":"B","example.set:math:3":["","y=1"]}
 PASS family code not in localStorage / sessionStorage / document.cookie
 PASS session cookie is HttpOnly (invisible to JS)
@@ -418,6 +562,21 @@ PASS progress shows answered count
 PASS after reload (cookie kept) the cards come back without the gate
 PASS draft restored after reload (blanks and the chosen option) — {"q1":["5/4","","-3"],"q2":[false,true,false,false],"q2sel":1,"q3":["","y=1"]}
 PASS 「清空」 removes the draft and the inputs — {"ls":null,"vals":"","checked":0}
+PASS [graded] demo set loads for the submit flow
+PASS [graded] submitting nothing shows a hint and sends no request
+PASS [graded] while submitting the button is disabled (提交中…) and a double click sends one request — {"dis":true,"text":"提交中…","n":1,"clear":true}
+PASS [graded] result card appears
+PASS [graded] request carries client_attempt_id (uuid) and only qref/answer pairs; multi-key answers are arrays/strings by type — {"client_attempt_id":"4df42d1a-21c7-4a73-bdbc-27c467aade13","answers":[{"qref":"example.set:math:1","answer":["5/4","","-3"]},{"qref":"example.set:math:2","answer":"B"},{"qref":"example.set:math:3","answer":["","y=1"]}]}
+PASS [graded] graded mode: 「已提交到大脑」 with the brain-confirmed summary — 已提交到大脑 / 共 3 题 · 答对 1 · 答错 1 · 待核对 1 · 未作答 0
+PASS [graded] graded mode: per-question badges (wrong, right, pending) and no answer key anywhere — ["✗ 不对|vd wrong","✓ 答对了|vd ok","待核对|vd pend"]
+PASS [graded] inputs locked after submitting, 再做一次 offered, submit button hidden
+PASS [graded] draft keeps client_attempt_id and the stored result (no family code, no tokens)
+PASS [graded] after reload the result is shown again without a new request
+PASS [graded] 「再做一次」 clears answers, result and attempt id; form is editable again — {"ls":null,"vals":"","locked":false,"submit":"block","result":"none","vd":0,"btnOk":true}
+PASS [graded] offline submit: message, button usable again, answers kept
+PASS [graded] retry succeeds
+PASS [graded] the retry reused the same client_attempt_id (idempotent) — ["7b457a77-215b-43ea-b286-926d8e2168af","7b457a77-215b-43ea-b286-926d8e2168af"]
+PASS [graded] edited answers after a failed attempt use a fresh client_attempt_id — ["2cb47d10-30ef-43d3-98fd-816843e8ce8e","9371fe44-fdb9-4988-9960-d7fb55995b1f"]
 PASS config order wins (3 then 1) and the missing qref only yields a notice
 PASS free-form question gets a wide answer area (textarea)
 PASS textarea answer saved as a string under ruyi-practice-free-3-v1 — {"example.set:math:4":"1/2+1/3=5/6\n过程：通分"}
@@ -425,11 +584,31 @@ PASS answer area is tall and full-width on a phone — {"h":173.984375,"w":342,"
 PASS unknown set: friendly message, no cards
 PASS logout shows the gate and removes the questions
 
-39/39 browser checks passed
-PASS  L4 practice page in headless Chrome (all passed)
+54/54 browser checks passed
+PASS  L4 practice page + submit flow in headless Chrome, brain grades (all passed)
 PASS  L5 no code/token in the log of the browser-driven practice run
+PASS  L5b the browser-driven attempts were archived (JSON Lines, 600) (=600)
+PASS [archive] demo set loads for the submit flow
+PASS [archive] submitting nothing shows a hint and sends no request
+PASS [archive] while submitting the button is disabled (提交中…) and a double click sends one request — {"dis":true,"text":"提交中…","n":1,"clear":true}
+PASS [archive] result card appears
+PASS [archive] request carries client_attempt_id (uuid) and only qref/answer pairs; multi-key answers are arrays/strings by type — {"client_attempt_id":"c307d9a5-ae51-497e-8ba5-72338863eeaf","answers":[{"qref":"example.set:math:1","answer":["5/4","","-3"]},{"qref":"example.set:math:2","answer":"B"},{"qref":"example.set:math:3","answer":["","y=1"]}]}
+PASS [archive] archive-only: heading says 已提交（暂未判分） — 已提交（暂未判分） / 共 3 题 · 已作答 3 · 未作答 0
+PASS [archive] archive-only: every question is 待核对 — no ✓/✗ verdict at all — ["待核对|vd pend","待核对|vd pend","待核对|vd pend"]
+PASS [archive] archive-only: page never says 已记入大脑 / 已提交到大脑 / mentions 大脑 — text scanned: 596 chars
+PASS [archive] inputs locked after submitting, 再做一次 offered, submit button hidden
+PASS [archive] draft keeps client_attempt_id and the stored result (no family code, no tokens)
+PASS [archive] after reload the result is shown again without a new request
+PASS [archive] 「再做一次」 clears answers, result and attempt id; form is editable again — {"ls":null,"vals":"","locked":false,"submit":"block","result":"none","vd":0,"btnOk":true}
+PASS [archive] offline submit: message, button usable again, answers kept
+PASS [archive] retry succeeds
+PASS [archive] the retry reused the same client_attempt_id (idempotent) — ["8ba63fb0-8c68-481e-a199-48025d331a9e","8ba63fb0-8c68-481e-a199-48025d331a9e"]
+PASS [archive] edited answers after a failed attempt use a fresh client_attempt_id — ["6dbbb19a-bc61-4b73-8648-6fb4aa630213","9a18b059-0de9-48c8-893a-e24d2baba57b"]
 
-TOTAL: 200 passed, 0 failed
+16/16 browser checks passed
+PASS  L6 degraded (archive-only) submit flow: the page never claims the brain recorded it (all passed)
+
+TOTAL: 316 passed, 0 failed
 ```
 
 ## 未覆盖 / 需要后续验证
@@ -437,4 +616,7 @@ TOTAL: 200 passed, 0 failed
 - 真实大脑的接口行为（本次是 mock）；真实卷的 `number` 形态与 60 题互不相同需在真实数据上复核。
 - 真实 15 分钟票据到期；真实 4 MiB 级大图与慢网。
 - iOS Safari / 微信内置浏览器（本次只有桌面 Chrome 的手机视口模拟）。
-- ECS 上的 systemd 219 单元（只按 219 文档核对过指令名，没在 219 上跑过）。
+- ECS 上的 systemd 219 单元（只按 219 文档核对过指令名，没在 219 上跑过）；`ReadWritePaths=/var/lib/ruyi-site` 与目录属主 700 的组合需要在目标机上实测（见 `DEPLOY-P3.md`）。
+- **大脑判分接口的真实契约**：站点按草案对接（`internal/brain/grade.go`），mock 也是按草案写的；契约一定后要对真实接口再跑一遍 Q 段，并确认判分令牌的权限范围、`client_attempt_id` 幂等语义、`pending_key` / `unsupported` 的返回形态。
+- 选题（`wrong_only` / `due_first`）等大脑出接口；现在是 501。
+- ntfy 的真实投递（ECS 到 `ntfy.sh` 的出网）只用本地桩验证过。

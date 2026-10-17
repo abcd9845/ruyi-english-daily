@@ -154,8 +154,8 @@ WantedBy=multi-user.target
 
 说明：
 
-- 不写 `User=`/`Group=` 以外的提权相关指令。
 - 日志默认进 journal；`/var/log/ruyi-site` 备用。
+- 单元里没有用 systemd 219 不支持的新指令。
 - 若 `ProtectSystem=strict` 在该机器上起不来，先改成 `ProtectSystem=full` 再试，并告知开发。
 
 加载与启停：

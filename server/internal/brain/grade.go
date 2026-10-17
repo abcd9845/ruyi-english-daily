@@ -8,7 +8,7 @@ package brain
 //
 //	POST {base}{gradePath}                 Authorization: Bearer <grade token>
 //	{"brain":"ruyi","client_attempt_id":"^[A-Za-z0-9._:-]{1,160}$",
-//	 "items":[{"qref"(lower-case),"answer"(string ≤500 chars | [string…≤10, each ≤500]),
+//	 "items":[{"qref"(lower-case),"answer"(string ≤2000 chars | [string…≤10, each ≤2000]),
 //	           "rev"?(int ≥1),"attempt_kind"?:"correction|variant",
 //	           "answered_at"?:RFC3339 within [now-7d, now+1min],
 //	           "session_ref"?(1..200 chars),"payload"?(JSON, ≤4096 bytes)}, …1..50,
@@ -69,7 +69,7 @@ const (
 	AttemptVariant = "variant"
 	maxSessionRef  = 200
 	maxQRefLen     = 300
-	MaxAnswerLen   = 500  // characters per answer string / blank
+	MaxAnswerLen   = 2000 // Unicode code points (runes, not bytes) per answer string / blank (brain PR #47)
 	MaxPayload     = 4096 // bytes of the encoded payload
 	maxKeyLen      = 198  // "ps:" + id + ":" + canonical qref
 

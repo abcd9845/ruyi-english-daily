@@ -145,7 +145,7 @@ Go 单测另覆盖：判分线上契约编解码与"必须有大脑确认"（见
 | 404 靠结构区分：grade 的 `details.qrefs` 404 =「未知题」；兜底 `not_found`/"not found" = 未部署 → 降级；lookup 任何 404/501/405 = 未部署（退回列表）；选题 "source not found" 是明确错误，与「未就绪」不同 | S1–S1e；单测 `TestErrorBodyIsParsedAndSanitized`、`TestLookupAnyNotFoundMeansNotDeployed`、`TestPickSourceNotFoundIsNotNotDeployed` | 通过 |
 | 429 `rate_limited`/"daily grade limit reached"/`details.qrefs`/`Retry-After`（上海日、3 次、整批拒绝）；`Retry-After` 透传 | S2；R4 系列 | 通过 |
 | `answered_at`：窗口外不发；同键换 `answered_at` → 409；不带 → 重放；201/200 | S3–S4d；单测 `TestAnsweredAtWindow`、`TestGradeAcceptsCreatedAndOK` | 通过 |
-| 严格 400 全在站点发送前自校验（未知字段、小写 qref、cid 正则、1..50、答案 ≤10×≤500 字、`attempt_kind`、`session_ref`、`payload`、query 白名单）；整次运行 mock 记录到的 400 只来自 S5/S5b 的 4 次直连探测 | S5–S5d、S10、S10b；单测 `TestGradeBodyIsStrictAndLowerCase`、`TestValidateAgainstTheDocumentLimits` | 通过 |
+| 严格 400 全在站点发送前自校验（未知字段、小写 qref、cid 正则、1..50、答案 ≤10 项、每项 ≤2000 字符（按字符计，不是字节；大脑 PR #47）、`attempt_kind`、`session_ref`、`payload`、query 白名单）；整次运行 mock 记录到的 400 只来自 S5/S5b/S5c5 的 5 次直连探测 | S5–S5d、S10、S10b；单测 `TestGradeBodyIsStrictAndLowerCase`、`TestValidateAgainstTheDocumentLimits` | 通过 |
 | `rev_mismatch` 只用 `details.qref/rev/current_rev` 定位，不看 `details.index` | S6；单测 | 通过 |
 | 别名与大小写：lookup/选题回规范 qref，grade 回显发送的串；按发送串匹配；别名与规范 qref 同一幂等键 | S7–S7d；单测 `TestLookupAliasesAndCase` | 通过 |
 | 选题 `n` ≤10（站点超过先降到 10）、reasons 词表、`origin` 只有 review\|wrong | S8；单测 `TestPickNeverAsksForMoreThanTenAndSendsOnlyKnownQuery` | 通过 |
@@ -605,8 +605,12 @@ PASS  S4c brain: same key + a different answered_at -> 409 idempotency_conflict 
 PASS  S4d brain: attempt_kind / session_ref / payload do not take part in the comparison (replay, 200) (=200)
 PASS  S5 grade: unknown body field -> 400 invalid_json (mock mirrors the brain) (=400 invalid_json)
 PASS  S5b grade: any query other than ?brain= -> 400; upper-case qref -> 400; answered_at out of range -> 400 (=400 400 400)
-PASS  S5c an answer of 600 characters (> 500) is never sent: archived, 200, brain not called with it (=200 ["archive_only",0,"not_sent",true] 0)
-PASS  S5d a rev below 1 never reaches the brain: the site answers 400 bad_rev itself (=400 bad_rev 4)
+PASS  S5c an answer of exactly 2000 characters is SENT to the brain (mode graded, not archive_only/not_sent; this free-text qref is 'unsupported' at the mock, so recorded:false) and the brain accepts it (no 400) (=200 ["graded","unsupported"] 1 0)
+PASS  S5c2 2000 Chinese characters (6000 bytes) count as 2000 characters: sent, accepted by the brain (=200 ["graded","unsupported"] 2 0)
+PASS  S5c3 2001 characters (ASCII or Chinese): the site refuses with 400 itself (free-text cap = the brain's cap); the brain is never called, nothing truncated (=400 400 0 0)
+PASS  S5c4 brain mock: 10 blanks x 2000 characters -> 201 (=201)
+PASS  S5c5 brain mock: one blank of 2001 characters -> 400 validation_failed (=400 validation_failed)
+PASS  S5d a rev below 1 never reaches the brain: the site answers 400 bad_rev itself (=400 bad_rev 5)
 PASS  S6 rev_mismatch 409 (details qref/rev/current_rev, no index) -> 题目已更新，请刷新 (=409 ["rev_mismatch",true])
 PASS  S7 set page keeps the set's own strings (alias and mixed case); lookup answered canonical qrefs (=200 ["example.set:math:2-old","Example.Set:Math:1"] [[]])
 PASS  S7b grade with an alias and a mixed-case qref: lower-cased on the wire, echoes matched back to the page's strings, both graded + recorded (=200 ["graded",2,[["example.set:math:2-old",true],["Example.Set:Math:1",true]]])
@@ -616,7 +620,7 @@ PASS  S8 n above 10 is lowered to 10 before asking the brain (no 400 at the brai
 PASS  S1c lookup 404 (catch-all) = not deployed -> fallback to the list, set page still 200 (=200 [1])
 PASS  S9 probe against a brain without lookup: a warning, startup continues
 PASS  S9b ... and the site is healthy (=200)
-PASS  S10 the site never produced a 400-class request to the brain in this section (grade_400 only from the 4 direct mock probes S5/S5b) (=4 0 0)
+PASS  S10 the site never produced a 400-class request to the brain in this section (grade_400 only from the 5 direct mock probes S5/S5b x3/S5c5) (=5 0 0)
 PASS  S10b the R section never produced one either (=0 0 0)
 PASS  S11 bearer token not in the S site logs
 PASS  S11 grade token not in the S site logs

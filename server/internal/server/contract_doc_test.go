@@ -140,19 +140,23 @@ func TestDocAnsweredAtOnlyInsideTheBrainsWindow(t *testing.T) {
 	}
 }
 
-// A free-form answer longer than the brain's 500 characters is neither
-// truncated nor sent: it is archived (the brain would answer 400).
-func TestDocAnswerOver500CharactersIsNotSent(t *testing.T) {
+// The brain accepts answers of up to 2000 characters (Unicode code points, not
+// bytes; brain PR #47). Up to and including 2000 the answer is sent and
+// recorded; one more is refused by this site itself (400) before it can reach
+// the brain, never truncated.
+func TestDocAnswerLimit2000Characters(t *testing.T) {
 	e, _, ck := aliasEnv(t)
-	long := strings.Repeat("字", 501)
-	resp, b, g := e.submit(t, ck, "free-3", ans(cid1, q3+`|"`+long+`"`))
-	if resp.StatusCode != 200 || g.Mode != "archive_only" || g.BrainRecorded || g.BrainNote != "not_sent" || e.brain.gradeCalls() != 0 {
-		t.Fatalf("%d %s calls=%d", resp.StatusCode, b, e.brain.gradeCalls())
+	for i, n := range []int{500, 501, 2000} {
+		text := strings.Repeat("字", n) // 2000 x 3 bytes = 6000 bytes: counted in characters, not bytes
+		resp, b, g := e.submit(t, ck, "free-3", ans(uuid(10+i), q3+`|"`+text+`"`))
+		if resp.StatusCode != 200 || g.Mode != "graded" || !g.BrainRecorded || e.brain.gradeCalls() != i+1 || g.Results[0].Status != "pending_key" || !g.Results[0].Recorded {
+			t.Fatalf("%d characters must be sent and recorded: %d %s calls=%d", n, resp.StatusCode, b, e.brain.gradeCalls())
+		}
 	}
-	ok500 := strings.Repeat("字", 500)
-	resp, b, g = e.submit(t, ck, "free-3", ans(uuid(2), q3+`|"`+ok500+`"`))
-	if resp.StatusCode != 200 || e.brain.gradeCalls() != 1 || g.Results[0].Status != "pending_key" || !g.Results[0].Recorded {
-		t.Errorf("500 characters is fine: %d %s", resp.StatusCode, b)
+	calls := e.brain.gradeCalls()
+	resp, b, _ := e.submit(t, ck, "free-3", ans(uuid(20), q3+`|"`+strings.Repeat("字", 2001)+`"`))
+	if resp.StatusCode != 400 || e.brain.gradeCalls() != calls {
+		t.Fatalf("2001 characters: want 400 and no brain call, got %d %s calls=%d", resp.StatusCode, b, e.brain.gradeCalls())
 	}
 }
 

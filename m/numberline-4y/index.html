@@ -132,7 +132,7 @@ function load(){
   Promise.all([api('GET','/api/config'), api('GET','/api/sets/'+SOURCE)]).then(function(rs){
     var cfg=rs[0], sets=rs[1];
     if(cfg.status===401 || sets.status===401){ showGate('登录已过期，请重新输入家庭码'); return; }
-    ntfyUrl = (cfg.json && typeof cfg.json.ntfy_url==='string' && /^https:\/\/ntfy\.sh\/[A-Za-z0-9_-]+$/.test(cfg.json.ntfy_url)) ? cfg.json.ntfy_url : null;
+    ntfyUrl = (cfg.json && typeof cfg.json.ntfy_url==='string' && /^https:\/\/(ntfy\.sh|ntfy-me\.com)\/[A-Za-z0-9_-]+$/.test(cfg.json.ntfy_url)) ? cfg.json.ntfy_url : null;
     if(sets.status!==200 || !sets.json || !Array.isArray(sets.json.items)){
       $('countPill').textContent='题库不可用';
       var m=(sets.json && sets.json.message) ? sets.json.message : '题库暂时连不上';

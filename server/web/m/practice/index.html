@@ -19,6 +19,8 @@ h1{font-size:1.3rem;margin:0 0 6px;line-height:1.35}
 .bar{height:8px;background:var(--line);border-radius:999px;overflow:hidden;margin-top:12px}
 .bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#14b8a6,#0f766e);transition:width .2s}
 .qno{font-weight:700;color:var(--accent);margin:0 0 8px}
+.tag{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;background:#f5f5f4;color:#57534e;font-size:.75rem;font-weight:600;vertical-align:middle}
+.refpend{display:inline-block;margin:0 0 10px;padding:4px 10px;border-radius:8px;background:#fffbeb;color:#92400e;font-size:.85rem;font-weight:600}
 .stem{word-break:break-word;margin:0 0 14px}
 .stem p{margin:0 0 .7em}.stem p:last-child{margin-bottom:0}
 .stem code,.opt code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f5f5f4;border-radius:6px;padding:1px 5px;font-size:.92em}
@@ -105,7 +107,9 @@ footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
 var SET_ID=null, DRAFT_KEY=null;
 var $=function(id){return document.getElementById(id);};
 var items=[], answers={}, saveTimer=null;
-var cid=null, cidSig=null, result=null, submitting=false;
+var cid=null, cidSig=null, cidAt=null, result=null, submitting=false;
+// optional ?kind=correction|variant is passed through as attempt_kind (nothing else reads it)
+var KIND=(function(){var m=/[?&]kind=(correction|variant)(?:&|#|$)/.exec(location.search);return m?m[1]:null;})();
 var UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e;}
@@ -267,7 +271,7 @@ function start(){
   });
 }
 
-function load(){
+function load(note){
   $('countPill').textContent='加载中';
   setStatus('');
   api('GET','/api/practice/'+SET_ID).then(function(r){
@@ -280,7 +284,7 @@ function load(){
     }
     if(r.status!==200 || !r.json || !Array.isArray(r.json.items)){
       $('countPill').textContent='题库不可用';
-      setStatus(((r.json&&r.json.message)||'题库暂时连不上')+'。稍后点「重试」。',load);
+      setStatus(((r.json&&r.json.message)||'题库暂时连不上')+'。稍后点「重试」。',function(){load();});
       $('qs').innerHTML=''; $('actions').style.display='none'; $('submitCard').style.display='none'; $('resultCard').style.display='none';
       return;
     }
@@ -293,22 +297,23 @@ function load(){
     render();
     $('actions').style.display='flex';
     showSubmitArea();
+    if(typeof note==='string' && note) submitMsg(note);
   }).catch(function(){
     $('countPill').textContent='离线';
-    setStatus('连不上练习站服务，请检查网络后重试。',load);
+    setStatus('连不上练习站服务，请检查网络后重试。',function(){load();});
   });
 }
 
 // ---- draft (never contains the family code) ---------------------------------
 function loadDraft(){
-  answers={}; cid=null; cidSig=null; result=null;
+  answers={}; cid=null; cidSig=null; cidAt=null; result=null;
   try{
     var d=JSON.parse(localStorage.getItem(DRAFT_KEY)||'{}');
     if(d && d.a && typeof d.a==='object'){
       items.forEach(function(q){ if(Object.prototype.hasOwnProperty.call(d.a,q.qref)) answers[q.qref]=d.a[q.qref]; });
     }
     if(d && typeof d.cid==='string' && UUID_RE.test(d.cid)){
-      cid=d.cid; cidSig=typeof d.sig==='string'?d.sig:null;
+      cid=d.cid; cidSig=typeof d.sig==='string'?d.sig:null; cidAt=typeof d.at==='string'?d.at:null;
       var r=d.res;
       if(r && typeof r==='object' && r.client_attempt_id===cid && r.set_id===SET_ID && Array.isArray(r.results) && r.summary && typeof r.summary==='object') result=r;
     }
@@ -317,7 +322,7 @@ function loadDraft(){
 function saveDraftNow(){
   if(!DRAFT_KEY) return;
   try{
-    localStorage.setItem(DRAFT_KEY,JSON.stringify({v:1,set:SET_ID,a:answers,t:new Date().toISOString(),cid:cid,sig:cidSig,res:result}));
+    localStorage.setItem(DRAFT_KEY,JSON.stringify({v:1,set:SET_ID,a:answers,t:new Date().toISOString(),cid:cid,sig:cidSig,at:cidAt,res:result}));
     $('savedHint').textContent='已自动保存 · '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
   }catch(e){}
   updateProgress();
@@ -357,6 +362,8 @@ function render(){
   items.forEach(function(q){
     var card=el('section','card'); card.id='q'+q.ordinal; card.setAttribute('data-qref',q.qref);
     card.appendChild(el('div','qno','第 '+q.ordinal+' 题'));
+    if(q.origin==='wrong'||q.origin==='review'){ var og=el('span','tag',q.origin==='wrong'?'错题':'复习'); card.firstChild.appendChild(og); }
+    if(typeof q.ref_pending==='string' && q.ref_pending){ card.appendChild(el('div','refpend','参考答案待核，不自动判')); }
     var stem=el('div','stem'); card.appendChild(stem);
     var r=mdInto(stem,q.stem_md||'',false);
 
@@ -436,7 +443,9 @@ function payloadAnswers(){
     } else if(Array.isArray(v)){
       a=v.map(function(x){return typeof x==='string'?x:'';});
     } else a=v;
-    list.push({qref:q.qref,answer:a});
+    var it={qref:q.qref,answer:a};
+    if(typeof q.rev==='number' && q.rev>0) it.rev=q.rev;
+    list.push(it);
   });
   return list;
 }
@@ -449,7 +458,9 @@ function showSubmitArea(){
 function setLocked(on){
   document.querySelectorAll('#qs input,#qs textarea').forEach(function(x){ x.disabled=!!on; });
 }
-// 「已提交到大脑」 only when the brain itself confirmed (mode graded + brain_recorded).
+// 「已提交到大脑」 only when the brain itself confirmed it recorded the answers
+// (brain_recorded + per-question recorded:true). Anything else is worded as
+// archive-only / pending / not auto-graded, never as recorded in the brain.
 function brainConfirmed(r){ return !!r && r.mode==='graded' && r.brain_recorded===true; }
 function applyResult(){
   document.querySelectorAll('#qs .vd').forEach(function(n){ n.remove(); });
@@ -461,22 +472,30 @@ function applyResult(){
     var r=byRef[card.getAttribute('data-qref')]; if(!r) return;
     var cls='pend', txt='待核对';
     if(r.status==='unanswered'){ cls='none'; txt='未作答'; }
-    else if(confirmed && r.status==='graded' && typeof r.correct==='boolean'){
+    else if(r.status==='unsupported'){ cls='none'; txt='不自动判分'; }
+    else if(confirmed && r.recorded===true && r.status==='graded' && typeof r.correct==='boolean'){
       if(r.correct){ cls='ok'; txt='✓ 答对了'; } else { cls='wrong'; txt='✗ 不对'; }
     }
     card.appendChild(el('div','vd '+cls,txt));
   });
   var sm=result.summary||{};
-  var total=+sm.total||0, un=+sm.unanswered||0;
+  var total=+sm.total||0, un=+sm.unanswered||0, uns=+sm.unsupported||0, asked=total-un;
+  var rc=+result.recorded_count||0;
   box.className='card resbox '+(confirmed?'done':'soft2');
   if(confirmed){
-    box.appendChild(el('h2',null,'已提交到大脑'));
-    box.appendChild(el('div','sum','共 '+total+' 题 · 答对 '+(+sm.correct||0)+' · 答错 '+Math.max(0,(+sm.graded||0)-(+sm.correct||0))+' · 待核对 '+(+sm.pending||0)+' · 未作答 '+un));
-    if((+sm.pending||0)>0) box.appendChild(el('p','meta','「待核对」是这道题暂时没有判分，不是做错了。'));
+    box.appendChild(el('h2',null,rc>=asked?'已提交到大脑':'已提交到大脑（'+rc+' / '+asked+' 题）'));
+    box.appendChild(el('div','sum','共 '+total+' 题 · 答对 '+(+sm.correct||0)+' · 答错 '+Math.max(0,(+sm.graded||0)-(+sm.correct||0))+' · 待核对 '+(+sm.pending||0)+(uns>0?' · 不自动判分 '+uns:'')+' · 未作答 '+un));
+    if((+sm.pending||0)>0) box.appendChild(el('p','meta','「待核对」是这道题暂时没有判分（参考答案还在核对），不是做错了。'));
+    if(rc<asked) box.appendChild(el('p','meta','有 '+(asked-rc)+' 道题不能自动判分，答案只存在练习站的存档里，家长会看。'));
+  } else if(result.mode==='graded'){
+    box.appendChild(el('h2',null,'已提交（仅留档，未记入大脑）'));
+    box.appendChild(el('div','sum','共 '+total+' 题 · 已作答 '+asked+' · 未作答 '+un));
+    box.appendChild(el('p','meta','这些题不能自动判分，答案已经存档，家长会核对，现在不显示对错。'));
+    if(result.archived===false) box.appendChild(el('p','msg bad','这次提交没能保存下来，请告诉家长。'));
   } else {
     box.appendChild(el('h2',null,'已提交（暂未判分）'));
-    box.appendChild(el('div','sum','共 '+total+' 题 · 已作答 '+(total-un)+' · 未作答 '+un));
-    box.appendChild(el('p','meta','答案已经收好，家长会稍后核对，现在不显示对错。'));
+    box.appendChild(el('div','sum','共 '+total+' 题 · 已作答 '+asked+' · 未作答 '+un));
+    box.appendChild(el('p','meta',result.brain_note==='not_ready'?'大脑接口还没准备好，答案已经存档，家长会稍后核对，现在不显示对错。':'答案已经收好，家长会稍后核对，现在不显示对错。'));
     if(result.archived===false) box.appendChild(el('p','msg bad','这次提交没能保存下来，请告诉家长。'));
   }
   if(result.replayed) box.appendChild(el('p','meta','这份提交之前已经收到过，下面是当时的结果。'));
@@ -486,34 +505,50 @@ function applyResult(){
   setLocked(true); showSubmitArea();
 }
 function resetAll(){
-  answers={}; cid=null; cidSig=null; result=null;
+  answers={}; cid=null; cidSig=null; cidAt=null; result=null;
   try{ localStorage.removeItem(DRAFT_KEY); }catch(e){}
   render(); $('savedHint').textContent=''; submitMsg('');
   window.scrollTo(0,0);
 }
-function submit(){
+// A retry of the same answers keeps the same client_attempt_id (and the same
+// answered_at), so the brain recognises it; changed answers get a NEW id.
+function submit(retriedOnce){
   if(submitting || result) return;
   var list=payloadAnswers();
   if(!list.length){ submitMsg('还没有作答，先做几道题再提交。'); return; }
   var sig=JSON.stringify(list);
-  if(!cid || cidSig!==sig){ cid=newCid(); cidSig=sig; }   // same answers => same id => the retry is idempotent
+  if(!cid || cidSig!==sig || !cidAt){ cid=newCid(); cidSig=sig; cidAt=new Date().toISOString(); }
   saveDraftNow();
   submitting=true; submitMsg('');
   var btn=$('btnSubmit'); btn.disabled=true; btn.textContent='提交中…'; $('btnClear').disabled=true;
-  api('POST','/api/practice/'+SET_ID+'/grade',{client_attempt_id:cid,answers:list}).then(function(r){
+  var body={client_attempt_id:cid,answered_at:cidAt,answers:list};
+  if(KIND) body.attempt_kind=KIND;
+  var again=false, reload=null;
+  api('POST','/api/practice/'+SET_ID+'/grade',body).then(function(r){
     var j=r.json;
     if(r.status===200 && j && j.client_attempt_id===cid && Array.isArray(j.results) && j.summary){
       result=j; saveDraftNow(); applyResult(); try{ $('resultCard').scrollIntoView({block:'start'}); }catch(e){} return;
     }
     if(r.status===401){ showGate('登录已过期，请重新输入家庭码；答案还在，登录后再点提交。'); return; }
-    if(r.status===429){ submitMsg('这套题一小时内提交次数用完了，请稍后再试。答案还在。'); return; }
-    if((r.status===400||r.status===409||r.status===404) && j && j.message){ submitMsg('没提交成功：'+j.message+'。'); return; }
+    var msg=j && typeof j.message==='string' ? j.message : '';
+    if(r.status===429){ submitMsg(msg||'提交次数到上限了，请稍后再试。答案还在。'); return; }
+    if(r.status===409 && j && j.error==='idempotency_conflict'){
+      cid=null; cidSig=null; cidAt=null; saveDraftNow();      // the next submit uses a new id
+      if(j.retry_new_id===true && !retriedOnce){ again=true; return; }
+      submitMsg(msg||'提交编号冲突，请再点一次「提交」。'); return;
+    }
+    if(r.status===409 && j && j.error==='rev_mismatch'){
+      cid=null; cidSig=null; cidAt=null; saveDraftNow(); reload=msg||'题目已更新，请刷新页面后再提交。'; return;
+    }
+    if((r.status===400||r.status===409||r.status===404) && msg){ submitMsg('没提交成功：'+msg.replace(/[。]+$/,'')+'。'); return; }
     submitMsg('没提交成功（服务暂时不可用）。答案都还在，稍后再点一次「提交」。');
   }).catch(function(){
     submitMsg('连不上练习站服务。答案都还在，网络好了再点一次「提交」。');
   }).then(function(){
     submitting=false; $('btnClear').disabled=false;
     if(!result){ btn.disabled=false; btn.textContent='提交'; }
+    if(again) submit(true);
+    else if(reload) load(reload);   // new question versions are fetched; the answers stay
   });
 }
 
@@ -536,7 +571,7 @@ $('btnClear').onclick=function(){
   if(!confirm('清空本页填写？')) return;
   resetAll();
 };
-$('btnSubmit').onclick=submit;
+$('btnSubmit').onclick=function(){ submit(false); };
 $('btnLogout').onclick=function(){
   api('POST','/api/logout').then(function(){
     items=[]; $('qs').innerHTML=''; $('submitCard').style.display='none'; $('resultCard').style.display='none'; $('countPill').textContent='已退出'; showGate('');

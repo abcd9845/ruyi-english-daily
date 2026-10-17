@@ -88,15 +88,20 @@ type gresp struct {
 	SetID           string `json:"set_id"`
 	Mode            string `json:"mode"`
 	BrainRecorded   bool   `json:"brain_recorded"`
+	RecordedCount   int    `json:"recorded_count"`
+	BrainNote       string `json:"brain_note"`
 	Results         []struct {
-		QRef    string `json:"qref"`
-		Status  string `json:"status"`
-		Correct *bool  `json:"correct"`
+		QRef      string `json:"qref"`
+		Status    string `json:"status"`
+		Correct   *bool  `json:"correct"`
+		Recorded  bool   `json:"recorded"`
+		AttemptID int64  `json:"attempt_id"`
+		Duplicate bool   `json:"duplicate"`
 	} `json:"results"`
-	Summary  struct{ Total, Graded, Correct, Pending, Unanswered int } `json:"summary"`
-	Archived bool                                                      `json:"archived"`
-	Notify   string                                                    `json:"notify"`
-	Replayed bool                                                      `json:"replayed"`
+	Summary  struct{ Total, Graded, Correct, Pending, Unsupported, Unanswered, Recorded int } `json:"summary"`
+	Archived bool                                                                             `json:"archived"`
+	Notify   string                                                                           `json:"notify"`
+	Replayed bool                                                                             `json:"replayed"`
 }
 
 func (e *env) submit(t *testing.T, ck, set, body string) (*http.Response, []byte, gresp) {
@@ -150,22 +155,32 @@ func TestGradeGradedMode(t *testing.T) {
 	if !g.Archived || g.Notify != "sent" || ntfy.count() != 1 {
 		t.Errorf("archived=%v notify=%q posts=%d", g.Archived, g.Notify, ntfy.count())
 	}
-	// the brain was asked with the draft contract, with the grade token only
-	if e.brain.count("grade_new") != 1 || e.brain.gradeBank != 0 {
+	// the brain was asked with the contract, with the grade token only
+	if e.brain.count("grade_new_item") != 3 || e.brain.count("grade") != 1 || e.brain.gradeBank != 0 {
 		t.Errorf("brain calls: %v bankTokenUsed=%d", e.brain.calls, e.brain.gradeBank)
 	}
 	var sent struct {
-		CID    string `json:"client_attempt_id"`
-		SetID  string `json:"set_id"`
-		Source string `json:"source"`
-		Items  []struct {
-			QRef   string `json:"qref"`
-			Answer any    `json:"answer"`
+		Brain string `json:"brain"`
+		CID   string `json:"client_attempt_id"`
+		Items []struct {
+			QRef       string `json:"qref"`
+			Answer     any    `json:"answer"`
+			Rev        int    `json:"rev"`
+			SessionRef string `json:"session_ref"`
 		} `json:"items"`
 	}
 	must(t, json.Unmarshal(e.brain.gradeReqs[0], &sent))
-	if sent.CID != cid1 || sent.SetID != "demo-1" || sent.Source != practiceSrc || len(sent.Items) != 3 {
+	if sent.Brain != "ruyi" || sent.CID != cid1 || len(sent.Items) != 3 || sent.Items[0].SessionRef != "demo-1" || sent.Items[0].Rev != 0 {
 		t.Errorf("upstream request: %s", e.brain.gradeReqs[0])
+	}
+	// per-item brain confirmation, integer attempt ids, recorded everywhere
+	if !g.BrainRecorded || g.RecordedCount != 3 || g.Summary.Recorded != 3 || g.BrainNote != "" {
+		t.Errorf("recorded: %+v", g)
+	}
+	for i, r := range g.Results {
+		if !r.Recorded || r.AttemptID != int64(i+1) || r.Duplicate {
+			t.Errorf("result %d: %+v", i, r)
+		}
 	}
 	// no answers or explanations, no brain internals, no foreign qref (the fake brain also "graded" math:5)
 	for _, bad := range []string{"SECRET", `"answer"`, `"explanation"`, `"solution"`, "brain-", "example.set:math:5", e.brain.token, e.brain.gradeToken} {
@@ -173,7 +188,7 @@ func TestGradeGradedMode(t *testing.T) {
 			t.Errorf("response contains %q: %s", bad, body)
 		}
 	}
-	allowed := map[string]bool{"client_attempt_id": true, "set_id": true, "mode": true, "brain_recorded": true, "results": true, "summary": true, "archived": true, "notify": true, "replayed": true}
+	allowed := map[string]bool{"client_attempt_id": true, "set_id": true, "mode": true, "brain_recorded": true, "recorded_count": true, "results": true, "summary": true, "archived": true, "notify": true, "replayed": true}
 	var generic map[string]any
 	must(t, json.Unmarshal(body, &generic))
 	for k := range generic {
@@ -192,10 +207,10 @@ func TestGradeIdempotentByClientAttemptID(t *testing.T) {
 			t.Fatalf("replay %d: %d %s (first %s)", i, resp.StatusCode, b2, b1)
 		}
 	}
-	// a replay returns the stored result even if the payload differs
-	_, _, g3 := e.submit(t, ck, "demo-1", answersJSON(cid1, map[string]any{"example.set:math:2": "B"}))
-	if !g3.Replayed || g3.Summary != g1.Summary {
-		t.Errorf("replay with other payload: %+v", g3)
+	// the same id with different answers is NOT silently replayed: 409 idempotency_conflict, retry_new_id
+	resp3, b3, _ := e.submit(t, ck, "demo-1", answersJSON(cid1, map[string]any{"example.set:math:2": "B"}))
+	if resp3.StatusCode != 409 || !strings.Contains(string(b3), `"error":"idempotency_conflict"`) || !strings.Contains(string(b3), `"retry_new_id":true`) {
+		t.Errorf("replay with other payload: %d %s", resp3.StatusCode, b3)
 	}
 	if e.brain.count("grade") != 1 || ntfy.count() != 1 {
 		t.Errorf("brain grade calls=%d ntfy=%d (want 1, 1)", e.brain.count("grade"), ntfy.count())
@@ -352,13 +367,30 @@ func TestGradeDegradesWhenNotConfigured(t *testing.T) {
 }
 
 func TestGradeDegradesWhenBrainFails(t *testing.T) {
-	for _, mode := range []string{"fail", "off", "norecord"} {
+	// the brain replies but records nothing: verdicts are never shown, nothing claimed
+	{
+		e, n, ck := gradeEnv(t, opts{})
+		e.brain.setGradeMode("norecord")
+		resp, body, g := e.submit(t, ck, "demo-1", answersJSON(cid1, goodAnswers))
+		if resp.StatusCode != 200 || g.Mode != "graded" || g.BrainRecorded || g.RecordedCount != 0 || g.Summary.Pending != 3 || g.Summary.Graded != 0 || !g.Archived || n.count() != 1 {
+			t.Fatalf("norecord: %d %s", resp.StatusCode, body)
+		}
+		if !strings.Contains(n.last().Body, "未记入大脑") {
+			t.Errorf("ntfy must say it was not recorded: %q", n.last().Body)
+		}
+	}
+	for mode, note := range map[string]string{"fail": "unavailable", "off": "not_ready", "off-json": "not_ready", "501": "not_ready"} {
 		t.Run(mode, func(t *testing.T) {
 			e, n, ck := gradeEnv(t, opts{})
-			e.brain.gradeMode = mode
+			e.brain.setGradeMode(mode)
 			resp, body, g := e.submit(t, ck, "demo-1", answersJSON(cid1, goodAnswers))
-			if resp.StatusCode != 200 || g.Mode != "archive_only" || g.BrainRecorded || g.Summary.Pending != 3 || !g.Archived || n.count() != 1 {
+			if resp.StatusCode != 200 || g.Mode != "archive_only" || g.BrainRecorded || g.BrainNote != note || g.Summary.Pending != 3 || !g.Archived || n.count() != 1 {
 				t.Fatalf("%d %s", resp.StatusCode, body)
+			}
+			for _, r := range g.Results {
+				if r.Recorded || r.Correct != nil || r.AttemptID != 0 {
+					t.Errorf("nothing may be claimed as recorded: %+v", r)
+				}
 			}
 			if strings.Contains(e.logs.String(), e.brain.gradeToken) {
 				t.Error("grade token in logs")
@@ -403,8 +435,8 @@ func TestGradeRateLimit(t *testing.T) {
 	if resp, _, _ := e.submit(t, ck2, "demo-1", answersJSON(uuid(5), goodAnswers)); resp.StatusCode != 429 {
 		t.Errorf("new session, same address: %d", resp.StatusCode)
 	}
-	if e.brain.count("grade_new") != 3 {
-		t.Errorf("brain was asked %d times", e.brain.count("grade_new"))
+	if e.brain.count("grade") != 3 {
+		t.Errorf("brain was asked %d times", e.brain.count("grade"))
 	}
 	// the refused attempt left no stale lock: the same id works once the window passes (checked via a replayless id)
 	if resp, _, _ := e.submit(t, ck, "demo-1", answersJSON(uuid(3), goodAnswers)); resp.StatusCode != 429 {
@@ -453,19 +485,20 @@ func TestAttemptsFileContentAndPermissions(t *testing.T) {
 		Source          string `json:"source"`
 		SubmittedAt     string `json:"submitted_at"`
 		Mode            string `json:"mode"`
-		BrainAttemptID  string `json:"brain_attempt_id"`
 		Items           []struct {
-			QRef    string `json:"qref"`
-			Answer  any    `json:"answer"`
-			Status  string `json:"status"`
-			Correct *bool  `json:"correct"`
+			QRef      string `json:"qref"`
+			Answer    any    `json:"answer"`
+			Status    string `json:"status"`
+			Correct   *bool  `json:"correct"`
+			Recorded  bool   `json:"recorded"`
+			AttemptID int64  `json:"attempt_id"`
 		} `json:"items"`
 		Summary struct{ Total, Graded, Correct, Pending, Unanswered int }
 		Client  struct{ UA, IP string }
 	}
 	must(t, json.Unmarshal([]byte(lines[0]), &rec))
-	if rec.V != 1 || rec.ClientAttemptID != cid1 || rec.SetID != "demo-1" || rec.SetTitle != "演示套" || rec.Source != practiceSrc || rec.Mode != "graded" ||
-		rec.BrainAttemptID != "brain-"+cid1[:8] || len(rec.Items) != 3 || rec.Client.UA != "UnitTest/1.0" || rec.Client.IP == "" || rec.Summary.Total != 3 {
+	if rec.V != 2 || rec.ClientAttemptID != cid1 || rec.SetID != "demo-1" || rec.SetTitle != "演示套" || rec.Source != practiceSrc || rec.Mode != "graded" ||
+		len(rec.Items) != 3 || !rec.Items[0].Recorded || rec.Items[0].AttemptID != 1 || rec.Items[2].AttemptID != 3 || rec.Client.UA != "UnitTest/1.0" || rec.Client.IP == "" || rec.Summary.Total != 3 {
 		t.Errorf("record: %s", lines[0])
 	}
 	if _, err := time.Parse(time.RFC3339Nano, rec.SubmittedAt); err != nil {
@@ -604,7 +637,7 @@ func TestNotifyOffWithoutTopic(t *testing.T) {
 
 func TestGradeLogsCarryNoSecrets(t *testing.T) {
 	e, _, ck := gradeEnv(t, opts{})
-	e.brain.gradeMode = "fail"
+	e.brain.setGradeMode("fail")
 	e.submit(t, ck, "demo-1", answersJSON(cid1, goodAnswers))
 	for _, bad := range []string{e.brain.gradeToken, e.brain.token, e.code, e.secret, e.topic, ck, "free text", "example.set:math", "Bearer"} {
 		if strings.Contains(e.logs.String(), bad) {

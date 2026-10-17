@@ -4,6 +4,8 @@
 //   BROWSER_CODE=<family code> [BROWSER_FLOW=full|archive] node test/browser-practice.js <base-url> <out-dir> [chrome-binary]
 // BROWSER_FLOW=full (default): page checks + submit flow against a site whose brain GRADES (mode graded).
 // BROWSER_FLOW=archive: submit flow against a site WITHOUT grading (mode archive_only): the page must never say the brain recorded it.
+// BROWSER_FLOW=contract (needs MOCK_URL = the mock brain, for its /_mock/bump-rev hook): final-contract states: rev, recorded:false, errors, brain picks.
+// BROWSER_FLOW=notready: the brain's grade endpoint is not deployed (404): page must say archive-only, never recorded.
 // Against the mock brain's synthetic questions. Logs in through the real form, fills
 // answers, reloads, clears; writes mobile-viewport screenshots to <out-dir>.
 const { spawn } = require('child_process');
@@ -113,10 +115,12 @@ async function submitFlow(base, graded, tag) {
   check(tag + 'result card appears', await waitFor(`getComputedStyle(document.getElementById('resultCard')).display==='block'`));
   await sleep(300);
   const sent = JSON.parse(await ev(`window.__bodies[0]`));
-  check(tag + 'request carries client_attempt_id (uuid) and only qref/answer pairs; multi-key answers are arrays/strings by type',
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(sent.client_attempt_id) && Object.keys(sent).sort().join() === 'answers,client_attempt_id' &&
+  // rev comes from the brain's lookup (the mock sends rev 1); also on the archive-only site: rev comes from lookup, not from grading
+  const rv = {rev: 1};
+  check(tag + 'request carries client_attempt_id (uuid), answered_at (fixed per id), and only qref/answer(/rev) rows; multi-key answers are arrays/strings by type',
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(sent.client_attempt_id) && Object.keys(sent).sort().join() === 'answered_at,answers,client_attempt_id' && !isNaN(Date.parse(sent.answered_at)) &&
     JSON.stringify(sent.answers) === JSON.stringify([
-      {qref: 'example.set:math:1', answer: ['5/4', '', '-3']}, {qref: 'example.set:math:2', answer: 'B'}, {qref: 'example.set:math:3', answer: ['', 'y=1']}]), JSON.stringify(sent));
+      {qref: 'example.set:math:1', answer: ['5/4', '', '-3'], ...rv}, {qref: 'example.set:math:2', answer: 'B', ...rv}, {qref: 'example.set:math:3', answer: ['', 'y=1'], ...rv}]), JSON.stringify(sent));
   const res = await ev(`(() => ({
     h: document.querySelector('#resultCard h2').textContent, sum: document.querySelector('#resultCard .sum').textContent,
     vd: [1, 2, 3].map(n => { const v = document.querySelector('#q' + n + ' .vd'); return v ? v.textContent + '|' + v.className : null; }),
@@ -126,7 +130,7 @@ async function submitFlow(base, graded, tag) {
   if (graded) {
     check(tag + 'graded mode: 「已提交到大脑」 with the brain-confirmed summary', res.h === '已提交到大脑' && res.sum === '共 3 题 · 答对 1 · 答错 1 · 待核对 1 · 未作答 0', res.h + ' / ' + res.sum);
     check(tag + 'graded mode: per-question badges (wrong, right, pending) and no answer key anywhere',
-      res.vd[0].startsWith('✗ 不对|vd wrong') && res.vd[1].startsWith('✓ 答对了|vd ok') && res.vd[2].startsWith('待核对|vd pend') && !/正确答案|参考答案|解析/.test(res.page), JSON.stringify(res.vd));
+      res.vd[0].startsWith('✗ 不对|vd wrong') && res.vd[1].startsWith('✓ 答对了|vd ok') && res.vd[2].startsWith('待核对|vd pend') && !/正确答案|解析|MOCK-ANSWER/.test(res.page), JSON.stringify(res.vd));
   } else {
     check(tag + 'archive-only: heading says 已提交（暂未判分）', res.h === '已提交（暂未判分）' && res.sum === '共 3 题 · 已作答 3 · 未作答 0', res.h + ' / ' + res.sum);
     check(tag + 'archive-only: every question is 待核对 — no ✓/✗ verdict at all', res.vd.every(v => v && v.startsWith('待核对|vd pend')) && !/[✓✗]/.test(res.page), JSON.stringify(res.vd));
@@ -162,6 +166,8 @@ async function submitFlow(base, graded, tag) {
   check(tag + 'retry succeeds', await waitFor(`getComputedStyle(document.getElementById('resultCard')).display==='block'`));
   const ids = JSON.parse(await ev(`JSON.stringify(window.__bodies.map(b => JSON.parse(b).client_attempt_id))`));
   check(tag + 'the retry reused the same client_attempt_id (idempotent)', ids.length === 2 && ids[0] === ids[1], JSON.stringify(ids));
+  const ats = JSON.parse(await ev(`JSON.stringify(window.__bodies.map(b => JSON.parse(b).answered_at))`));
+  check(tag + 'the retry reused the same answered_at (the brain compares it on a replay)', ats.length === 2 && ats[0] === ats[1] && !!ats[0], JSON.stringify(ats));
   // changing the answers after a failed attempt gives a new id
   await ev(`document.getElementById('btnAgain').click(); 1`);
   await sleep(200);
@@ -178,6 +184,129 @@ async function submitFlow(base, graded, tag) {
   await ev(`document.getElementById('btnAgain').click(); 1`);
 }
 
+
+// fake the FIRST grade request's reply (status + JSON body); later requests go through
+const hookFetchReply = (status, body) => ev(`(() => {
+  window.__bodies = []; window.__fake = {status: ${status}, body: ${JSON.stringify(body)}};
+  if (!window.__origFetch) window.__origFetch = window.fetch;
+  const of = window.__origFetch;
+  window.fetch = (u, o) => {
+    if (!String(u).includes('/grade')) return of(u, o);
+    window.__bodies.push(o && o.body);
+    if (window.__fake) { const f = window.__fake; window.__fake = null; return Promise.resolve(new Response(JSON.stringify(f.body), {status: f.status, headers: {'Content-Type': 'application/json'}})); }
+    return of(u, o);
+  };
+  return 1; })()`);
+const bumpRev = qref => new Promise((res, rej) => {
+  const u = new URL(process.env.MOCK_URL + '/_mock/bump-rev?qref=' + encodeURIComponent(qref));
+  const rq = require('http').request(u, { method: 'POST' }, r => { r.resume(); r.on('end', res); });
+  rq.on('error', rej); rq.end();
+});
+const resultInfo = () => ev(`(() => ({
+  shown: getComputedStyle(document.getElementById('resultCard')).display === 'block',
+  h: (document.querySelector('#resultCard h2') || {}).textContent, page: document.body.innerText,
+  vd: [...document.querySelectorAll('#qs .vd')].map(v => v.textContent),
+  msg: document.getElementById('submitMsg').textContent }))()`);
+const loginAndLoad = async (url, n) => {
+  await nav(url);
+  if (await waitFor(`getComputedStyle(document.getElementById('gate')).display==='flex'`, 3000)) await gateLogin();
+  return waitFor(`document.querySelectorAll('#qs section.card').length===${n}`);
+};
+
+// Final-contract states in a real browser, against the mock brain (grade token configured, auto sets on).
+async function contractFlow(base) {
+  const cards = n => `document.querySelectorAll('#qs section.card').length===${n}`;
+  const resultShown = `getComputedStyle(document.getElementById('resultCard')).display==='block'`;
+  check('[contract] demo set loads', await loginAndLoad(base + '/m/practice/?set=demo-1', 3));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid); await waitFor(cards(3));
+
+  // 1. rev changed on the brain after the page was served -> 409 rev_mismatch -> "题目已更新", page reloads, answers stay, new rev is sent
+  await fillDemo(); await sleep(400);
+  await hookFetch(0, false);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(resultShown);
+  const first = JSON.parse(await ev(`window.__bodies[0]`));
+  check('[contract] rev from the brain lookup is sent with every answer', first.answers.every(a => a.rev === 1), JSON.stringify(first.answers.map(a => a.rev)));
+  check('[contract] graded: 已提交到大脑 (all three recorded:true)', (await resultInfo()).h === '已提交到大脑');
+  await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300);
+  await fillDemo(); await sleep(400);
+  await bumpRev('example.set:math:2');
+  await hookFetch(0, false);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  check('[contract] stale rev: message 题目已更新，请刷新 and the page re-fetched the questions', await waitFor(`document.getElementById('submitMsg').textContent.includes('题目已更新')`) && await waitFor(cards(3)));
+  const kept = await ev(`({q1: [...document.querySelectorAll('#q1 input.blank')].map(e => e.value).join('|'), q2: document.querySelectorAll('#q2 input:checked').length, shown: ${resultShown}})`);
+  check('[contract] after the refresh the answers are still there and nothing was marked submitted', kept.q1 === '5/4||-3' && kept.q2 === 1 && !kept.shown, JSON.stringify(kept));
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  check('[contract] resubmitting after the refresh succeeds with the new rev and a NEW client_attempt_id', await waitFor(resultShown));
+  const bodies = JSON.parse(await ev(`JSON.stringify(window.__bodies.map(b => JSON.parse(b)))`));
+  check('[contract] ... q2 now carries rev 2; ids differ between the refused and the accepted request',
+    bodies.length === 2 && bodies[1].answers.find(a => a.qref === 'example.set:math:2').rev === 2 && bodies[0].client_attempt_id !== bodies[1].client_attempt_id, JSON.stringify(bodies.map(b => [b.client_attempt_id.slice(0, 8), b.answers.map(a => a.rev)])));
+  await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300);
+
+  // 2. idempotency_conflict (our bug path): the page drops its id and resubmits once with a NEW id
+  await fillDemo(); await sleep(400);
+  await hookFetchReply(409, {error: 'idempotency_conflict', message: '提交编号冲突', retry_new_id: true});
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  check('[contract] idempotency_conflict: automatic single resubmit succeeds', await waitFor(resultShown));
+  const ib = JSON.parse(await ev(`JSON.stringify(window.__bodies.map(b => JSON.parse(b)))`));
+  check('[contract] ... the second request used a new client_attempt_id (same answers)', ib.length === 2 && ib[0].client_attempt_id !== ib[1].client_attempt_id && JSON.stringify(ib[0].answers) === JSON.stringify(ib[1].answers), JSON.stringify(ib.map(b => b.client_attempt_id.slice(0, 8))));
+  await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300);
+  // a conflict that keeps coming back is not retried forever
+  await fillDemo(); await sleep(400);
+  await ev(`(() => { window.__bodies = []; const of = window.__origFetch; window.fetch = (u, o) => { if (!String(u).includes('/grade')) return of(u, o); window.__bodies.push(o.body); return Promise.resolve(new Response(JSON.stringify({error: 'idempotency_conflict', message: '提交编号冲突', retry_new_id: true}), {status: 409, headers: {'Content-Type': 'application/json'}})); }; return 1; })()`);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(`document.getElementById('submitMsg').textContent.includes('冲突') && !document.getElementById('btnSubmit').disabled`);
+  const nb = await ev(`window.__bodies.length`);
+  check('[contract] a repeating idempotency_conflict stops after one automatic retry and shows a message', nb === 2 && !(await ev(resultShown)), 'requests=' + nb);
+
+  // 3. daily cap (429): message, answers kept, not marked submitted
+  await hookFetchReply(429, {error: 'daily_cap', message: '今天这题提交次数到上限了（同一题每天最多记 3 次），明天再试。答案还在。'});
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(`document.getElementById('submitMsg').textContent.includes('到上限')`);
+  const cap = await resultInfo();
+  check('[contract] 429: 「今天这题提交次数到上限」, answers stay, no result card', cap.msg.includes('今天这题提交次数到上限') && !cap.shown && (await ev(`document.querySelectorAll('#q1 input.blank')[0].value`)) === '5/4', cap.msg);
+  await ev(`localStorage.clear(); 1`);
+
+  // 4. recorded:false (unsupported): the page must NOT say it was submitted to the brain
+  check('[contract] free-form set loads', await loginAndLoad(base + '/m/practice/?set=free-3', 1));
+  await ev(`(() => { const t = document.querySelector('#q1 textarea.ans'); t.value = '1/2+1/3=5/6'; t.dispatchEvent(new Event('input', {bubbles: true})); return 1; })()`);
+  await sleep(400);
+  await hookFetch(0, false);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(resultShown);
+  const un = await resultInfo();
+  check('[contract] unsupported (recorded:false): heading 已提交（仅留档，未记入大脑）, badge 不自动判分, never 已提交到大脑',
+    un.h === '已提交（仅留档，未记入大脑）' && un.vd.join() === '不自动判分' && !un.page.includes('已提交到大脑') && !un.page.includes('已记入大脑'), un.h + ' / ' + un.vd.join());
+  await shot('practice-result-unsupported.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
+  await ev(`localStorage.clear(); 1`);
+
+  // 5. a brain-picked set: origin tags and 「参考答案待核，不自动判」
+  const made = JSON.parse(await ev(`fetch('/api/practice/new?source=math.synthetic.p0-demo&n=3&mode=wrong_only').then(r => r.text())`));
+  check('[contract] /api/practice/new?mode=wrong_only creates a set from the brain pick', made.set_id && made.mode === 'wrong_only' && made.count === 3 && made.deferred === 2, JSON.stringify(made));
+  check('[contract] picked set loads', await loginAndLoad(base + made.url, 3));
+  const pk = await ev(`({tags: [...document.querySelectorAll('#qs .tag')].map(e => e.textContent).join(), pend: [...document.querySelectorAll('#qs .refpend')].map(e => e.closest('section').id + ':' + e.textContent).join(), title: document.getElementById('title').textContent})`);
+  check('[contract] 错题 tags and 参考答案待核，不自动判 on the two deferred questions', pk.tags === '错题,错题,错题' && pk.pend === 'q2:参考答案待核，不自动判,q3:参考答案待核，不自动判', JSON.stringify(pk));
+  await shot('practice-picked.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
+  return finish();
+}
+
+// The brain's grade endpoint is not deployed: archive-only wording, never "recorded".
+async function notReadyFlow(base) {
+  check('[not-ready] demo set loads', await loginAndLoad(base + '/m/practice/?set=demo-1', 3));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid); await waitFor(`document.querySelectorAll('#qs section.card').length===3`);
+  await fillDemo(); await sleep(400);
+  await hookFetch(0, false);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(`getComputedStyle(document.getElementById('resultCard')).display==='block'`);
+  const r = await resultInfo();
+  check('[not-ready] heading 已提交（暂未判分）, 大脑接口还没准备好, every badge 待核对, no verdict',
+    r.h === '已提交（暂未判分）' && r.page.includes('大脑接口还没准备好') && r.vd.every(v => v === '待核对') && !/[✓✗]/.test(r.page) && !r.page.includes('已提交到大脑') && !r.page.includes('已记入大脑'), r.h + ' / ' + r.vd.join());
+  await shot('practice-result-notready.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
+  return finish();
+}
+
 (async () => {
   const { targetInfos } = await send('Target.getTargets');
   const page = targetInfos.find(t => t.type === 'page');
@@ -188,6 +317,8 @@ async function submitFlow(base, graded, tag) {
   const cards = `document.querySelectorAll('#qs section.card').length`;
   const status = `document.getElementById('status').textContent`;
 
+  if (flow === 'contract') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return contractFlow(base); }
+  if (flow === 'notready') { return notReadyFlow(base); }
   if (flow === 'archive') {
     await nav(base + '/m/practice/?set=demo-1');
     await waitFor(`getComputedStyle(document.getElementById('gate')).display==='flex'`);

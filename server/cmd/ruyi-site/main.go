@@ -48,12 +48,30 @@ func run() error {
 		log.Warn("allowlisted file missing from static dir (will 404)", "file", m)
 	}
 
-	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, GradeToken: cfg.BrainGradeToken, GradePath: cfg.BrainGradePath, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile})
+	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, GradeToken: cfg.BrainGradeToken, GradePath: cfg.BrainGradePath, LookupPath: cfg.BrainLookupPath, PickPath: cfg.BrainPickPath, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile})
 	if err != nil {
 		return err
 	}
 	if cfg.BrainInsecure {
 		log.Warn("brain TLS verification is DISABLED (loopback address only)")
+	}
+
+	if cfg.Sets != nil {
+		// One read-only probe of the brain's lookup endpoint (an obviously
+		// non-existent qref; nothing is written). Informational only: it never
+		// blocks or fails startup, and later requests degrade on their own.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			switch ok, perr := bc.ProbeLookup(ctx); {
+			case perr != nil:
+				log.Info("brain contract probe inconclusive (will degrade per request if needed)")
+			case ok:
+				log.Info("brain contract endpoints: lookup is deployed")
+			default:
+				log.Warn("brain contract endpoints not deployed yet (lookup 404/501): grading, picks and revisions degrade until the brain deploys them")
+			}
+		}()
 	}
 
 	emb, err := embedded.New(ruyisite.Pages(), ruyisite.KaTeX())
@@ -83,6 +101,7 @@ func run() error {
 		NtfyRetryDelay:  cfg.NtfyRetryDelay,
 		GradeMaxPerHour: cfg.GradeMaxPerHour,
 		AutoSources:     cfg.AutoSources,
+		SkipDeferred:    cfg.SkipDeferred,
 		AutoTTL:         cfg.AutoTTL,
 	})
 	srv := &http.Server{

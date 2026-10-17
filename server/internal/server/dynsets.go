@@ -13,9 +13,16 @@ const (
 	idAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 )
 
+// pickMeta is what the brain said about one picked question.
+type pickMeta struct {
+	Origin   string // review | wrong
+	Deferred string // deferred:<code> reason code; "" = gradable
+}
+
 type dynEntry struct {
-	set sets.Set
-	exp time.Time
+	set  sets.Set
+	exp  time.Time
+	meta map[string]pickMeta
 }
 
 // dynSets holds generated practice sets in memory until their TTL ends.
@@ -44,7 +51,7 @@ func (d *dynSets) purgeLocked() {
 }
 
 // create stores a set under a fresh "auto-xxxxxxxx" id. ok=false when full.
-func (d *dynSets) create(title, source string, qrefs []string) (sets.Set, time.Time, bool) {
+func (d *dynSets) create(title, source string, qrefs []string, meta map[string]pickMeta) (sets.Set, time.Time, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.purgeLocked()
@@ -61,7 +68,7 @@ func (d *dynSets) create(title, source string, qrefs []string) (sets.Set, time.T
 		if _, taken := d.m[id]; taken {
 			continue
 		}
-		e := &dynEntry{set: sets.Set{ID: id, Title: title, Source: source, QRefs: append([]string(nil), qrefs...)}, exp: d.now().Add(d.ttl)}
+		e := &dynEntry{set: sets.Set{ID: id, Title: title, Source: source, QRefs: append([]string(nil), qrefs...)}, exp: d.now().Add(d.ttl), meta: meta}
 		d.m[id] = e
 		return e.set, e.exp, true
 	}
@@ -77,6 +84,16 @@ func (d *dynSets) get(id string) (*sets.Set, bool) {
 	}
 	s := e.set
 	return &s, true
+}
+
+// metaOf returns the per-question brain notes of a live dynamic set.
+func (d *dynSets) metaOf(id string) map[string]pickMeta {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if e, ok := d.m[id]; ok && d.now().Before(e.exp) {
+		return e.meta
+	}
+	return nil
 }
 
 func (d *dynSets) hasSource(source string) bool {

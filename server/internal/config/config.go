@@ -47,6 +47,13 @@ type Config struct {
 	// P2/P3: grading, archive, notification, dynamic sets.
 	BrainGradeToken string
 	BrainGradePath  string
+	// BrainLookupPath / BrainPickPath override the contract paths of the batch
+	// lookup and pick-practice endpoints (empty = the contract default).
+	BrainLookupPath string
+	BrainPickPath   string
+	// SkipDeferred drops picks flagged deferred:* (answer key pending, unsupported
+	// type, figure missing) instead of marking them "参考答案待核，不自动判".
+	SkipDeferred    bool
 	AttemptsDir     string
 	GradeMaxPerHour int
 	NtfyBaseURL     string
@@ -207,9 +214,18 @@ func Load(getenv func(string) string) (*Config, error) {
 	if c.BrainGradeToken != "" && c.BrainGradeToken == c.BrainToken {
 		bad("RUYI_BRAIN_GRADE_TOKEN", "must be a different token from RUYI_BRAIN_TOKEN")
 	}
-	c.BrainGradePath = strings.TrimSpace(getenv("RUYI_BRAIN_GRADE_PATH"))
-	if c.BrainGradePath != "" && (!gradePathRe.MatchString(c.BrainGradePath) || strings.Contains(c.BrainGradePath, "..") || strings.Contains(c.BrainGradePath, "//")) {
-		bad("RUYI_BRAIN_GRADE_PATH", "must be an absolute URL path like /v1/bank/grade")
+	pathVar := func(name string) string {
+		v := strings.TrimSpace(getenv(name))
+		if v != "" && (!gradePathRe.MatchString(v) || strings.Contains(v, "..") || strings.Contains(v, "//")) {
+			bad(name, "must be an absolute URL path like /v1/bank/grade")
+		}
+		return v
+	}
+	c.BrainGradePath = pathVar("RUYI_BRAIN_GRADE_PATH")
+	c.BrainLookupPath = pathVar("RUYI_BRAIN_LOOKUP_PATH")
+	c.BrainPickPath = pathVar("RUYI_BRAIN_PICK_PATH")
+	if c.SkipDeferred, ok = flag01(getenv("RUYI_PICK_SKIP_DEFERRED")); !ok {
+		bad("RUYI_PICK_SKIP_DEFERRED", "must be 0 or 1")
 	}
 	c.AttemptsDir = strings.TrimSpace(getenv("RUYI_ATTEMPTS_DIR"))
 	if c.AttemptsDir == "" {

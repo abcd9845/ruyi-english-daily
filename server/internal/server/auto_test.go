@@ -140,20 +140,30 @@ func TestAutoSetsFlow(t *testing.T) {
 	}
 }
 
-func TestAutoSetsSelectionNotYetSupported(t *testing.T) {
+func TestAutoSetsSelectionNotReadyOnTheBrain(t *testing.T) {
+	// pick-practice is not deployed (404 / 501): an explicit "brain interface not ready", never a faked pick
+	for _, mode := range []string{"off", "501"} {
+		e := newEnv(t, opts{sets: gradeSets, grade: true, auto: []string{practiceSrc}})
+		e.brain.setPickMode(mode)
+		ck := e.session(t)
+		for q, want := range map[string]string{
+			"mode=wrong_only": "wrong_only_unavailable", "wrong_only=1": "wrong_only_unavailable",
+			"mode=due_first": "due_first_unavailable", "due_first=1": "due_first_unavailable",
+		} {
+			code, _, b := e.autoNew(t, ck, "source="+practiceSrc+"&n=3&"+q)
+			if code != 501 || !strings.Contains(string(b), `"error":"`+want+`"`) || !strings.Contains(string(b), "大脑接口未就绪") || strings.Contains(string(b), "set_id") {
+				t.Errorf("[%s] %s: %d %s", mode, q, code, b)
+			}
+		}
+		if e.brain.count("pick") == 0 || e.brain.count("list") != 0 {
+			t.Errorf("[%s] pick calls=%d list calls=%d (no fallback to a local pick)", mode, e.brain.count("pick"), e.brain.count("list"))
+		}
+	}
+	// a failing pick endpoint is a 502, not a 500 and not a fake pick
 	e := newEnv(t, opts{sets: gradeSets, grade: true, auto: []string{practiceSrc}})
-	ck := e.session(t)
-	code, _, b := e.autoNew(t, ck, "source="+practiceSrc+"&n=3&wrong_only=1")
-	if code != 501 || !strings.Contains(string(b), `"error":"wrong_only_unavailable"`) {
-		t.Errorf("wrong_only: %d %s", code, b)
-	}
-	code, _, b = e.autoNew(t, ck, "source="+practiceSrc+"&n=3&due_first=1")
-	if code != 501 || !strings.Contains(string(b), "due_first_unavailable") {
-		t.Errorf("due_first: %d %s", code, b)
-	}
-	// nothing was made up: no dynamic set exists afterwards
-	if strings.Contains(string(b), "set_id") {
-		t.Error("an unsupported selection must not create a set")
+	e.brain.setPickMode("fail")
+	if code, _, b := e.autoNew(t, e.session(t), "source="+practiceSrc+"&n=3&mode=wrong_only"); code != 502 || strings.Contains(string(b), "set_id") {
+		t.Errorf("failing pick: %d %s", code, b)
 	}
 }
 

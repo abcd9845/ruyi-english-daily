@@ -11,7 +11,7 @@ func TestGradeDefaultsAreSafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.BrainGradeToken != "" || c.BrainGradePath != "" || c.AttemptsDir != "/var/lib/ruyi-site/attempts" || c.GradeMaxPerHour != 5 ||
+	if c.BrainGradeToken != "" || c.BrainGradePath != "" || c.BrainLookupPath != "" || c.BrainPickPath != "" || c.SkipDeferred || c.AttemptsDir != "/var/lib/ruyi-site/attempts" || c.GradeMaxPerHour != 5 ||
 		len(c.AutoSources) != 0 || c.NtfyBaseURL != "https://ntfy.sh/" || c.NtfyRetryDelay != time.Minute || c.AutoTTL != 6*time.Hour {
 		t.Fatalf("defaults: %+v", c)
 	}
@@ -21,6 +21,9 @@ func TestGradeEnvParsing(t *testing.T) {
 	m := valid(t)
 	m["RUYI_BRAIN_GRADE_TOKEN"] = "grade-token-1"
 	m["RUYI_BRAIN_GRADE_PATH"] = "/v2/attempts/grade"
+	m["RUYI_BRAIN_LOOKUP_PATH"] = "/v2/lookup"
+	m["RUYI_BRAIN_PICK_PATH"] = "/v2/pick"
+	m["RUYI_PICK_SKIP_DEFERRED"] = "1"
 	m["RUYI_ATTEMPTS_DIR"] = "/srv/attempts"
 	m["RUYI_GRADE_MAX_PER_HOUR"] = "9"
 	m["RUYI_NTFY_BASE_URL"] = "http://127.0.0.1:9999"
@@ -31,7 +34,7 @@ func TestGradeEnvParsing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.BrainGradeToken != "grade-token-1" || c.BrainGradePath != "/v2/attempts/grade" || c.AttemptsDir != "/srv/attempts" || c.GradeMaxPerHour != 9 ||
+	if c.BrainGradeToken != "grade-token-1" || c.BrainGradePath != "/v2/attempts/grade" || c.BrainLookupPath != "/v2/lookup" || c.BrainPickPath != "/v2/pick" || !c.SkipDeferred || c.AttemptsDir != "/srv/attempts" || c.GradeMaxPerHour != 9 ||
 		c.NtfyBaseURL != "http://127.0.0.1:9999/" || c.NtfyRetryDelay != 250*time.Millisecond || strings.Join(c.AutoSources, ",") != "src.one,src.two" || c.AutoTTL != 30*time.Minute {
 		t.Fatalf("%+v", c)
 	}
@@ -50,6 +53,9 @@ func TestGradeEnvRejects(t *testing.T) {
 	for k, v := range map[string]string{
 		"RUYI_BRAIN_GRADE_TOKEN":  "has space",
 		"RUYI_BRAIN_GRADE_PATH":   "v1/grade",
+		"RUYI_BRAIN_LOOKUP_PATH":  "lookup",
+		"RUYI_BRAIN_PICK_PATH":    "/a/../b",
+		"RUYI_PICK_SKIP_DEFERRED": "yes",
 		"RUYI_ATTEMPTS_DIR":       "relative/dir",
 		"RUYI_GRADE_MAX_PER_HOUR": "0",
 		"RUYI_NTFY_BASE_URL":      "ftp://x/",

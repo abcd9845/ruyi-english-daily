@@ -1,0 +1,71 @@
+# INTEGRATION：`release/integ-1017` 集成构建说明
+
+本文件只是**说明**（不含任何真实值，占位用 `<…>`；功能代码全部来自下表各 PR，集成时没有夹带新功能）。分支从 `origin/main`（`dcb1668`）起，按下面的顺序用 `git merge --no-ff` 逐个并入；**不合并到 main，不部署**。
+
+## 1. PR → 分支 → head → 集成分支中的 merge commit
+
+| 顺序 | PR | 分支 | 并入时的 head commit | 集成分支中的 merge commit | 冲突 |
+|---|---|---|---|---|---|
+| 1 | #11 | `feat/practice-set-p0` | `a89f02d` | `c0379f7` | 无 |
+| 2 | #12 | `feat/practice-set-p1-p3` | `125c03e` | `be35b8f` | 无 |
+| 3 | #14 | `fix/ntfy-config-base` | `fa71b21` | `531c4f9` | 无 |
+| 4 | #13 | `feat/brain-contract-adapter` | `e3bb61b`（含 `565ce9b`、`e6819d9`） | `dbda083` | 无 |
+| 5 | #16 | `feat/local-smoke-set` | `9f2d2a5` | `fac1db7` | 有（§3-1） |
+| 6 | #17 | `feat/brain-id-config` | `f4631e3` | `957548a` | 有（§3-2、§3-3） |
+
+依赖：#12 基于 #11；#14、#13 基于 #12；#16、#17 基于 #13（互为兄弟）。每个 PR 的原始提交都在集成分支历史里（`git log --first-parent` 看 merge，`git log --graph` 看原提交）。
+
+merge 之后的提交（都不改功能）：
+
+| commit | 内容 |
+|---|---|
+| `test(acceptance)…`（`cfc2800`） | 修 #16 与 #17 合并后验收脚本的互相覆盖（§3-3），仅测试脚本 |
+| `docs(deploy)…`（`53630df`） | `DEPLOY-P3.md` §6 回滚加一句指向 §8.3；§8.2 加「每次重启 1 次只读 lookup 探测」 |
+| `docs: INTEGRATION.md` | 本文件 |
+
+## 2. 合并顺序
+
+#11 → #12 → #14 → #13 → #16 → #17（#13 在 #14 之后并入，没有文本冲突；#14 的 ntfy 基址改动与 #13、#16 对 `grade.go` / `server.go` 的改动自动合并，之后全套测试通过）。
+
+## 3. 冲突解决记录（只做「保留双方意图」的最小合并）
+
+1. **#16 并入**：`server/internal/config/grade_config_test.go` —— 两边都在文件末尾新增测试函数（#14 的 `TestNtfyBaseURLTrailingSlash`；#16 的 `TestReservedLocalSourceRefused`、`TestSetsFileLocalSetFailsAtLoad`）。解决：**两边的测试函数全部保留**，顺序为 #14 的在前、#16 的在后，不改任何断言。
+2. **#17 并入**：`server/internal/config/grade_config_test.go` —— 同样是末尾追加冲突（#17 的 `TestBrainIDUnsetStaysEmpty`、`TestBrainIDAccepts`、`TestBrainIDRejectsAndNeverEchoesTheValue`）。解决：保留已有的全部测试，把 #17 的三个函数原样追加在文件末尾。
+3. **#17 并入**：`server/test/acceptance.sh` —— 两边都新增了一个 `section "T. …"`（#16：本地套 T1–T22；#17：RUYI_BRAIN_ID）。解决：#16 的 T 段原样保留；#17 的段改名为 **`U.`**，其测试编号 `T1…T12` 改为 `U1…U12`（只改显示用的名字），两段先后顺序执行。随后发现 #17 的段会把 `$WORK/sets-t.json` 覆盖掉（该文件后面还被 #16 的浏览器用例 L9 使用，导致 L9/L9c 失败），于是单独用一个 `test(acceptance)` 提交把 #17 段里的文件名改为 `sets-u.json`。没有改任何断言内容。
+4. `grade.go`（postNtfy / ntfy 标题）、`server.go`、`README.md`、`DEPLOY-P3.md`、`config.go`、`testenv_test.go`：git 自动合并，无文本冲突；合并后 `go build / vet / test` 全绿，ntfy 标题（#14 基址 + #16 的 `【测试】` RFC 2047 标题）两者行为都保留（有测试和验收覆盖）。
+
+不需要重新生成 `static-allowlist.txt` / vendor（未运行 `scripts/gen-allowlist.sh`；`allowlist_test.go` 通过）。
+
+## 4. 最终二进制
+
+- 路径：`/workspace/ruyi-plan/dist/ruyi-site-integ-linux-amd64`（+ `.sha256`），在构建机上，不进仓库。
+- sha256：`8d7abf3565b6a15971d6710db520872656695085f593e9724466bce0a58d3aa1`
+- 构建参数（同 `Makefile` 的 `build` 目标）：`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags '-s -w' -o <out> ./cmd/ruyi-site`（在 `server/` 下）。
+- Go：`go1.27.2 linux/amd64`（`go.mod` 写的是 `go 1.26.0` / `toolchain go1.26.9`；本机 Go 更新，没有降级使用 1.26.9）。同源两次构建 sha256 一致；`ldd` 为 not a dynamic executable。
+- 注意：这个 sha 只对应「Go 1.27.2 + 本分支内容」；换 Go 版本重编会得到不同的 sha。
+
+## 5. 与线上现用二进制（#11+#12+#14，sha `1cc0c775…`）的差异
+
+新增（来自 #13、#16、#17；#11/#12/#14 的内容线上已有）：
+
+- **契约适配（#13）**：判分 `POST /v1/bank/grade`、取题 `POST /v1/bank/questions/lookup`、选题 `GET /v1/brain/pick-practice` 按大脑「最终契约」对接；错误码映射（401/403/404/409 `rev_mismatch`/409 `idempotency_conflict`/429 当日上限/501/5xx → 页面状态，永不 5xx、不谎称「已记入大脑」）；`rev` 过期提示「题目已更新，请刷新」；同一份答案重试沿用同一 `client_attempt_id` 与 `answered_at`；`unsupported` 的题 `recorded:false`；接口未部署时（404/501）按 not_ready 降级为仅留档。
+- **pick 改用判分令牌（#13）**：`due_first` / `wrong_only` 的 pick-practice 请求用 `RUYI_BRAIN_GRADE_TOKEN`（大脑对 pick 要 write scope，只读令牌会 403）；**没配判分令牌时 pick 直接 501「not ready」，不会退回用只读令牌**。lookup / 列表 / 图片仍用 `RUYI_BRAIN_TOKEN`。
+- **`RUYI_BRAIN_ID`（#17）**：判分 body 的 `brain` 与 pick 查询的 `brain` 可配，默认 `ruyi`，联调用 `qa-practice`；非法值启动即退出且不回显。站点 URL 上的 `?brain=` 一律忽略。
+- **本地测试套（#16）**：`sets.json` 支持 `"local": true` + `questions`（`smoke-test` 套，题干「测试题，随便填」）；新增 `POST /api/practice/<id>/check`（服务端判对错，答案不下发）；提交固定 `archive_only` / `brain_note: test_set`，**提交时 0 次调大脑**；归档行 `test:true`；ntfy 标题/正文带「【测试】」；保留 source `local.smoke`（写进 `RUYI_AUTO_SOURCES` / `RUYI_ALLOWED_SOURCES` 会启动即退出）。
+- **启动探测**：配了 `RUYI_SETS_FILE` 时，启动后异步做 1 次只读 lookup 探测（明显不存在的 qref），只写日志，不影响启动。
+- **升级时的兼容性提醒**：旧二进制遇到 `sets.json` 里的 smoke 条目会启动失败，回滚前须先删除该条目（`DEPLOY-P3.md` §6 / §8.3）。
+
+新增环境变量（**全部可选**，不配 = 默认值；线上现有变量一个都不用改）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `RUYI_BRAIN_ID` | `ruyi` | 判分 body / pick 查询里的大脑 id；格式 `^[a-z0-9][a-z0-9_-]{0,63}$` |
+| `RUYI_BRAIN_LOOKUP_PATH` | `/v1/bank/questions/lookup` | lookup 路径，大脑改路径时才动 |
+| `RUYI_BRAIN_PICK_PATH` | `/v1/brain/pick-practice` | pick 路径，同上 |
+| `RUYI_PICK_SKIP_DEFERRED` | `0` | `1` = 丢掉大脑标 `deferred:*` 的选题；默认保留并标注 |
+
+已有变量的语义变化：`RUYI_BRAIN_GRADE_TOKEN` 现在**同时**用于判分和 pick-practice（见上），其范围须同时满足两者，且仍必须与 `RUYI_BRAIN_TOKEN` 不同。
+
+## 6. 验证摘要
+
+`gofmt -l`（不含 vendor）无输出；`go vet ./...` 通过；`CGO_ENABLED=0 go test ./... -count=1` 全包通过；`CGO_ENABLED=1 go test -race ./... -count=1` 全包通过；`test/acceptance.sh`（带 SHOTS 与 headless Chrome、mockbrain）全过。另跑了集成专项断言：`/api/config` 的 `ntfy_url` 跟随 `RUYI_NTFY_BASE_URL`；本地套提交 0 次调大脑；`RUYI_BRAIN_ID=qa-practice` 时 grade body / pick 查询的 brain 正确、pick 用判分令牌；契约错误映射；对 main 新增行的公开库安全 grep。

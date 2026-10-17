@@ -83,7 +83,8 @@ chmod 750 /var/log/ruyi-site
 
 ```bash
 # 检查 ruyi-site 用户能否读取
-sudo -u ruyi-site ls /opt/ruyi-english-daily >/dev/null && echo readable
+# CentOS 7 上 `sudo -u` / `runuser -u` 不可用，且该用户 shell 是 nologin，所以用 runuser -s 指定 shell
+runuser -s /bin/bash ruyi-site -c 'ls /opt/ruyi-english-daily >/dev/null && echo readable'
 ```
 
 ## 5. 环境文件 /etc/ruyi-site/ruyi-site.env

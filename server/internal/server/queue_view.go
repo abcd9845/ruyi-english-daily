@@ -252,7 +252,7 @@ func (s *Server) itemView(li linkItem, p *brain.Pending, submitted time.Time, ca
 		case brain.ReasonDailyCap:
 			o.Label = "今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。"
 		case "retry_exhausted":
-			o.Label = "暂时没能排队，答案已存档，家长会看到"
+			o.Label = "暂时没能排队，答案已存档"
 		default:
 			why := notQueuedText[li.Reason]
 			if why == "" {

@@ -987,6 +987,9 @@ gpost w3 "$WA" free-3 "$(mkbody 55555555-5555-4555-8555-555555555555 '[{"qref":"
 expect "W10 unsupported answer: queued, recorded by the enqueue (not 不入大脑 any more)" "$(jq -c '[.queue.items[0].enq,.recorded_count,.results[0].recorded]' "$WORK/resp/w3.b")" '["ok",1,true]'
 get wq1 "$WA/api/practice/free-3/quota" -b "$WORK/jarW"
 expect "W10b the daily quota counts the answer the enqueue wrote ('约还剩N次' now 2)" "$(jq -c '[.used["example.set:math:4"]]' "$WORK/resp/wq1.b")" '[1]'
+get wcfg "$WA/api/config" -b "$WORK/jarW"
+expect "W10c queue on: /api/config carries queue=true (the page words the daily limit by it)" "$(jq -c '.queue' "$WORK/resp/wcfg.b")" 'true'
+expect "W10d queue off (default site): /api/config has no queue key (= #22)" "$(printf %s "$CONFIG_BODY" | jq -c 'has("queue")')" 'false'
 # enqueue 500 -> submission still succeeds, retry is automatic
 curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/config?enqueue_mode=500" >/dev/null
 gpost w4 "$WA" demo-1 "$(mkbody 66666666-6666-4666-8666-666666666666 '[{"qref":"example.set:math:3","answer":["m","n"]}]')" -b "$WORK/jarW"

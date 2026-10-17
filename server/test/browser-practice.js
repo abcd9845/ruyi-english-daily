@@ -292,6 +292,22 @@ async function queueFlow(base) {
   check('[queue] third submit succeeds', await submitOnce() && await waitUI('waiting'));
   await mockQ('advance', { qref: Q3, to: 'purged' });
   check('[queue] purged -> 「家长已删除这道题的解析」 and no AI text', await waitUI('purged') && await ev(`document.querySelectorAll('#qs .aibox').length === 0 && document.querySelector('#qs .qst-l').textContent === '家长已删除这道题的解析'`));
+  // --- 8. (r4 P3-A/P3-C) queue ON: /api/config says so; the 4th-time wording is the queue one;
+  // an enqueue that failed (retrying) must not be called 「不入大脑 / 没有 AI 初评」 anywhere on the page
+  const cfg = await ev(`fetch('/api/config').then(r => r.json())`);
+  check('[queue] /api/config tells the page the queue is on ({"queue":true})', cfg && cfg.queue === true, JSON.stringify(cfg));
+  await mockQ('config', { enqueue_mode: '500' });
+  check('[queue] free-3 loads', await loginAndLoad(base + '/m/practice/?set=free-3', 1));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid); await waitFor(cards(1));
+  await ev(`(() => { const f = document.querySelector('#qs input[type=text], #qs input:not([type]), #qs textarea'); f.value = 'x'; f.dispatchEvent(new Event('input', {bubbles: true})); return 1; })()`);
+  await sleep(400);
+  await ev(`window.confirm = () => true; document.getElementById('btnSubmit').click(); 1`);
+  check('[queue] enqueue failing: result card appears', await waitFor(resultShown));
+  const rt = await resultInfo();
+  check('[queue][P3-C] enqueue retrying: row, paragraph, status box and banner all say 正在排队; none says 不入大脑 / 没有 AI 初评 / 不自动判分（不入大脑）',
+    rt.vd.join().includes('正在排队') && !/不入大脑|没有 AI 初评|家长会核对|家长会看/.test(rt.page) && rt.page.includes('正在排队（会自动重试）') && rt.page.includes('还在等 1 题'), JSON.stringify(rt.vd) + ' | ' + rt.page.slice(0, 400));
+  await mockQ('config', { enqueue_mode: '' });
   check('[queue] no family code / token in storage or page', !(await ev(`JSON.stringify(Object.assign({}, localStorage)) + document.body.innerText`)).includes(code));
   return finish();
 }
@@ -348,7 +364,7 @@ async function contractFlow(base) {
   await ev(`document.getElementById('btnSubmit').click(); 1`);
   await waitFor(`document.getElementById('submitMsg').textContent.includes('交满 3 次')`);
   const cap = await resultInfo();
-  check('[contract] 429 daily_cap: the new wording (交满 3 次 … 没有 AI 初评 …), no 家长会核对/不入大脑, answers stay, no result card', cap.msg === '今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。' && !/家长会|不入大脑|未记入大脑/.test(cap.msg) && !cap.shown && (await ev(`document.querySelectorAll('#q1 input.blank')[0].value`)) === '5/4', cap.msg);
+  check('[contract] 429 daily_cap: queue OFF wording (交满 3 次 … 先存档 … 才会记入大脑; nothing about 排队 / AI 初评), no 家长会核对/不入大脑, answers stay, no result card', cap.msg === '今天这题已经交满 3 次，这次答案先存档；明天再交一次才会记入大脑。' && !/家长会|不入大脑|未记入大脑|AI 初评|排队/.test(cap.msg) && !cap.shown && (await ev(`document.querySelectorAll('#q1 input.blank')[0].value`)) === '5/4', cap.msg);
   await ev(`localStorage.clear(); 1`);
 
   // 4. recorded:false (unsupported): the page must NOT say it was submitted to the brain
@@ -430,7 +446,7 @@ async function dailyLimitFlow(base) {
     check(`[limit] submission ${i + 1}: graded, 已提交到大脑`, await waitFor(resultShown) && (await resultInfo()).h === '已提交到大脑');
     const cf = await ev(`window.__confirms`);
     check(`[limit] submission ${i + 1}: confirm says "本次提交后…约还剩${wantLeft[i]}次"`, cf.length === 1 && cf[0].includes('约还剩' + wantLeft[i] + '次') && !cf[0].includes('，还剩'), JSON.stringify(cf));
-    const want = wantLeft[i] === '0' ? '今天这题已交满 3 次，再交只存档、没有 AI 初评；明天再交一次才会排队。' : '今天约还剩 ' + wantLeft[i] + ' 次';
+    const want = wantLeft[i] === '0' ? '今天这题已交满 3 次，再交只存档；明天再交一次才会记入大脑。' : '今天约还剩 ' + wantLeft[i] + ' 次';
     check(`[limit] after submission ${i + 1} the labels read: ${want}`, await waitFor(`[...document.querySelectorAll('#qs .quota')].length===3 && [...document.querySelectorAll('#qs .quota')].every(q => q.textContent === ${JSON.stringify(want)})`), JSON.stringify(await lefts()));
     await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300);
     await fillDemo(); await sleep(400);
@@ -440,7 +456,7 @@ async function dailyLimitFlow(base) {
   // 4. the 4th: the confirm warns that it will not be recorded; accepting gives 429 daily_cap
   await hookFetch(0, false); await hookConfirm('true');
   await ev(`document.getElementById('btnSubmit').click(); 1`);
-  check('[limit] 4th: the new daily_cap wording (交满 3 次 … 先存档 … 没有 AI 初评) from the 429, no result card, answers kept', await waitFor(`document.getElementById('submitMsg').textContent.includes('今天这题已经交满 3 次，这次答案先存档，没有 AI 初评')`));
+  check('[limit] 4th (queue OFF): the daily_cap wording from the 429 promises neither 排队 nor AI 初评, no result card, answers kept', await waitFor(`document.getElementById('submitMsg').textContent === '今天这题已经交满 3 次，这次答案先存档；明天再交一次才会记入大脑。'`));
   const c4 = await ev(`({c: window.__confirms, shown: ${resultShown}, q1: [...document.querySelectorAll('#q1 input.blank')].map(e => e.value).join('|'), caps: document.querySelectorAll('#qs .vd.cap').length, dis: document.getElementById('btnSubmit').disabled, ids: window.__bodies.map(b => JSON.parse(b).client_attempt_id), ls: JSON.parse(localStorage.getItem('ruyi-practice-demo-1-v1') || 'null')})`);
   check('[limit] 4th: the confirm warned 「已经用完 … 不会记入大脑」', c4.c.length === 1 && c4.c[0].includes('今天的 3 次已经用完') && c4.c[0].includes('不会记入大脑') && c4.c[0].includes('约还剩0次'), JSON.stringify(c4.c));
   check('[limit] 4th: not marked submitted, answers kept, capped questions marked, button usable', !c4.shown && c4.q1 === '5/4||-3' && c4.caps === 3 && !c4.dis, JSON.stringify([c4.shown, c4.q1, c4.caps]));

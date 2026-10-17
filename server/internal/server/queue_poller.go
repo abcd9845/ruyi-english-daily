@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -83,9 +81,6 @@ func (s *Server) EnableNotify() error {
 	}
 	if p.st.recovered {
 		p.markRecovered()
-	}
-	if err := os.WriteFile(filepath.Join(s.QueueDir, notifyMarker), []byte("1\n"), 0o600); err != nil {
-		s.Log.Debug("queue notify start marker not written", "err", err.Error())
 	}
 	s.poll = p
 	return nil

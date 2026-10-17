@@ -241,8 +241,9 @@ type sessState struct {
 	DoneSeen bool `json:"done_seen,omitempty"`
 }
 
-// notifyMarker is created the first time the poller starts in a state dir: a missing
-// notify.json next to it is a real loss (WARN), without it the poller is just being switched on.
+// notifyMarker is created when notify.json is first written in a state dir: a missing
+// notify.json next to it is a real loss (WARN). Without it the poller was never switched on, or ran on an
+// empty queue and never had anything to save (INFO).
 const notifyMarker = ".notify-started"
 
 type notifyState struct {
@@ -262,6 +263,7 @@ type notifyState struct {
 	// firstOpen: no notify.json, nothing ever sent and no start marker = the poller is switched on for the first
 	// time on an existing queue. Same one-off reconcile, but nothing is wrong (INFO, not WARN).
 	firstOpen bool
+	marked    bool // the start marker is on disk
 }
 
 // loadNotify reads notify.json and sent.jsonl. A damaged notify.json is renamed
@@ -353,6 +355,11 @@ func (st *notifyState) saveLocked(now time.Time) error {
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return errors.New("state not writable")
+	}
+	if !st.marked { // notify.json now exists for good: from here on its absence is a real loss
+		if os.WriteFile(filepath.Join(st.dir, notifyMarker), []byte("1\n"), 0o600) == nil {
+			st.marked = true
+		}
 	}
 	_, err = f.Write(b)
 	if err == nil {

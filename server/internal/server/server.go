@@ -366,7 +366,11 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 	if s.Topic != "" {
 		ntfy = s.ntfyURL()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ntfy_url": ntfy})
+	out := map[string]any{"ntfy_url": ntfy}
+	if s.queueOn() {
+		out["queue"] = true // only when on: with the queue off the answer stays byte-identical to #22
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // ntfyURL is "<NtfyBase>/<Topic>" with exactly one slash between them, whether

@@ -557,7 +557,7 @@ func TestQueueAutoRetryRunsUntilTheDeadlineThenRetryExhausted(t *testing.T) {
 	*clock = clock.Add(49 * time.Hour)
 	e.app.SweepOnce(context.Background())
 	v := e.qview(t, ck, cid1)
-	if it := v.item(q3); it.UI != "not_queued" || it.Reason != "retry_exhausted" || it.Label != "暂时没能排队，答案已存档，家长会看到" {
+	if it := v.item(q3); it.UI != "not_queued" || it.Reason != "retry_exhausted" || it.Label != "暂时没能排队，答案已存档" {
 		t.Fatalf("%+v", it)
 	}
 }

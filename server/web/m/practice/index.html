@@ -92,7 +92,7 @@ footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
     <button type="button" class="btn-ghost" id="btnCheck" style="display:none;margin-bottom:10px">检查</button>
     <button type="button" class="btn-submit" id="btnSubmit">提交</button>
     <p class="meta" style="margin:10px 0 0">没做的题可以先空着；提交前答案只保存在本机。</p>
-    <p class="meta" style="margin:6px 0 0">每题每天最多提交 3 次（上海时间 0 点重新算）；题目上的「今天还剩 N 次」按本站提交记录估算，仅供参考。</p>
+    <p class="meta" style="margin:6px 0 0">每题每天最多提交 3 次（上海时间 0 点重新算）；题目上的「今天约还剩 N 次」按本站提交记录估算，仅供参考。</p>
     <div id="submitMsg" class="msg bad" role="status" aria-live="polite"></div>
   </div>
   <div class="card resbox" id="resultCard" style="display:none"></div>
@@ -438,7 +438,7 @@ function render(){
   paintQuota();
 }
 
-// ---- daily limit: "今天还剩 N 次" (estimate) + confirm before submitting -------------
+// ---- daily limit: "今天约还剩 N 次" (estimate) + confirm before submitting -------------
 function cappedMap(){
   try{ var m=JSON.parse(localStorage.getItem(CAP_KEY)||'{}'); return (m&&typeof m==='object')?m:{}; }catch(e){ return {}; }
 }
@@ -463,8 +463,9 @@ function paintQuota(){
   document.querySelectorAll('#qs section[data-qref]').forEach(function(card){
     var u=usedToday(card.getAttribute('data-qref')); if(u===null) return;
     var left=Math.max(0,lim-u);
-    var d=el('div','quota'+(left===0?' zero':''),left===0?'今天这题的次数已用完（再提交只会留档，不入大脑）':'今天还剩 '+left+' 次');
+    var d=el('div','quota'+(left===0?' zero':''),left===0?'今天这题的次数已用完（再提交只会留档，不入大脑）':'今天约还剩 '+left+' 次');
     d.setAttribute('data-left',String(left));
+    d.title='按本站提交记录估算（不含别处的提交），仅供参考';
     var q=card.querySelector('.qno'); if(q&&q.nextSibling) card.insertBefore(d,q.nextSibling); else card.appendChild(d);
   });
 }
@@ -491,8 +492,8 @@ function confirmText(list){
   });
   var t;
   if(minLeft===null) t='每题每天只能提交'+lim+'次（今天还剩几次暂时查不到）。';
-  else if(list.length===1) t='每题每天只能提交'+lim+'次，本次提交后还剩'+minLeft+'次。';
-  else t='每题每天只能提交'+lim+'次，本次提交 '+list.length+' 道题，提交后剩余次数最少的一题还剩'+minLeft+'次。';
+  else if(list.length===1) t='每题每天只能提交'+lim+'次，本次提交后约还剩'+minLeft+'次。';
+  else t='每题每天只能提交'+lim+'次，本次提交 '+list.length+' 道题，提交后剩余次数最少的一题约还剩'+minLeft+'次。';
   if(minLeft!==null) t+='（按本站提交记录估算'+(unknown?'；有 '+unknown+' 题查不到次数':'')+'）';
   if(full.length) t+='\n\n注意：'+full.join('、')+'今天的 '+lim+' 次已经用完，大脑会拒收整批，这次只会留档、不会记入大脑。想记入大脑的话，先取消，把这几题清空再提交。';
   return t+'\n\n确定提交吗？';

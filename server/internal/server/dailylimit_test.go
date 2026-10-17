@@ -272,3 +272,33 @@ func TestQuotaIgnoresV1AndTestRecords(t *testing.T) {
 		t.Errorf("%+v", q)
 	}
 }
+
+// Contract change of this feature, spelled out: a refused id replays as refused, so the page drops it;
+// a NEW id for the same answers is asked again, and is recorded once the brain accepts (next day).
+func TestDailyCapRefusedIdStaysRefusedNewIdIsRecordedNextDay(t *testing.T) {
+	e, _, ck := contractEnv(t, opts{maxPerHour: 50})
+	e.brain.setGradeMode("cap3")
+	for i := 1; i <= 3; i++ {
+		e.submit(t, ck, "demo-1", ans(uuid(i), q2+`|"B"`))
+	}
+	if resp, _, _ := e.submit(t, ck, "demo-1", ans(uuid(4), q2+`|"B"`)); resp.StatusCode != 429 {
+		t.Fatalf("4th: %d", resp.StatusCode)
+	}
+	e.brain.mu.Lock()
+	e.brain.gradeDayCnt = map[string]int{} // the brain's Shanghai day rolls over
+	e.brain.mu.Unlock()
+	calls := e.brain.gradeCalls()
+	// the old, refused id still replays the stored refusal (the brain is not asked, nothing is recorded under it)
+	resp, b, _ := e.submit(t, ck, "demo-1", ans(uuid(4), q2+`|"B"`))
+	if resp.StatusCode != 429 || !strings.Contains(string(b), `"replayed":true`) || e.brain.gradeCalls() != calls {
+		t.Fatalf("old id: %d %s", resp.StatusCode, b)
+	}
+	// a new id (what the page does after a daily_cap) is accepted and recorded
+	resp, b, g := e.submit(t, ck, "demo-1", ans(uuid(5), q2+`|"B"`))
+	if resp.StatusCode != 200 || !g.BrainRecorded || g.Replayed {
+		t.Fatalf("new id: %d %s", resp.StatusCode, b)
+	}
+	if _, q := e.quota(t, ck, "demo-1"); q.Used[q2] != 4 { // 3 from the first day + 1 now (same Shanghai day on this clock)
+		t.Errorf("%+v", q)
+	}
+}

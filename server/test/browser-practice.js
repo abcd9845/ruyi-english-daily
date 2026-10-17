@@ -7,7 +7,7 @@
 // BROWSER_FLOW=contract (needs MOCK_URL = the mock brain, for its /_mock/bump-rev hook): final-contract states: rev, recorded:false, errors, brain picks.
 // BROWSER_FLOW=notready: the brain's grade endpoint is not deployed (404): page must say archive-only, never recorded.
 // BROWSER_FLOW=smoke: the local test set ?set=smoke-test (needs a sets file with it): answer, 检查, submit; archive-only wording, never 已提交到大脑.
-// BROWSER_FLOW=dailylimit (needs the mock brain with the real daily cap + a site with grading): 「今天还剩N次」, the confirm
+// BROWSER_FLOW=dailylimit (needs the mock brain with the real daily cap + a site with grading): 「今天约还剩N次」, the confirm
 // dialog, 3 successes then a 429 daily_cap (archived, not recorded), rate_limited wording, 「不入大脑」 badges.
 // Against the mock brain's synthetic questions. Logs in through the real form, fills
 // answers, reloads, clears; writes mobile-viewport screenshots to <out-dir>.
@@ -304,8 +304,9 @@ async function dailyLimitFlow(base) {
   await ev(`localStorage.clear(); 1`);
   await send('Page.reload', {}, sid); await waitFor(cards(3));
 
-  // 1. fresh day: every question says 今天还剩 3 次 (estimate), with the explanation on the submit card
-  check('[limit] each question shows 「今天还剩 3 次」', await waitFor(`[...document.querySelectorAll('#qs .quota')].length===3 && [...document.querySelectorAll('#qs .quota')].every(q => q.textContent === '今天还剩 3 次')`), JSON.stringify(await lefts()));
+  // 1. fresh day: every question says 今天约还剩 3 次 (estimate), with the explanation on the submit card
+  check('[limit] each question shows 「今天约还剩 3 次」', await waitFor(`[...document.querySelectorAll('#qs .quota')].length===3 && [...document.querySelectorAll('#qs .quota')].every(q => q.textContent === '今天约还剩 3 次')`), JSON.stringify(await lefts()));
+  check('[limit] the labels carry the tooltip 「按本站提交记录估算」', await ev(`[...document.querySelectorAll('#qs .quota')].every(q => q.title.includes('按本站提交记录估算'))`));
   check('[limit] the page explains it is an estimate from this site\'s records', (await ev(`document.getElementById('submitCard').innerText`)).includes('按本站提交记录估算'));
   await shotEl('practice-limit-fresh.png', '#q1');
 
@@ -315,7 +316,7 @@ async function dailyLimitFlow(base) {
   await ev(`document.getElementById('btnSubmit').click(); 1`);
   await sleep(500);
   const cancelled = await ev(`({n: window.__bodies.length, c: window.__confirms, btn: document.getElementById('btnSubmit').textContent, dis: document.getElementById('btnSubmit').disabled, shown: ${resultShown}, q1: [...document.querySelectorAll('#q1 input.blank')].map(e => e.value).join('|'), q2: document.querySelectorAll('#q2 input:checked').length, ls: JSON.parse(localStorage.getItem('ruyi-practice-demo-1-v1') || 'null')})`);
-  check('[limit] the confirm asks once, in the required words (3 questions: smallest remaining = 2)', cancelled.c.length === 1 && cancelled.c[0].includes('每题每天只能提交3次') && cancelled.c[0].includes('本次提交 3 道题') && cancelled.c[0].includes('还剩2次') && cancelled.c[0].includes('按本站提交记录估算'), JSON.stringify(cancelled.c));
+  check('[limit] the confirm asks once, in the required words (3 questions: smallest remaining = 2)', cancelled.c.length === 1 && cancelled.c[0].includes('每题每天只能提交3次') && cancelled.c[0].includes('本次提交 3 道题') && cancelled.c[0].includes('约还剩2次') && cancelled.c[0].includes('按本站提交记录估算'), JSON.stringify(cancelled.c));
   check('[limit] cancel: no request, button usable, no result, answers and draft kept, no attempt id minted', cancelled.n === 0 && !cancelled.dis && cancelled.btn === '提交' && !cancelled.shown && cancelled.q1 === '5/4||-3' && cancelled.q2 === 1 && cancelled.ls && cancelled.ls.a['example.set:math:2'] && !cancelled.ls.cid, JSON.stringify([cancelled.n, cancelled.q1, cancelled.ls && cancelled.ls.cid]));
 
   // 3. three successful submissions of the same questions: 2, 1, 0 left; the last confirm says 0
@@ -325,8 +326,8 @@ async function dailyLimitFlow(base) {
     await ev(`document.getElementById('btnSubmit').click(); 1`);
     check(`[limit] submission ${i + 1}: graded, 已提交到大脑`, await waitFor(resultShown) && (await resultInfo()).h === '已提交到大脑');
     const cf = await ev(`window.__confirms`);
-    check(`[limit] submission ${i + 1}: confirm says "本次提交后…还剩${wantLeft[i]}次"`, cf.length === 1 && cf[0].includes('还剩' + wantLeft[i] + '次'), JSON.stringify(cf));
-    const want = wantLeft[i] === '0' ? '今天这题的次数已用完（再提交只会留档，不入大脑）' : '今天还剩 ' + wantLeft[i] + ' 次';
+    check(`[limit] submission ${i + 1}: confirm says "本次提交后…约还剩${wantLeft[i]}次"`, cf.length === 1 && cf[0].includes('约还剩' + wantLeft[i] + '次') && !cf[0].includes('，还剩'), JSON.stringify(cf));
+    const want = wantLeft[i] === '0' ? '今天这题的次数已用完（再提交只会留档，不入大脑）' : '今天约还剩 ' + wantLeft[i] + ' 次';
     check(`[limit] after submission ${i + 1} the labels read: ${want}`, await waitFor(`[...document.querySelectorAll('#qs .quota')].length===3 && [...document.querySelectorAll('#qs .quota')].every(q => q.textContent === ${JSON.stringify(want)})`), JSON.stringify(await lefts()));
     await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300);
     await fillDemo(); await sleep(400);
@@ -338,7 +339,7 @@ async function dailyLimitFlow(base) {
   await ev(`document.getElementById('btnSubmit').click(); 1`);
   check('[limit] 4th: 「已留档，未记入大脑」 message from the 429, no result card, answers kept', await waitFor(`document.getElementById('submitMsg').textContent.includes('今天这题的次数已用完，已留档，未记入大脑')`));
   const c4 = await ev(`({c: window.__confirms, shown: ${resultShown}, q1: [...document.querySelectorAll('#q1 input.blank')].map(e => e.value).join('|'), caps: document.querySelectorAll('#qs .vd.cap').length, dis: document.getElementById('btnSubmit').disabled, ids: window.__bodies.map(b => JSON.parse(b).client_attempt_id), ls: JSON.parse(localStorage.getItem('ruyi-practice-demo-1-v1') || 'null')})`);
-  check('[limit] 4th: the confirm warned 「已经用完 … 不会记入大脑」', c4.c.length === 1 && c4.c[0].includes('今天的 3 次已经用完') && c4.c[0].includes('不会记入大脑') && c4.c[0].includes('还剩0次'), JSON.stringify(c4.c));
+  check('[limit] 4th: the confirm warned 「已经用完 … 不会记入大脑」', c4.c.length === 1 && c4.c[0].includes('今天的 3 次已经用完') && c4.c[0].includes('不会记入大脑') && c4.c[0].includes('约还剩0次'), JSON.stringify(c4.c));
   check('[limit] 4th: not marked submitted, answers kept, capped questions marked, button usable', !c4.shown && c4.q1 === '5/4||-3' && c4.caps === 3 && !c4.dis, JSON.stringify([c4.shown, c4.q1, c4.caps]));
   check('[limit] 4th: the page dropped its attempt id (next submit gets a new one)', c4.ls && !c4.ls.cid && !c4.ls.res, JSON.stringify(c4.ls && c4.ls.cid));
   await shot('practice-limit-4th.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
@@ -369,6 +370,8 @@ async function dailyLimitFlow(base) {
   await ev(`document.getElementById('btnSubmit').click(); 1`);
   await waitFor(resultShown);
   const un = await resultInfo();
+  const cf1 = await ev(`window.__confirms`);
+  check('[limit] single question: confirm reads 「每题每天只能提交3次，本次提交后约还剩2次。」', cf1.length === 1 && cf1[0].startsWith('每题每天只能提交3次，本次提交后约还剩2次。（按本站提交记录估算）'), JSON.stringify(cf1));
   check('[limit] unsupported: badge 「不自动判分（不入大脑）」, card says 不入大脑, never 已提交到大脑', un.vd.join() === '不自动判分（不入大脑）' && un.page.includes('（不入大脑）') && !un.page.includes('已提交到大脑'), un.vd.join() + ' / ' + un.h);
   await shot('practice-limit-unsupported.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
   return finish();

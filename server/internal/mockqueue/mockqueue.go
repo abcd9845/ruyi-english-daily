@@ -913,7 +913,9 @@ func (m *Mock) Advance(id int64, qref, to string, opt map[string]string) error {
 		it.State = to
 	case "compared", "judged":
 		it.State = to
-		if it.Proposed == "" {
+		// the real brain proposes nothing when the assistants disagree (mismatch) or there are fewer than two (n/a);
+		// no_answer=1 also strips a match (the abnormal "match without text" case)
+		if it.Proposed == "" && opt["no_answer"] == "" && it.Compare != "mismatch" && it.Compare != "n/a" {
 			it.Proposed, it.Rationale = "（模拟）AI 拟答案", "（模拟）AI 解析"
 		}
 		if to == "compared" && it.Compare == "" {

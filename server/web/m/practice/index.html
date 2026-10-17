@@ -130,9 +130,9 @@ var cid=null, cidSig=null, cidAt=null, result=null, submitting=false;
 var quota=null;
 // The queue switch of the server (/api/config "queue":true, only present when it is on). It decides the wording:
 // with the queue off nothing is ever "queued" and there is no AI first pass to promise.
-var QUEUE_ON=false, cfgP=null;
+var QUEUE_ON=false, NOTIFY_ON=false, cfgP=null;
 function loadCfg(){
-  if(!cfgP) cfgP=api('GET','/api/config').then(function(r){ if(r.status===200){ QUEUE_ON=!!(r.json && r.json.queue===true); } else cfgP=null; }).catch(function(){ cfgP=null; });
+  if(!cfgP) cfgP=api('GET','/api/config').then(function(r){ if(r.status===200){ QUEUE_ON=!!(r.json && r.json.queue===true); NOTIFY_ON=QUEUE_ON && !!(r.json && r.json.notify===true); } else cfgP=null; }).catch(function(){ cfgP=null; });
   return cfgP;
 }
 function capText(){ return QUEUE_ON?'今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。':'今天这题已经交满 3 次，这次答案先存档；明天再交一次才会记入大脑。'; }
@@ -516,7 +516,7 @@ function confirmText(list){
   else if(list.length===1) t='每题每天只能提交'+lim+'次，本次提交后约还剩'+minLeft+'次。';
   else t='每题每天只能提交'+lim+'次，本次提交 '+list.length+' 道题，提交后剩余次数最少的一题约还剩'+minLeft+'次。';
   if(minLeft!==null) t+='（按本站提交记录估算'+(unknown?'；有 '+unknown+' 题查不到次数':'')+'）';
-  if(full.length) t+='\n\n注意：'+full.join('、')+'今天的 '+lim+' 次已经用完，大脑会拒收整批，这次只会'+(QUEUE_ON?'先存档，没有 AI 初评、':'留档、')+'不会记入大脑。想记入大脑的话，先取消，把这几题清空再提交。';
+  if(full.length) t+='\n\n注意：'+full.join('、')+'今天的 '+lim+' 次已经用完，'+(QUEUE_ON?'这几题这次只会先存档，没有 AI 初评、不会记入大脑；其中能直接判分的题满了，大脑还会把同批的其他题一起退回，也只存档。想记入大脑的话，先取消，把这几题清空再提交。':'大脑会拒收整批，这次只会留档、不会记入大脑。想记入大脑的话，先取消，把这几题清空再提交。');
   return t+'\n\n确定提交吗？';
 }
 function markCapped(j){
@@ -569,18 +569,18 @@ function setLocked(on){
 // (brain_recorded + per-question recorded:true). Anything else is worded as
 // archive-only / pending / not auto-graded, never as recorded in the brain.
 function brainConfirmed(r){ return !!r && r.mode==='graded' && r.brain_recorded===true; }
-function applyResult(){
+function applyResult(noStart){
   document.querySelectorAll('#qs .vd,#qs .qst').forEach(function(n){ n.remove(); });
   var box=$('resultCard'); box.innerHTML='';
   if(!result){ qStop(); setLocked(false); showSubmitArea(); return; }
-  var qOK={}, qCap={}, qWait={}, qRetry=false; if(result.queue && Array.isArray(result.queue.items)) result.queue.items.forEach(function(x){ if(!x) return; if(x.enq==='ok') qOK[x.qref]=1; if(x.enq==='failed'){ qRetry=true; qWait[x.qref]=1; } if(x.enq==='not_queued' && x.reason==='daily_cap') qCap[x.qref]=1; });
-  var confirmed=brainConfirmed(result), qon=QUEUE_ON||!!result.queue;
+  var qOK={}, qCap={}, qWait={}, qExh={}, qRetry=false; if(result.queue && Array.isArray(result.queue.items)) result.queue.items.forEach(function(x){ if(!x) return; if(x.enq==='ok') qOK[x.qref]=1; if(x.enq==='failed'){ qRetry=true; qWait[x.qref]=1; } if(x.enq==='not_queued' && x.reason==='daily_cap') qCap[x.qref]=1; if(x.enq==='not_queued' && x.reason==='retry_exhausted') qExh[x.qref]=1; });
+  var confirmed=brainConfirmed(result), qon=QUEUE_ON||!!result.queue, anyExh=Object.keys(qExh).length>0;
   var byRef={}; result.results.forEach(function(r){ if(r && typeof r.qref==='string') byRef[r.qref]=r; });
   document.querySelectorAll('#qs section[data-qref]').forEach(function(card){
     var r=byRef[card.getAttribute('data-qref')]; if(!r) return;
     var cls='pend', txt='待核对';
     if(r.status==='unanswered'){ cls='none'; txt='未作答'; }
-    else if(r.status==='unsupported'){ cls='none'; txt=r.recorded===true?'不自动判分':(qWait[r.qref]?'答案已存档，正在排队':(qCap[r.qref]?'今天已交满 3 次，先存档':'不自动判分（不入大脑）')); }
+    else if(r.status==='unsupported'){ cls='none'; txt=(r.recorded===true||qOK[r.qref])?'不自动判分':(qExh[r.qref]?'暂时没能排队，答案已存档':qWait[r.qref]?'答案已存档，正在排队':(qCap[r.qref]?'今天已交满 3 次，先存档':'不自动判分（不入大脑）')); }
     else if(confirmed && r.recorded===true && r.status==='graded' && typeof r.correct==='boolean'){
       if(r.correct){ cls='ok'; txt='✓ 答对了'; } else { cls='wrong'; txt='✗ 不对'; }
     }
@@ -588,7 +588,7 @@ function applyResult(){
       // local test set: judged by the server, never recorded in the brain
       if(r.correct){ cls='ok'; txt='✓ 答对了（测试）'; } else { cls='wrong'; txt='✗ 不对（测试）'; }
     }
-    if(cls==='pend' && r.recorded!==true && !qOK[r.qref]){ if(qCap[r.qref]) txt='今天已交满 3 次，先存档'; else if(qWait[r.qref]) txt+='（答案已存档，正在排队）'; else txt+='（不入大脑）'; }   // only an answer the brain confirmed recorded is "in the brain"
+    if(cls==='pend' && r.recorded!==true && !qOK[r.qref]){ if(qCap[r.qref]) txt='今天已交满 3 次，先存档'; else if(qExh[r.qref]) txt='暂时没能排队，答案已存档'; else if(qWait[r.qref]) txt+='（答案已存档，正在排队）'; else txt+='（不入大脑）'; }   // only an answer the brain confirmed recorded is "in the brain"
     card.appendChild(el('div','vd '+cls,txt));
   });
   var sm=result.summary||{};
@@ -599,7 +599,7 @@ function applyResult(){
     box.appendChild(el('h2',null,rc>=asked?'已提交到大脑':'已提交到大脑（'+rc+' / '+asked+' 题）'));
     box.appendChild(el('div','sum','共 '+total+' 题 · 答对 '+(+sm.correct||0)+' · 答错 '+Math.max(0,(+sm.graded||0)-(+sm.correct||0))+' · 待核对 '+(+sm.pending||0)+(uns>0?' · 不自动判分 '+uns:'')+' · 未作答 '+un));
     if((+sm.pending||0)>0) box.appendChild(el('p','meta','「待核对」是这道题暂时没有判分（参考答案还在核对），不是做错了。'));
-    if(rc<asked) box.appendChild(el('p','meta','有 '+(asked-rc)+' 道题不能自动判分，'+(qRetry?'答案已经存档，正在排队等 AI 初评。':(qon?'这次答案先存档，没有 AI 初评。':'这次答案先存档。'))));
+    if(rc<asked) box.appendChild(el('p','meta','有 '+(asked-rc)+' 道题不能自动判分，'+(qRetry?'答案已经存档，正在排队等 AI 初评。':(anyExh?'暂时没能排队，答案已存档。':(qon?'这次答案先存档，没有 AI 初评。':'这次答案先存档。')))));
   } else if(result.test===true){
     box.appendChild(el('h2',null,'已提交（仅留档，未记入大脑）'));
     box.appendChild(el('div','sum','测试套 · 共 '+total+' 题 · 已作答 '+asked+' · 答对 '+(+sm.correct||0)+' · 未作答 '+un));
@@ -608,7 +608,7 @@ function applyResult(){
   } else if(result.mode==='graded'){
     box.appendChild(el('h2',null,'已提交（答案先存档）'));
     box.appendChild(el('div','sum','共 '+total+' 题 · 已作答 '+asked+' · 未作答 '+un));
-    box.appendChild(el('p','meta',(qRetry?'这些题的答案已经存档，正在排队等 AI 初评，现在不显示对错。':(qon?'这些题这次没有判分，答案先存档，没有 AI 初评，现在不显示对错。':'这些题这次没有判分，答案先存档，现在不显示对错。'))));
+    box.appendChild(el('p','meta',(qRetry?'这些题的答案已经存档，正在排队等 AI 初评，现在不显示对错。':(anyExh?'这些题暂时没能排队，答案已存档，现在不显示对错。':qon?'这些题这次没有判分，答案先存档，没有 AI 初评，现在不显示对错。':'这些题这次没有判分，答案先存档，现在不显示对错。'))));
     if(result.archived===false) box.appendChild(el('p','msg bad','这次提交没能保存下来，请告诉家长。'));
   } else {
     box.appendChild(el('h2',null,'已提交（暂未判分）'));
@@ -621,7 +621,7 @@ function applyResult(){
   again.onclick=resetAll;
   box.appendChild(again);
   setLocked(true); showSubmitArea();
-  qStart();
+  if(!noStart) qStart();
 }
 
 // ---- S1: AI first-pass status of queued answers ------------------------------------
@@ -675,8 +675,21 @@ function qPaint(view){
   if(+sm.purged>0) parts.push((+sm.purged)+' 题的解析已被家长删除');
   if(+sm.not_queued>0) parts.push((+sm.not_queued)+' 题未排队（答案已存档）');
   b.className='qbanner'+(sm.any_pending?'':' done');
-  b.textContent=parts.length?parts.join(' · ')+(sm.any_pending?'。可以关掉页面，AI 初评出来后家长手机会收到提醒。':'。'):'';
+  b.textContent=parts.length?parts.join(' · ')+(sm.any_pending?('。可以关掉页面，'+(NOTIFY_ON?'AI 初评出来后家长手机会收到提醒。':'稍后回来看。')):'。'):'';
   if(view.stale) b.textContent+=' （状态更新慢，稍后自动刷新）';
+}
+// The result kept from an earlier visit may say an enqueue was still being retried while the status
+// API already knows better (given up, or queued after all): the status wins, rows and paragraph follow.
+function qReconcile(view){
+  if(!result || !result.queue || !Array.isArray(result.queue.items)) return false;
+  var m={}; view.items.forEach(function(i){ if(i && typeof i.qref==='string') m[i.qref]=i; });
+  var ch=false;
+  result.queue.items.forEach(function(x){
+    var v=x&&m[x.qref]; if(!v||x.enq!=='failed') return;
+    if(v.ui_state==='not_queued'){ x.enq='not_queued'; x.reason=typeof v.reason==='string'?v.reason:''; ch=true; }
+    else if(v.ui_state && v.ui_state!=='enqueue_retry'){ x.enq='ok'; ch=true; }
+  });
+  return ch;
 }
 function qPending(view){ return !view || !view.summary || view.summary.any_pending!==false; }
 function qFetch(gen){
@@ -685,6 +698,7 @@ function qFetch(gen){
   return api('GET','/api/practice/attempts/'+encodeURIComponent(c)+'/queue').then(function(r){
     if(gen!==Q.gen) return;
     if(r.status===200 && r.json && Array.isArray(r.json.items)){
+      if(qReconcile(r.json)){ applyResult(true); }   // an old result (reopened page) is redrawn with what the status says now
       qPaint(r.json);
       var retrying=r.json.items.some(function(i){return i.ui_state==='enqueue_retry';});
       if(retrying && !Q.posted){ Q.posted=true; return api('POST','/api/practice/attempts/'+encodeURIComponent(c)+'/enqueue',{}).then(function(){ if(gen===Q.gen) return qFetch(gen); }); }

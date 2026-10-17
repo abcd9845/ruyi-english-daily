@@ -300,16 +300,22 @@ func (s *Server) itemView(li linkItem, p *brain.Pending, submitted time.Time, ca
 		o.UI, o.Label = uiWorking, "AI 判卷中"
 	case state == brain.StateCompared || state == brain.StateJudged:
 		o.UI, o.Label = uiFirstPass, "AI 初评 · 待家长核"
+		// compare_outcome compares the AI assistants' proposed answers with EACH OTHER (match = at least two
+		// different assistants all agree; mismatch = they disagree, nobody is picked; n/a = fewer than two):
+		// it says nothing about the child's answer, so nothing here may judge it.
 		switch o.CompareOutcome {
 		case "match":
-			o.CompareText = "AI 的答案和你的一致（待家长核）"
-		case "mismatch":
-			o.CompareText = "AI 的答案和你的不一致，需要家长看（待家长核）"
-		case "n/a":
-			o.CompareText = "AI 暂时没法和你的答案比对，需要家长看"
+			o.CompareText = "两位 AI 助手的答案一致，待家长核"
+		case "mismatch", "n/a":
+			o.CompareText = "AI 没有一致答案，需要家长看"
 		}
-		if o.NeedsManual && o.CompareText == "" {
-			o.CompareText = "AI 之间不一致，需要家长看"
+		if o.CompareText == "" && o.NeedsManual {
+			o.CompareText = "AI 没有一致答案，需要家长看"
+		}
+		// a match must come with the text; with no outcome and no text at all there is nothing to draw either:
+		// say plainly that the first pass is there and the parent can read it
+		if o.Result == nil && (o.CompareOutcome == "match" || o.CompareText == "") {
+			o.CompareText = "AI 初评已出，详情请家长查看"
 		}
 	case state == brain.StateReviewed:
 		o.UI, o.Label = uiReviewed, "家长已核"

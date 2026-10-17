@@ -259,13 +259,13 @@ async function queueFlow(base) {
   check('[queue] claimed -> AI 判卷中 (picked up by the poll, no reload)', await waitUI('ai_working'));
   // --- 3. first pass with full text; hostile text is shown as text
   const evil = '12 <img src=x onerror="window.__xss=1"> $x^2$';
-  await mockQ('advance', { qref: Q3, to: 'compared', answer: evil, rationale: '第一步 <b>粗体</b>\n第二步 $\\dfrac{1}{2}$', compare: 'mismatch' });
+  await mockQ('advance', { qref: Q3, to: 'compared', answer: evil, rationale: '第一步 <b>粗体</b>\n第二步 $\\dfrac{1}{2}$', compare: 'match' });
   check('[queue] compared -> AI初评·待家长核', await waitUI('ai_first_pass'));
   const fp = await ev(`(() => { const q = document.querySelector('#qs section[data-qref="${Q3}"] .qst'); return {label: q.querySelector('.qst-l').textContent, box: (q.querySelector('.aibox')||{}).innerText || '', imgs: q.querySelectorAll('img').length, bold: q.querySelectorAll('b').length, xss: window.__xss === 1, banner: document.getElementById('qBanner').textContent, cmp: (q.querySelector('.qst-c')||{}).textContent}; })()`);
   check('[queue] first-pass label and the FULL AI text (answer + rationale) are shown, labelled AI初评·待家长核', fp.label === 'AI 初评 · 待家长核' && fp.box.includes('AI初评·待家长核') && fp.box.includes('AI 的答案') && fp.box.includes('12') && fp.box.includes('第一步') && fp.box.includes('第二步'), JSON.stringify(fp));
   check('[queue] AI text is escaped: no injected <img>, <b>, no script ran', fp.imgs === 0 && fp.bold === 0 && !fp.xss, JSON.stringify([fp.imgs, fp.bold, fp.xss]));
   check('[queue] math in the AI text is typeset (KaTeX)', await waitFor(`document.querySelectorAll('#qs .aibox .katex').length >= 1`));
-  check('[queue] the mismatch note and the banner (AI 初评已出 1 题（待家长核）)', (fp.cmp || '').includes('不一致') && fp.banner.includes('AI 初评已出 1 题（待家长核）'), fp.banner);
+  check('[queue] match: 「两位 AI 助手的答案一致，待家长核」 (never a judgement of the child\'s answer) and the banner (AI 初评已出 1 题（待家长核）)', (fp.cmp || '') === '两位 AI 助手的答案一致，待家长核' && !/和你的|你答/.test(fp.cmp || '') && fp.banner.includes('AI 初评已出 1 题（待家长核）'), fp.banner);
   await shotEl('queue-firstpass.png', '#q3');
   // --- 4. everything processed: polling stops (no more GET .../queue)
   await sleep(1500);
@@ -292,6 +292,14 @@ async function queueFlow(base) {
   check('[queue] third submit succeeds', await submitOnce() && await waitUI('waiting'));
   await mockQ('advance', { qref: Q3, to: 'purged' });
   check('[queue] purged -> 「家长已删除这道题的解析」 and no AI text', await waitUI('purged') && await ev(`document.querySelectorAll('#qs .aibox').length === 0 && document.querySelector('#qs .qst-l').textContent === '家长已删除这道题的解析'`));
+  // --- 7b. (r5 P3-E) queue ON, the question is full: the confirm no longer says the brain rejects the whole batch
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+  await waitFor(`document.querySelectorAll('#qs .qst').length === 0`);
+  await fillDemo(); await sleep(600);
+  await ev(`window.__cf = []; window.confirm = t => { window.__cf.push(t); return false; }; document.getElementById('btnSubmit').click(); 1`);
+  await sleep(500);
+  const cf7 = await ev(`window.__cf`);
+  check('[queue][P3-E] full question, queue on: the confirm says "先存档、没有 AI 初评" and separates the grade path, never 「拒收整批」', cf7.length === 1 && cf7[0].includes('今天的 3 次已经用完') && cf7[0].includes('这几题这次只会先存档，没有 AI 初评') && cf7[0].includes('同批的其他题一起退回') && !cf7[0].includes('拒收整批'), JSON.stringify(cf7));
   // --- 8. (r4 P3-A/P3-C) queue ON: /api/config says so; the 4th-time wording is the queue one;
   // an enqueue that failed (retrying) must not be called 「不入大脑 / 没有 AI 初评」 anywhere on the page
   const cfg = await ev(`fetch('/api/config').then(r => r.json())`);
@@ -307,7 +315,34 @@ async function queueFlow(base) {
   const rt = await resultInfo();
   check('[queue][P3-C] enqueue retrying: row, paragraph, status box and banner all say 正在排队; none says 不入大脑 / 没有 AI 初评 / 不自动判分（不入大脑）',
     rt.vd.join().includes('正在排队') && !/不入大脑|没有 AI 初评|家长会核对|家长会看/.test(rt.page) && rt.page.includes('正在排队（会自动重试）') && rt.page.includes('还在等 1 题'), JSON.stringify(rt.vd) + ' | ' + rt.page.slice(0, 400));
+  // --- 8b. (r5 P3-F) a reopened page whose old result says "still retrying" while the status API says the enqueue was given up:
+  // status box, row and paragraph all follow the status
+  await ev(`(() => { const of = window.fetch; window.fetch = (u, o) => { // the real status, with the still-retrying answers turned into "given up"
+    if (!/attempts\\/[^/]+\\/queue$/.test(String(u)) || (o && o.method === 'POST')) return of(u, o);
+    return of(u, o).then(r => r.json()).then(v => { v.items.forEach(i => { if (i.ui_state === 'enqueue_retry') { i.ui_state = 'not_queued'; i.reason = 'retry_exhausted'; i.label = '暂时没能排队，答案已存档'; } });
+      v.summary = Object.assign({}, v.summary, {not_queued: v.items.length, enqueue_retry: 0, any_pending: false});
+      return new Response(JSON.stringify(v), {status: 200, headers: {'Content-Type': 'application/json'}}); }); }; return 1; })()`);
+  await waitFor(`document.body.innerText.includes('这些题暂时没能排队')`, 8000);
+  await sleep(600);
+  const ex = await resultInfo();
+  check('[queue][P3-F] retry exhausted after a reopen: status box, row and paragraph all say 暂时没能排队，答案已存档; no 正在排队 / 等 AI 初评 left',
+    ex.vd.join().includes('暂时没能排队，答案已存档') && ex.page.split('暂时没能排队，答案已存档').length >= 4 && !/正在排队|等 AI 初评/.test(ex.page), JSON.stringify(ex.vd) + ' | ' + ex.page.slice(0, 500));
   await mockQ('config', { enqueue_mode: '' });
+  // --- 9. (r5) mismatch: the assistants disagree, no proposed answer: no empty AI box, only the plain sentence; never a judgement of the child
+  await send('Page.reload', {}, sid); await waitFor(cards(1));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid); await waitFor(cards(1));
+  await ev(`(() => { const f = document.querySelector('#qs input[type=text], #qs input:not([type]), #qs textarea'); f.value = 'y'; f.dispatchEvent(new Event('input', {bubbles: true})); return 1; })()`);
+  await sleep(400);
+  await ev(`window.confirm = () => true; document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(resultShown);
+  const Q4 = 'example.set:math:4';
+  await waitFor(`!!document.querySelector('#qs section[data-qref="${Q4}"] .qst[data-ui="waiting"]')`);
+  await mockQ('advance', { qref: Q4, to: 'compared', compare: 'mismatch' });
+  check('[queue][r5] mismatch, no proposed answer: first-pass box with only 「AI 没有一致答案，需要家长看」, no AI answer area, no 和你的/你答',
+    await waitFor(`!!document.querySelector('#qs section[data-qref="${Q4}"] .qst[data-ui="ai_first_pass"]')`) &&
+    await ev(`(() => { const q = document.querySelector('#qs section[data-qref="${Q4}"] .qst'); return q.querySelector('.qst-c').textContent === 'AI 没有一致答案，需要家长看' && !q.querySelector('.aibox') && !/和你的|你答/.test(document.body.innerText); })()`));
+  check('[queue][r5] the banner promises no parent notice when the notify poller is off (this site runs without NOTIFY_ENABLED)', !(await ev(`document.body.innerText`)).includes('家长手机会收到提醒'));
   check('[queue] no family code / token in storage or page', !(await ev(`JSON.stringify(Object.assign({}, localStorage)) + document.body.innerText`)).includes(code));
   return finish();
 }

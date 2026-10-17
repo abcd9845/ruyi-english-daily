@@ -961,7 +961,7 @@ expect "W4 claimed -> AI 判卷中" "$(jq -r '.items[0].ui_state' "$WORK/resp/wv
 curl -s -X POST --get "http://127.0.0.1:$WQ/_mock/queue/advance" --data-urlencode "qref=example.set:math:3" --data-urlencode "to=compared" --data-urlencode "answer=AI-拟答案 12" --data-urlencode "rationale=AI-解析全文" --data-urlencode "compare=mismatch" >/dev/null
 sleep 5.5   # the site caches a status for 5 s
 get wv "$WA/api/practice/attempts/$WC/queue" -b "$WORK/jarW"
-expect "W5 compared -> AI初评·待家长核 with the FULL AI text and the mismatch note" "$(jq -c '[.items[0].ui_state,.items[0].label,.items[0].result.proposed_answer,.items[0].result.rationale,(.items[0].compare_text|test("不一致"))]' "$WORK/resp/wv.b")" '["ai_first_pass","AI 初评 · 待家长核","AI-拟答案 12","AI-解析全文",true]'
+expect "W5 compared -> AI初评·待家长核 with the FULL AI text and the plain 「AI 没有一致答案，需要家长看」 note (no judgement of the child's answer)" "$(jq -c '[.items[0].ui_state,.items[0].label,.items[0].result.proposed_answer,.items[0].result.rationale,(.items[0].compare_text == "AI 没有一致答案，需要家长看")]' "$WORK/resp/wv.b")" '["ai_first_pass","AI 初评 · 待家长核","AI-拟答案 12","AI-解析全文",true]'
 say "     waiting for the notify poller (45 s ±10%) ..."
 for _ in $(seq 1 80); do [ "$(grep -c 'AI初评已出' "$WORK/ntfy.jsonl")" -ge 1 ] && break; sleep 1; done
 expect "W6 exactly one 'AI初评已出，待家长核' notification, no answer text in it" "$(grep -c 'AI初评已出，待家长核' "$WORK/ntfy.jsonl") $(grep 'AI初评已出' "$WORK/ntfy.jsonl" | grep -c 'AI-拟答案\|AI-解析')" "1 0"

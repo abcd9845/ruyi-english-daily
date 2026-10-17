@@ -369,6 +369,9 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"ntfy_url": ntfy}
 	if s.queueOn() {
 		out["queue"] = true // only when on: with the queue off the answer stays byte-identical to #22
+		if s.poll != nil {
+			out["notify"] = true // the completion notice poller runs: only then may the page promise a parent notice
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

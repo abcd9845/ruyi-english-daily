@@ -855,11 +855,11 @@ done
 kill "$PID_T" "$PID_mockT" 2>/dev/null
 
 section "U. RUYI_BRAIN_ID — a configurable brain id (default ruyi; qa-practice for integration) — mock brain only"
-cat > "$WORK/sets-t.json" <<JSON
+cat > "$WORK/sets-u.json" <<JSON
 {"sets":[{"id":"one-t","title":"单题套","source":"$PSRC","qrefs":["example.set:math:2"]}]}
 JSON
 TB_ANS='[{"qref":"example.set:math:2","answer":"B"}]'
-TENV=("RUYI_SETS_FILE=$WORK/sets-t.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-T" "RUYI_GRADE_MAX_PER_HOUR=100" "RUYI_AUTO_SOURCES=$PSRC" "RUYI_AUTO_TTL=60s")
+TENV=("RUYI_SETS_FILE=$WORK/sets-u.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-T" "RUYI_GRADE_MAX_PER_HOUR=100" "RUYI_AUTO_SOURCES=$PSRC" "RUYI_AUTO_TTL=60s")
 # U-A: the default (RUYI_BRAIN_ID unset) against a default mock: everything is "ruyi", exactly as before
 start_mock mockT0 18270 "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "http://127.0.0.1:18270/_mock/stats"
 start_site T0 18271 "http://127.0.0.1:18270" "${TENV[@]}" "RUYI_ATTEMPTS_DIR=$WORK/att-T0"; wait_http "http://127.0.0.1:18271/healthz"
@@ -876,7 +876,7 @@ expect "U4c mock: pick with the bank:read token -> 403" "$(curl -s -o /dev/null 
 expect "U4d the site's own pick (T1) never used the read token (mock counted 1: only the direct probe T4c)" "$(mstat pick_with_bank_read_token 18270)" 1
 # no grade token configured: pick is "not ready" (501), the mock receives no pick request at all, the read token is not used instead
 P0=$(mstat pick 18270)
-start_site T0N 18279 "http://127.0.0.1:18270" "RUYI_SETS_FILE=$WORK/sets-t.json" "RUYI_ATTEMPTS_DIR=$WORK/att-T0N" "RUYI_AUTO_SOURCES=$PSRC"; wait_http "http://127.0.0.1:18279/healthz"
+start_site T0N 18279 "http://127.0.0.1:18270" "RUYI_SETS_FILE=$WORK/sets-u.json" "RUYI_ATTEMPTS_DIR=$WORK/att-T0N" "RUYI_AUTO_SOURCES=$PSRC"; wait_http "http://127.0.0.1:18279/healthz"
 post_login t0n "http://127.0.0.1:18279" "$CODE" -c "$WORK/jarT0N"
 get t0n "http://127.0.0.1:18279/api/practice/new?source=$PSRC&n=2&mode=due_first" -b "$WORK/jarT0N"
 expect "U4e no grade token: due_first -> 501 due_first_unavailable (not ready), message names the grade token" "$CODE_HTTP $(jq -r '[.error,(.message|contains("判分令牌"))]|@csv' "$WORK/resp/t0n.b")" '501 "due_first_unavailable",true'

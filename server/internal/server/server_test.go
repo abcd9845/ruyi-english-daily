@@ -254,18 +254,42 @@ func TestLogoutClearsCookie(t *testing.T) {
 	}
 }
 
-func TestConfigNtfy(t *testing.T) {
-	e := newEnv(t, opts{})
+func configNtfyURL(t *testing.T, o opts) (string, string) {
+	t.Helper()
+	e := newEnv(t, o)
 	_, b := e.do(t, "GET", "/api/config", "", nil, e.session(t))
 	var v map[string]any
-	_ = json.Unmarshal(b, &v)
-	if v["ntfy_url"] != "https://ntfy.sh/"+e.topic {
-		t.Errorf("config: %s", b)
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatalf("config body: %s", b)
 	}
+	u, _ := v["ntfy_url"].(string)
+	return u, e.topic
+}
+
+func TestConfigNtfy(t *testing.T) {
+	// not configured: the built-in default, unchanged behaviour
+	empty := ""
+	if u, topic := configNtfyURL(t, opts{ntfyRaw: &empty}); u != "https://ntfy.sh/"+topic {
+		t.Errorf("default base: %s", u)
+	}
+	// configured base, with and without a trailing slash: exactly one slash
+	for _, base := range []string{"https://ntfy-me.com", "https://ntfy-me.com/", "https://ntfy-me.com///"} {
+		base := base
+		if u, topic := configNtfyURL(t, opts{ntfyRaw: &base}); u != "https://ntfy-me.com/"+topic {
+			t.Errorf("base %q: %s", base, u)
+		}
+	}
+	// no topic: null, whatever the base
 	e2 := newEnv(t, opts{noTopic: true})
-	_, b = e2.do(t, "GET", "/api/config", "", nil, e2.session(t))
+	_, b := e2.do(t, "GET", "/api/config", "", nil, e2.session(t))
 	if !strings.Contains(string(b), `"ntfy_url":null`) {
 		t.Errorf("config without topic: %s", b)
+	}
+	custom := "https://ntfy-me.com"
+	e3 := newEnv(t, opts{noTopic: true, ntfyRaw: &custom})
+	_, b = e3.do(t, "GET", "/api/config", "", nil, e3.session(t))
+	if !strings.Contains(string(b), `"ntfy_url":null`) {
+		t.Errorf("config without topic, custom base: %s", b)
 	}
 }
 

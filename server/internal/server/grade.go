@@ -556,7 +556,7 @@ func (s *Server) notify(r *attempts.Record) string {
 func (s *Server) postNtfy(body string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.NtfyBase+s.Topic, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.ntfyURL(), strings.NewReader(body))
 	if err != nil {
 		return false
 	}

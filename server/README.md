@@ -70,7 +70,7 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 | `RUYI_PICK_SKIP_DEFERRED` | 否 | `0`（默认）/`1`。选题结果里带 `deferred:*` 的题（参考答案待核/不支持题型/缺图）：`0` = 保留并在页面标「参考答案待核，不自动判」；`1` = 直接跳过 |
 | `RUYI_ATTEMPTS_DIR` | 否 | 作答归档目录，默认 `/var/lib/ruyi-site/attempts`（0700，文件 0600） |
 | `RUYI_GRADE_MAX_PER_HOUR` | 否 | 每套每小时提交上限（会话与 IP 各限），默认 5，范围 1–1000 |
-| `RUYI_NTFY_BASE_URL` / `RUYI_NTFY_RETRY_DELAY` | 否 | ntfy 地址（默认 `https://ntfy.sh/`）/ 失败后重试等待（默认 1m）；一般不用配 |
+| `RUYI_NTFY_BASE_URL` / `RUYI_NTFY_RETRY_DELAY` | 否 | ntfy 地址（默认 `https://ntfy.sh/`）/ 失败后第一次重试前的等待（默认 1m，第二次重试前翻倍）；一般不用配 |
 | `RUYI_AUTO_SOURCES` / `RUYI_AUTO_TTL` | 否 | 允许自动出题的 source（默认空=关）/ 自动套有效期（默认 6h） |
 | `RUYI_SETS_FILE` | 否 | 练习套配置 JSON（见下「通用套练习页」）。未设 → 没有套，`/api/practice/*` 404，其余功能不变。文件有误启动即退出，报错只写位置不写内容 |
 
@@ -143,7 +143,7 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 
 **归档（P3，v2）**：每次新提交追加一行 JSON（v1 旧行仍可读；v2 有逐题 `recorded`/`attempt_id`/`duplicate`，没有令牌，`brain_note` 记降级原因） 到 `$RUYI_ATTEMPTS_DIR/attempts.jsonl`（目录 0700、文件 0600、写后 fsync；内容见 `DEPLOY-P3.md`），不含 cookie/令牌/家庭码/topic。目录写不了：照常判分和提醒，响应 `archived:false`，日志只一条 error（不带路径/内容）。它是大脑不可用时的兜底凭据。
 
-**ntfy 提醒（P3）**：服务端向 `RUYI_NTFY_TOPIC` 发一条"打招呼"，如 `如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。`（降级时是 `…已提交（未判分）。`），正文后附 JSON 明细。**不是审批环节**，失败不影响判分，异步重试一次，日志里不出现 topic/地址。
+**ntfy 提醒（P3）**：服务端向 `RUYI_NTFY_TOPIC` 发一条"打招呼"，如 `如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。`（降级时是 `…已提交（未判分）。`），后接「完成于 HH:MM:SS（北京时间）。」；**正文是一小段话，不含答案/JSON/qref**（完整记录在服务器 attempts 存档，按 attempt 前 8 位查）。**不是审批环节**：推送在后台协程里发，提交响应最多等 1 秒（`notify`：`sent` 首次已送达 / `retrying` 首次失败、后台重试 / `queued` 1 秒内还没结果 / `off` 未配 topic；重放为空），失败不影响判分与归档；单次尝试 10 秒超时，最多 3 次（首发 + 2 次重试，间隔 `RUYI_NTFY_RETRY_DELAY`、再翻倍）；同一 `client_attempt_id` 进程内只推一次。失败日志只写类别（`kind`=dns/dial/tls/timeout/http_status/canceled/other）、阶段、HTTP 状态码、耗时 ms，不出现 topic/地址/正文。
 
 **自动出题（3.5）**：`GET /api/practice/new?source=&n=1..20[&order=random|seq][&seed=N]`（需登录；`RUYI_AUTO_SOURCES` 为空时整个入口 404）。
 返回 `{set_id:"auto-<8位>",url,title,requested,count,truncated,note?,expires_at}`；题不够 n 就全给并带 `note`；套存在内存里，`RUYI_AUTO_TTL` 后失效，其 qref 白名单同样约束判分与取图。新增 `mode=due_first|wrong_only|random`（缺省 = random，**默认关，仍需 `RUYI_AUTO_SOURCES`**）：`due_first`/`wrong_only` 走大脑 `pick-practice`，题文用 lookup 取；返回多 `mode`、`deferred`（带参考答案待核/不支持题型/缺图的题数）；每题带 `origin`（页面显示「复习」/「错题」）和 `ref_pending`（页面标「参考答案待核，不自动判」，是否保留由 `RUYI_PICK_SKIP_DEFERRED` 决定）。选题接口未部署 → 501「大脑接口未就绪」。旧参数 `wrong_only=1` / `due_first=1` 仍然接受（等价于对应 `mode`）；旧的"没有大脑接口就返回 501"的草稿路径已删除——有接口就用，没接口才 501。lookup 里没有的 qref 被丢弃，不崩。

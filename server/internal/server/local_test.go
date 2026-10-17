@@ -232,7 +232,7 @@ func TestLocalSubmitNeverCallsBrainEvenWithGradeToken(t *testing.T) {
 	if countLines(t, e.attDir) != 2 {
 		t.Errorf("lines = %d", countLines(t, e.attDir))
 	}
-	// ntfy: 【测试】 in the title (RFC 2047) and as the first thing of the text; test:true in the JSON
+	// ntfy: 【测试】 in the title (RFC 2047) and as the first thing of the text (no JSON any more)
 	if ntfy.count() != 2 {
 		t.Fatalf("ntfy posts = %d", ntfy.count())
 	}
@@ -248,17 +248,11 @@ func TestLocalSubmitNeverCallsBrainEvenWithGradeToken(t *testing.T) {
 			break
 		}
 	}
-	if !strings.HasPrefix(p.Body, "【测试】") || !strings.Contains(p.Body, "未记入大脑") || !strings.Contains(p.Body, `"test":true`) || strings.Contains(p.Body, "已提交。") {
+	if !strings.HasPrefix(p.Body, "【测试】") || !strings.Contains(p.Body, "未记入大脑") || strings.Contains(p.Body, "已提交。") || !strings.Contains(p.Body, "错 1") {
 		t.Errorf("ntfy body: %s", p.Body)
 	}
-	head, js, _ := strings.Cut(p.Body, "\n\n")
-	if !strings.Contains(head, "错 1") || !strings.Contains(js, `"set_id":"smoke-test"`) {
-		t.Errorf("ntfy body: %s", p.Body)
-	}
-	var tj map[string]any
-	must(t, json.Unmarshal([]byte(js), &tj))
-	if tj["test"] != true {
-		t.Errorf("ntfy json: %s", js)
+	if strings.ContainsAny(p.Body, "{}\n") || strings.Contains(p.Body, "smoke:q1") || strings.Contains(p.Body, "test\":") {
+		t.Errorf("ntfy body must not carry JSON or qrefs: %s", p.Body)
 	}
 	// the topic is only in the URL path
 	if strings.Contains(p.Body, e.topic) || strings.Contains(e.logs.String(), e.topic) {

@@ -445,8 +445,8 @@ for pair in "family code:$CODE" "bearer token:$TOKEN" "grade token:$GTOKEN" "ses
 done
 # --- Q5 ntfy heads-up
 expect "Q5 ntfy: one POST, to /<topic>, no credentials" "$(jq -rs '[length, (.[0].path == "/'"$TOPIC"'"), (.[0].auth == null), (.[0].cookie == null)]|@json' "$WORK/ntfy.jsonl")" '[1,true,true,true]'
-expect "Q5b ntfy summary line (heads-up wording, not an approval request)" "$(jq -rs '.[0].body|split("\n")[0]' "$WORK/ntfy.jsonl")" '如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。'
-expect "Q5c ntfy detail JSON carries client_attempt_id and mode, no secrets" "$(jq -rs '.[0].body|split("\n\n")[1]|fromjson|[.client_attempt_id,.mode]|@json' "$WORK/ntfy.jsonl")" "[\"$C1\",\"graded\"]"
+expect "Q5b ntfy summary line (heads-up wording, not an approval request)" "$(jq -rs '.[0].body|split("完成于 ")[0]' "$WORK/ntfy.jsonl")" '如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。'
+expect "Q5c ntfy body is one short paragraph: Beijing completion time, no JSON, no qref, no full attempt id" "$(jq -rs '.[0].body|[test("完成于 [0-9]{2}:[0-9]{2}:[0-9]{2}（北京时间）。$"), (contains("{")|not), (contains("\n")|not), (contains("example.set")|not), (contains("'"$C1"'")|not), (length<300)]|@json' "$WORK/ntfy.jsonl")" '[true,true,true,true,true,true]'
 for pair in "family code:$CODE" "bearer token:$TOKEN" "grade token:$GTOKEN" "session secret:$SECRET"; do
   name="${pair%%:*}"; val="${pair#*:}"; grep -qF -- "$val" "$WORK/ntfy.jsonl" && bad "Q5d $name found in the ntfy message" || ok "Q5d $name not in the ntfy message"
 done
@@ -532,9 +532,9 @@ nextday
 start_site QX 18236 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=http://127.0.0.1:1" "RUYI_NTFY_RETRY_DELAY=300ms" "RUYI_ATTEMPTS_DIR=$WORK/att-QX"; wait_http "http://127.0.0.1:18236/healthz"
 post_login qx "http://127.0.0.1:18236" "$CODE" -c "$WORK/jarQX"
 gpost x1 "http://127.0.0.1:18236" demo-1 "$(mkbody 77777777-7777-4777-8777-777777777771)" -b "$WORK/jarQX"
-expect "Q13 ntfy unreachable: 200, graded, notify:retrying, archived" "$CODE_HTTP $(jq -c '[.mode,.notify,.archived]' "$WORK/resp/x1.b")" '200 ["graded","retrying",true]'
-sleep 1.2
-expect "Q13b the retry failure is logged once as a warning" "$(grep -c 'ntfy notification failed after retry' "$WORK/QX.log")" 1
+expect "Q13 ntfy unreachable: 200, graded, notify:retrying (first attempt refused at once), archived" "$CODE_HTTP $(jq -c '[.mode,.notify,.archived]' "$WORK/resp/x1.b")" '200 ["graded","retrying",true]'
+sleep 1.8   # attempts at 0, +300ms, +600ms
+expect "Q13b three attempts, each logged with kind=dial and ms, then one 'giving up' warning" "$(grep -c 'ntfy attempt failed.*kind=dial.*ms=' "$WORK/QX.log") $(grep -c 'ntfy notification failed, giving up' "$WORK/QX.log")" "3 1"
 grep -qE -e "$TOPIC" -e '127\.0\.0\.1:1([^0-9]|$)' "$WORK/QX.log" && bad "Q13c ntfy topic/address in the log" || ok "Q13c no ntfy topic or address in the log"
 # --- Q14 old files untouched, logs clean, config validation
 fails=0; while IFS= read -r f; do
@@ -582,7 +582,7 @@ expect "R1c brain_recorded true, recorded_count 3 of 4; summary carries unsuppor
 expect "R1d every recorded item has the brain's integer attempt_id, the unsupported one has none" "$(jq -c '[.results[]|(.attempt_id|type)]' "$WORK/resp/m1.b")" '["number","number","number","null"]'
 expect "R1e the brain wrote 3 rows (grade_new_item), not 4" "$(mstat grade_new_item "$RM")" 3
 expect "R1f archive says the same: per-item recorded flags" "$(head -1 "$WORK/att-R/attempts.jsonl" | jq -c '[.mode,[.items[]|.recorded]]')" '["graded",[true,true,true,false]]'
-expect "R1g ntfy line says 3 of 4 went to the brain, the rest archive-only (never a flat 已提交)" "$(jq -rs '.[-1].body|split("\n")[0]' "$WORK/ntfy.jsonl")" '如意练习：四态套 4 题，对 1，待核对 2，不自动判 1，已提交（3 题记入大脑，其余仅留档）。attempt 00000001。'
+expect "R1g ntfy line says 3 of 4 went to the brain, the rest archive-only (never a flat 已提交)" "$(jq -rs '.[-1].body|split("完成于 ")[0]' "$WORK/ntfy.jsonl")" '如意练习：四态套 4 题，对 1，待核对 2，不自动判 1，已提交（3 题记入大脑，其余仅留档）。attempt 00000001。'
 # what went over the wire (the mock keeps the last grade body)
 LG=$(curl -s "$RMB/_mock/last-grade")
 expect "R2 wire format: brain=ruyi, id, items with qref/answer/rev/answered_at/session_ref, no token or family code in the body" "$(echo "$LG" | jq -c '[.brain,.client_attempt_id,(.items|length),(.items[0]|[.qref,.rev,.answered_at,.session_ref]),(.items|map(has("attempt_kind"))|any)]')" "[\"ruyi\",\"$(rcid 1)\",4,[\"example.set:math:1\",1,\"2026-10-17T08:00:00Z\",\"mix-4\"],false]"
@@ -837,9 +837,9 @@ import sys, json, email.header
 last = [json.loads(l) for l in open(sys.argv[1]) if l.strip()][-1]
 t = str(email.header.make_header(email.header.decode_header(last["title"])))
 body = last["body"]
-print(json.dumps({"title_has_tag": t.startswith("【测试】"), "title_ascii_on_wire": all(ord(c) < 127 for c in last["title"]), "body_starts_tag": body.startswith("【测试】"), "body_test_true": '"test":true' in body, "says_not_in_brain": "未记入大脑" in body}, ensure_ascii=False))
+print(json.dumps({"title_has_tag": t.startswith("【测试】"), "title_ascii_on_wire": all(ord(c) < 127 for c in last["title"]), "body_starts_tag": body.startswith("【测试】"), "body_no_json": "{" not in body and "\n" not in body, "says_not_in_brain": "未记入大脑" in body}, ensure_ascii=False))
 PY
-expect "T12 ntfy: Title starts with 【测试】 (RFC 2047 on the wire), body starts with 【测试】, JSON has test:true, says 未记入大脑" "$(cat "$WORK/resp/ntfy_t.txt")" '{"title_has_tag": true, "title_ascii_on_wire": true, "body_starts_tag": true, "body_test_true": true, "says_not_in_brain": true}'
+expect "T12 ntfy: Title starts with 【测试】 (RFC 2047 on the wire), body starts with 【测试】, no JSON, says 未记入大脑" "$(cat "$WORK/resp/ntfy_t.txt")" '{"title_has_tag": true, "title_ascii_on_wire": true, "body_starts_tag": true, "body_no_json": true, "says_not_in_brain": true}'
 # a real set next to it is unchanged: graded by the brain, plain ntfy title, no test fields
 N1=$(ntfy_n); T1=$(mtotal)
 gpost t "$TA" demo-1 "$(mkbody 33333333-3333-4333-8333-333333333332)" -b "$WORK/jarT"

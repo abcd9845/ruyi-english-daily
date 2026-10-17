@@ -638,6 +638,7 @@ type env struct {
 	topic   string
 	au      *auth.Authenticator
 	staticD string
+	app     *server.Server
 }
 
 type opts struct {
@@ -655,6 +656,8 @@ type opts struct {
 	auto        []string      // RUYI_AUTO_SOURCES
 	autoTTL     time.Duration // 0 = default
 	retry       time.Duration // ntfy retry delay (0 = 150ms)
+	ntfyTimeout time.Duration // per-attempt ntfy timeout (0 = production value)
+	ntfyWait    time.Duration // how long a submission waits for the first ntfy attempt (0 = production value)
 	now         func() time.Time
 	reuse       *env // reuse brain + attempts dir of another env (restart simulation)
 
@@ -737,7 +740,8 @@ func newEnv(t *testing.T, o opts) *env {
 	must(t, err)
 	app := server.New(server.Deps{Auth: e.au, Limiter: server.NewLimiter(), Brain: bc, Static: h, Log: log,
 		Sources: []string{testSource}, Topic: e.topic, Sets: reg, Embedded: emb,
-		Attempts: att, NtfyBase: ntfy, NtfyRetryDelay: retry, GradeMaxPerHour: o.maxPerHour, AutoSources: o.auto, AutoTTL: o.autoTTL, SkipDeferred: o.skipDeferred, Now: o.now})
+		Attempts: att, NtfyBase: ntfy, NtfyRetryDelay: retry, NtfyAttemptTimeout: o.ntfyTimeout, NtfyRequestWait: o.ntfyWait, GradeMaxPerHour: o.maxPerHour, AutoSources: o.auto, AutoTTL: o.autoTTL, SkipDeferred: o.skipDeferred, Now: o.now})
+	e.app = app
 	e.ts = httptest.NewServer(app)
 	t.Cleanup(e.ts.Close)
 	return e

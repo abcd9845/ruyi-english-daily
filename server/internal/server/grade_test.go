@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +34,8 @@ type ntfyStub struct {
 	mu    sync.Mutex
 	posts []ntfyPost
 	fail  bool
+	hits  int           // every request, failing or not
+	hang  chan struct{} // when non-nil: requests block until it is closed
 }
 type ntfyPost struct {
 	Path, Body string
@@ -44,6 +47,17 @@ func newNtfyStub(t *testing.T) *ntfyStub {
 	n.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b := new(bytes.Buffer)
 		_, _ = b.ReadFrom(r.Body)
+		n.mu.Lock()
+		n.hits++
+		hang := n.hang
+		n.mu.Unlock()
+		if hang != nil {
+			select {
+			case <-hang:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		n.mu.Lock()
 		defer n.mu.Unlock()
 		if n.fail {
@@ -65,6 +79,7 @@ func (n *ntfyStub) last() ntfyPost {
 	}
 	return n.posts[len(n.posts)-1]
 }
+func (n *ntfyStub) hitCount() int  { n.mu.Lock(); defer n.mu.Unlock(); return n.hits }
 func (n *ntfyStub) setFail(v bool) { n.mu.Lock(); n.fail = v; n.mu.Unlock() }
 func (n *ntfyStub) url() string    { return n.Server.URL + "/" }
 
@@ -553,6 +568,9 @@ func TestAttemptsNotWritableStillGrades(t *testing.T) {
 	}
 }
 
+// the production value (ntfyMaxAttempts) - first send plus two retries.
+const ntfyMaxAttemptsForTest = 3
+
 func TestNotifySummaryAndBody(t *testing.T) {
 	e, n, ck := gradeEnv(t, opts{})
 	e.submit(t, ck, "demo-1", answersJSON(cid1, goodAnswers))
@@ -560,24 +578,19 @@ func TestNotifySummaryAndBody(t *testing.T) {
 	if p.Path != "/"+e.topic {
 		t.Errorf("posted to %q", p.Path)
 	}
-	head, jsonPart, _ := strings.Cut(p.Body, "\n\n")
-	// graded mode, 3 answered: right 1, wrong 1, pending 1
-	if head != "如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。" {
-		t.Errorf("summary line: %q", head)
+	// graded mode, 3 answered: right 1, wrong 1, pending 1; one short paragraph, no JSON
+	head, tail, found := strings.Cut(p.Body, "完成于 ")
+	if !found || head != "如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。" {
+		t.Errorf("summary line: %q", p.Body)
 	}
-	var body struct {
-		CID   string `json:"client_attempt_id"`
-		Mode  string `json:"mode"`
-		Items []struct {
-			QRef    string `json:"qref"`
-			Answer  any    `json:"answer"`
-			Status  string `json:"status"`
-			Correct *bool  `json:"correct"`
-		} `json:"items"`
+	if !regexp.MustCompile(`^\d\d:\d\d:\d\d（北京时间）。$`).MatchString(tail) {
+		t.Errorf("time part: %q", tail)
 	}
-	must(t, json.Unmarshal([]byte(jsonPart), &body))
-	if body.CID != cid1 || body.Mode != "graded" || len(body.Items) != 3 || body.Items[1].Answer != "A" {
-		t.Errorf("json part: %s", jsonPart)
+	if strings.ContainsAny(p.Body, "{}\n") || strings.Contains(p.Body, "qref") || strings.Contains(p.Body, "example.set") || strings.Contains(p.Body, cid1) {
+		t.Errorf("body must be a short paragraph without JSON/answers/qrefs/full ids: %q", p.Body)
+	}
+	if len(p.Body) > 300 {
+		t.Errorf("body too long: %d", len(p.Body))
 	}
 	for _, bad := range []string{e.code, e.secret, e.brain.token, e.brain.gradeToken, ck, auth.CookieName, "Bearer", "SECRET-", "等家长"} {
 		if strings.Contains(p.Body, bad) {
@@ -585,14 +598,14 @@ func TestNotifySummaryAndBody(t *testing.T) {
 		}
 	}
 	if strings.Contains(p.Body, "录") {
-		t.Errorf("the message is a heads-up, not a request to approve: %q", head)
+		t.Errorf("the message is a heads-up, not a request to approve: %q", p.Body)
 	}
 	if p.Header.Get("Authorization") != "" || p.Header.Get("Cookie") != "" {
 		t.Error("credentials sent to ntfy")
 	}
 }
 
-func TestNotifyFailureDoesNotAffectResultAndRetriesOnce(t *testing.T) {
+func TestNotifyFailureDoesNotAffectResultAndRetries(t *testing.T) {
 	e, n, ck := gradeEnv(t, opts{retry: 200 * time.Millisecond})
 	n.setFail(true)
 	resp, b, g := e.submit(t, ck, "demo-1", answersJSON(cid1, goodAnswers))
@@ -615,7 +628,7 @@ func TestNotifyFailureDoesNotAffectResultAndRetriesOnce(t *testing.T) {
 	e2.submit(t, e2.session(t), "demo-1", answersJSON(cid2, goodAnswers))
 	time.Sleep(700 * time.Millisecond)
 	logs := e2.logs.String()
-	if !strings.Contains(logs, "ntfy notification failed after retry") || strings.Contains(logs, e2.topic) {
+	if !strings.Contains(logs, "ntfy notification failed, giving up") || strings.Contains(logs, e2.topic) || n2.hitCount() != ntfyMaxAttemptsForTest {
 		t.Errorf("logs:\n%s", logs)
 	}
 	// ntfy unreachable entirely

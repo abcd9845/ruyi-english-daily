@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/abcd9845/ruyi-english-daily/server/internal/attempts"
@@ -50,9 +51,14 @@ type Deps struct {
 	// Attempts archives submissions; nil = nothing is archived (archived=false).
 	Attempts *attempts.Store
 	// NtfyBase ("https://ntfy.sh/") + Topic is where the parent summary is posted;
-	// empty Topic = notifications off. NtfyRetryDelay: one async retry after a failure.
+	// empty Topic = notifications off. NtfyRetryDelay: the wait before the first
+	// retry of a failed send (doubles for the next one); see notify.go.
 	NtfyBase       string
 	NtfyRetryDelay time.Duration
+	// NtfyAttemptTimeout / NtfyRequestWait are for tests only (zero = the
+	// ntfyAttemptTimeout / ntfyRequestWait constants; no environment variable).
+	NtfyAttemptTimeout time.Duration
+	NtfyRequestWait    time.Duration
 	// GradeMaxPerHour: grading submissions per session per set per hour (default 5).
 	GradeMaxPerHour int
 	// AutoSources enables dynamic sets (GET /api/practice/new) for these sources.
@@ -76,6 +82,16 @@ type Server struct {
 	gradeIP    *auth.Limiter
 	idem       *idemStore
 	ntfyClient *http.Client
+
+	// background parent notifications (notify.go)
+	nwg         sync.WaitGroup
+	nstop       chan struct{}
+	nstopOnce   sync.Once
+	nmu         sync.Mutex
+	notified    map[string]bool
+	notifiedOrd []string
+	ntfyTimeout time.Duration
+	ntfyWait    time.Duration
 }
 
 // New builds a Server.
@@ -111,9 +127,21 @@ func New(d Deps) *Server {
 	s.gradeSess = auth.NewLimiter(s.GradeMaxPerHour, time.Hour, d.Now)
 	s.gradeIP = auth.NewLimiter(s.GradeMaxPerHour, time.Hour, d.Now)
 	s.idem = newIdemStore(d.Attempts)
+	s.nstop = make(chan struct{})
+	s.notified = map[string]bool{}
+	s.ntfyTimeout, s.ntfyWait = d.NtfyAttemptTimeout, d.NtfyRequestWait
+	if s.ntfyTimeout <= 0 {
+		s.ntfyTimeout = ntfyAttemptTimeout
+	}
+	if s.ntfyWait <= 0 {
+		s.ntfyWait = ntfyRequestWait
+	}
+	// The transport's phase limits sit just inside the per-attempt timeout, so
+	// the attempt context (not an inner limit) is what ends a slow send.
 	s.ntfyClient = &http.Client{
-		Transport:     &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext, TLSHandshakeTimeout: 4 * time.Second, ResponseHeaderTimeout: 5 * time.Second},
-		Timeout:       6 * time.Second,
+		Transport: &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: s.ntfyTimeout * 4 / 5}).DialContext,
+			TLSHandshakeTimeout: s.ntfyTimeout * 4 / 5, ResponseHeaderTimeout: s.ntfyTimeout * 9 / 10},
+		Timeout:       s.ntfyTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	return s

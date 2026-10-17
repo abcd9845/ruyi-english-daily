@@ -1,0 +1,165 @@
+// Package attempts archives submitted practice attempts as JSON Lines under a
+// private directory (RUYI_ATTEMPTS_DIR). It is the local fallback record that
+// exists whether or not the brain grading call worked.
+//
+// One line per attempt. A line never holds cookies, tokens or the family code:
+// only the attempt id, the set, the answers and verdicts, a timestamp and a short
+// client summary (user agent, IP).
+package attempts
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+// FileName is the archive file inside the directory.
+const FileName = "attempts.jsonl"
+
+const (
+	maxLine     = 1 << 20
+	maxLoadSize = 64 << 20
+)
+
+// Item is one question of an attempt.
+type Item struct {
+	QRef    string `json:"qref"`
+	Answer  any    `json:"answer,omitempty"`
+	Status  string `json:"status"`
+	Correct *bool  `json:"correct"`
+}
+
+// Summary counts the verdicts.
+type Summary struct {
+	Total      int `json:"total"`
+	Graded     int `json:"graded"`
+	Correct    int `json:"correct"`
+	Pending    int `json:"pending"`
+	Unanswered int `json:"unanswered"`
+}
+
+// Client is the short client description kept with an attempt.
+type Client struct {
+	UA string `json:"ua,omitempty"`
+	IP string `json:"ip,omitempty"`
+}
+
+// Record is one archived attempt.
+type Record struct {
+	V               int       `json:"v"`
+	ClientAttemptID string    `json:"client_attempt_id"`
+	SetID           string    `json:"set_id"`
+	SetTitle        string    `json:"set_title"`
+	Source          string    `json:"source"`
+	SubmittedAt     time.Time `json:"submitted_at"`
+	Mode            string    `json:"mode"` // "graded" (brain confirmed) or "archive_only"
+	BrainAttemptID  string    `json:"brain_attempt_id,omitempty"`
+	Items           []Item    `json:"items"`
+	Summary         Summary   `json:"summary"`
+	Client          Client    `json:"client"`
+
+	// runtime-only (not archived)
+	Archived bool   `json:"-"`
+	Notify   string `json:"-"`
+}
+
+// Store appends records. Safe for concurrent use.
+type Store struct {
+	dir string
+	log *slog.Logger
+
+	mu       sync.Mutex
+	f        *os.File
+	errShown bool
+}
+
+// Open prepares a Store. It never fails: an unusable directory shows up as
+// Append errors (and one error log line), not as a startup failure.
+func Open(dir string, log *slog.Logger) *Store { return &Store{dir: dir, log: log} }
+
+func (s *Store) open() error {
+	if s.f != nil {
+		return nil
+	}
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(s.dir, FileName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	s.f = f
+	return nil
+}
+
+// Append writes one line and syncs it. The error text is generic on purpose.
+func (s *Store) Append(r *Record) error {
+	line, err := json.Marshal(r)
+	if err != nil {
+		return errors.New("encode failed")
+	}
+	line = append(line, '\n')
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err = s.open()
+	if err == nil {
+		if _, err = s.f.Write(line); err == nil {
+			err = s.f.Sync()
+		}
+	}
+	if err != nil {
+		if s.f != nil {
+			s.f.Close()
+			s.f = nil
+		}
+		if !s.errShown && s.log != nil { // once, no content, no path
+			s.log.Error("attempts archive is not writable; results are still returned (archived=false)")
+			s.errShown = true
+		}
+		return errors.New("archive not writable")
+	}
+	s.errShown = false
+	return nil
+}
+
+// Load returns the archived records (oldest first, at most maxRecords of the
+// newest), used to answer repeated client_attempt_ids after a restart.
+func (s *Store) Load(maxRecords int) []*Record {
+	f, err := os.Open(filepath.Join(s.dir, FileName))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || st.Size() > maxLoadSize {
+		return nil
+	}
+	var out []*Record
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), maxLine)
+	for sc.Scan() {
+		var r Record
+		if json.Unmarshal(sc.Bytes(), &r) == nil && r.ClientAttemptID != "" {
+			r.Archived, r.Notify = true, "unknown"
+			out = append(out, &r)
+		}
+	}
+	if len(out) > maxRecords {
+		out = out[len(out)-maxRecords:]
+	}
+	return out
+}
+
+// Close releases the file.
+func (s *Store) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.f != nil {
+		s.f.Close()
+		s.f = nil
+	}
+}

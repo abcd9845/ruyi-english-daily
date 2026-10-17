@@ -21,6 +21,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -378,6 +379,94 @@ func main() {
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 		_, _ = w.Write(b)
+	})
+	// Draft grading endpoint (see internal/brain/grade.go). Synthetic answer keys
+	// for the practiceSource questions live ONLY here. MOCK_GRADE=off -> 404,
+	// MOCK_GRADE_FAIL=1 -> 500. Idempotent on client_attempt_id.
+	gradeToken := os.Getenv("MOCK_GRADE_TOKEN")
+	if gradeToken == "" {
+		gradeToken = "grade-" + token
+	}
+	var gmu sync.Mutex
+	gradeStore := map[string][]byte{}
+	var lastGrade []byte
+	keys := map[string]any{
+		"example.set:math:1": []any{"1", "2", "3"},
+		"example.set:math:2": "B",
+		"example.set:math:5": "B",
+	}
+	mux.HandleFunc("POST /v1/bank/grade", func(w http.ResponseWriter, r *http.Request) {
+		bump("grade")
+		if os.Getenv("MOCK_GRADE") == "off" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+gradeToken {
+			if bearer(r) {
+				bump("grade_with_bank_read_token")
+			}
+			apiErr(w, 403, "forbidden")
+			return
+		}
+		if os.Getenv("MOCK_GRADE_FAIL") == "1" {
+			apiErr(w, 500, "internal")
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		var req struct {
+			CID    string `json:"client_attempt_id"`
+			SetID  string `json:"set_id"`
+			Source string `json:"source"`
+			Items  []struct {
+				QRef   string `json:"qref"`
+				Answer any    `json:"answer"`
+			} `json:"items"`
+		}
+		if json.Unmarshal(body, &req) != nil || req.CID == "" {
+			apiErr(w, 400, "invalid_request")
+			return
+		}
+		gmu.Lock()
+		defer gmu.Unlock()
+		lastGrade = body
+		if prev, ok := gradeStore[req.CID]; ok {
+			bump("grade_replay")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(prev)
+			return
+		}
+		type outItem struct {
+			QRef    string `json:"qref"`
+			Status  string `json:"status"`
+			Correct *bool  `json:"correct"`
+		}
+		var items []outItem
+		for _, it := range req.Items {
+			o := outItem{QRef: it.QRef, Status: "pending_key"}
+			switch it.QRef {
+			case "example.set:math:4":
+				o.Status = "unsupported"
+			case "example.set:math:3":
+			default:
+				if want, ok := keys[it.QRef]; ok {
+					a, _ := json.Marshal(it.Answer)
+					wnt, _ := json.Marshal(want)
+					c := string(a) == string(wnt)
+					o.Status, o.Correct = "graded", &c
+				}
+			}
+			items = append(items, o)
+		}
+		resp, _ := json.Marshal(map[string]any{"client_attempt_id": req.CID, "attempt_id": "mock-" + req.CID[:8], "recorded": true, "items": items})
+		gradeStore[req.CID] = resp
+		bump("grade_new")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(resp)
+	})
+	mux.HandleFunc("GET /_mock/last-grade", func(w http.ResponseWriter, r *http.Request) {
+		gmu.Lock()
+		defer gmu.Unlock()
+		_, _ = w.Write(lastGrade)
 	})
 	// Test hooks.
 	mux.HandleFunc("POST /_mock/rotate-key", func(w http.ResponseWriter, r *http.Request) {

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -28,6 +29,9 @@ const (
 	maxQRefBytes   = 200
 	maxSourceBytes = 128
 )
+
+// AutoPrefix starts the ids of generated (dynamic) sets; a sets file may not use it.
+const AutoPrefix = "auto-"
 
 var idRe = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
@@ -77,6 +81,9 @@ func Parse(data []byte, validSource func(string) bool) (*Registry, error) {
 		at := func(field, why string) error { return fmt.Errorf("sets[%d].%s: %s", i, field, why) }
 		if !idRe.MatchString(s.ID) {
 			return nil, at("id", "must match [a-z0-9_-]{1,64}")
+		}
+		if s.ID == "new" || strings.HasPrefix(s.ID, AutoPrefix) {
+			return nil, at("id", `"new" and ids starting with "auto-" are reserved`)
 		}
 		if _, dup := r.byID[s.ID]; dup {
 			return nil, at("id", "duplicate id")

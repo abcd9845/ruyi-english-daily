@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abcd9845/ruyi-english-daily/server/internal/attempts"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/auth"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/brain"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/config"
@@ -43,6 +44,22 @@ type Deps struct {
 	Sets *sets.Registry
 	// Embedded serves the compiled-in practice page and KaTeX; nil = none.
 	Embedded *embedded.Handler
+
+	// Bank is the brain adapter (defaults to Brain).
+	Bank brain.Bank
+	// Attempts archives submissions; nil = nothing is archived (archived=false).
+	Attempts *attempts.Store
+	// NtfyBase ("https://ntfy.sh/") + Topic is where the parent summary is posted;
+	// empty Topic = notifications off. NtfyRetryDelay: one async retry after a failure.
+	NtfyBase       string
+	NtfyRetryDelay time.Duration
+	// GradeMaxPerHour: grading submissions per session per set per hour (default 5).
+	GradeMaxPerHour int
+	// AutoSources enables dynamic sets (GET /api/practice/new) for these sources.
+	AutoSources []string
+	AutoTTL     time.Duration
+	// Now is for tests (nil = time.Now).
+	Now func() time.Time
 }
 
 // Server is the top-level http.Handler.
@@ -50,6 +67,13 @@ type Server struct {
 	Deps
 	srcRe interface{ MatchString(string) bool }
 	allow map[string]bool
+
+	auto       map[string]bool
+	dyn        *dynSets
+	gradeSess  *auth.Limiter
+	gradeIP    *auth.Limiter
+	idem       *idemStore
+	ntfyClient *http.Client
 }
 
 // New builds a Server.
@@ -57,6 +81,34 @@ func New(d Deps) *Server {
 	s := &Server{Deps: d, srcRe: config.SourceRe(), allow: map[string]bool{}}
 	for _, x := range d.Sources {
 		s.allow[x] = true
+	}
+	if s.Bank == nil && s.Brain != nil {
+		s.Bank = s.Brain
+	}
+	s.auto = map[string]bool{}
+	for _, x := range d.AutoSources {
+		s.auto[x] = true
+	}
+	if s.AutoTTL <= 0 {
+		s.AutoTTL = 6 * time.Hour
+	}
+	if s.GradeMaxPerHour <= 0 {
+		s.GradeMaxPerHour = 5
+	}
+	if s.NtfyBase == "" {
+		s.NtfyBase = ntfyBase
+	}
+	if s.NtfyRetryDelay <= 0 {
+		s.NtfyRetryDelay = time.Minute
+	}
+	s.dyn = newDynSets(s.AutoTTL, d.Now)
+	s.gradeSess = auth.NewLimiter(s.GradeMaxPerHour, time.Hour, d.Now)
+	s.gradeIP = auth.NewLimiter(s.GradeMaxPerHour, time.Hour, d.Now)
+	s.idem = newIdemStore(d.Attempts)
+	s.ntfyClient = &http.Client{
+		Transport:     &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext, TLSHandshakeTimeout: 4 * time.Second, ResponseHeaderTimeout: 5 * time.Second},
+		Timeout:       6 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	return s
 }
@@ -141,12 +193,24 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		src := strings.TrimPrefix(p, "/api/sets/")
 		s.need(w, r, http.MethodGet, s.authed(func(w http.ResponseWriter, r *http.Request) { s.sets(w, r, src) }))
 	case p == "/api/practice" || strings.HasPrefix(p, "/api/practice/"):
-		if s.Sets.Len() == 0 {
+		if s.Sets.Len() == 0 && len(s.auto) == 0 {
 			writeErr(w, http.StatusNotFound, "not_found", "")
 			return
 		}
-		id := strings.TrimPrefix(strings.TrimPrefix(p, "/api/practice"), "/")
-		s.need(w, r, http.MethodGet, s.authed(func(w http.ResponseWriter, r *http.Request) { s.practice(w, r, id) }))
+		rest := strings.TrimPrefix(strings.TrimPrefix(p, "/api/practice"), "/")
+		switch {
+		case rest == "new":
+			if len(s.auto) == 0 {
+				writeErr(w, http.StatusNotFound, "not_found", "")
+				return
+			}
+			s.need(w, r, http.MethodGet, s.authed(s.autoNew))
+		case strings.HasSuffix(rest, "/grade"):
+			id := strings.TrimSuffix(rest, "/grade")
+			s.need(w, r, http.MethodPost, s.authed(func(w http.ResponseWriter, r *http.Request) { s.grade(w, r, id) }))
+		default:
+			s.need(w, r, http.MethodGet, s.authed(func(w http.ResponseWriter, r *http.Request) { s.practice(w, r, rest) }))
+		}
 	case strings.HasPrefix(p, "/api/media/"):
 		rest := strings.TrimPrefix(p, "/api/media/")
 		i := strings.IndexByte(rest, '/')
@@ -322,8 +386,10 @@ func (s *Server) media(w http.ResponseWriter, r *http.Request, source, sha strin
 	var keep func(brain.Question) bool
 	switch {
 	case s.allow[source]:
-	case s.Sets.HasSource(source):
-		keep = func(q brain.Question) bool { return s.Sets.AllowsQRef(source, q.QRef) }
+	case s.Sets.HasSource(source) || s.dyn.hasSource(source):
+		keep = func(q brain.Question) bool {
+			return s.Sets.AllowsQRef(source, q.QRef) || s.dyn.allowsQRef(source, q.QRef)
+		}
 	default:
 		writeErr(w, http.StatusNotFound, "not_found", "")
 		return

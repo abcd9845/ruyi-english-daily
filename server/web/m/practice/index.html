@@ -52,6 +52,11 @@ button:disabled{opacity:.55;cursor:not-allowed}
 #gate h2{margin:0 0 8px;font-size:1.2rem}
 a{color:var(--accent)}
 .submitcard{text-align:center}
+.vd{margin-top:12px;padding:8px 12px;border-radius:10px;font-weight:700;font-size:.95rem}
+.vd.ok{background:#ecfdf5;color:#047857}.vd.wrong{background:#fef2f2;color:#b91c1c}.vd.pend{background:#fffbeb;color:#92400e}.vd.none{background:#f5f5f4;color:#57534e}
+.resbox h2{margin:0 0 6px;font-size:1.2rem}
+.resbox .sum{font-size:1.05rem;margin:6px 0}
+.resbox.done{border:2px solid #14b8a6}.resbox.soft2{border:2px solid #f59e0b}
 .submitcard button{width:100%;max-width:340px}
 footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
 @media (max-width:480px){body{padding:10px 10px 96px}header,.card{padding:16px 14px}input.blank{width:7.5em}}
@@ -79,9 +84,11 @@ footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
   <div id="status"></div>
   <div id="qs"></div>
   <div class="card submitcard" id="submitCard" style="display:none">
-    <button type="button" class="btn-submit" id="btnSubmit" disabled>提交（即将开放）</button>
-    <p class="meta" style="margin:10px 0 0">本期仅作答和保存草稿；还不能提交，也不会显示对错。</p>
+    <button type="button" class="btn-submit" id="btnSubmit">提交</button>
+    <p class="meta" style="margin:10px 0 0">没做的题可以先空着；提交前答案只保存在本机。</p>
+    <div id="submitMsg" class="msg bad" role="status" aria-live="polite"></div>
   </div>
+  <div class="card resbox" id="resultCard" style="display:none"></div>
   <p class="meta"><a href="/">每日一练</a></p>
   <footer>如意 · 练习站</footer>
 </div>
@@ -98,6 +105,8 @@ footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
 var SET_ID=null, DRAFT_KEY=null;
 var $=function(id){return document.getElementById(id);};
 var items=[], answers={}, saveTimer=null;
+var cid=null, cidSig=null, result=null, submitting=false;
+var UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e;}
 function setStatus(text,retry){
@@ -265,14 +274,14 @@ function load(){
     if(r.status===401){ showGate('登录已过期，请重新输入家庭码'); return; }
     if(r.status===404 || r.status===400){
       $('countPill').textContent='没有这套题';
-      setStatus('没有找到这套练习。请确认链接是否正确，或问问家长。');
-      $('qs').innerHTML=''; $('actions').style.display='none'; $('submitCard').style.display='none';
+      setStatus(/^auto-/.test(SET_ID)?'这套临时练习已经过期了。请回到出题的地方重新出一套。':'没有找到这套练习。请确认链接是否正确，或问问家长。');
+      $('qs').innerHTML=''; $('actions').style.display='none'; $('submitCard').style.display='none'; $('resultCard').style.display='none';
       return;
     }
     if(r.status!==200 || !r.json || !Array.isArray(r.json.items)){
       $('countPill').textContent='题库不可用';
       setStatus(((r.json&&r.json.message)||'题库暂时连不上')+'。稍后点「重试」。',load);
-      $('qs').innerHTML=''; $('actions').style.display='none'; $('submitCard').style.display='none';
+      $('qs').innerHTML=''; $('actions').style.display='none'; $('submitCard').style.display='none'; $('resultCard').style.display='none';
       return;
     }
     items=r.json.items;
@@ -282,7 +291,8 @@ function load(){
     if(miss>0) setStatus('有 '+miss+' 道题暂时没取到，已先跳过；请告诉家长。');
     loadDraft();
     render();
-    $('actions').style.display='flex'; $('submitCard').style.display='block';
+    $('actions').style.display='flex';
+    showSubmitArea();
   }).catch(function(){
     $('countPill').textContent='离线';
     setStatus('连不上练习站服务，请检查网络后重试。',load);
@@ -291,18 +301,23 @@ function load(){
 
 // ---- draft (never contains the family code) ---------------------------------
 function loadDraft(){
-  answers={};
+  answers={}; cid=null; cidSig=null; result=null;
   try{
     var d=JSON.parse(localStorage.getItem(DRAFT_KEY)||'{}');
     if(d && d.a && typeof d.a==='object'){
       items.forEach(function(q){ if(Object.prototype.hasOwnProperty.call(d.a,q.qref)) answers[q.qref]=d.a[q.qref]; });
+    }
+    if(d && typeof d.cid==='string' && UUID_RE.test(d.cid)){
+      cid=d.cid; cidSig=typeof d.sig==='string'?d.sig:null;
+      var r=d.res;
+      if(r && typeof r==='object' && r.client_attempt_id===cid && r.set_id===SET_ID && Array.isArray(r.results) && r.summary && typeof r.summary==='object') result=r;
     }
   }catch(e){}
 }
 function saveDraftNow(){
   if(!DRAFT_KEY) return;
   try{
-    localStorage.setItem(DRAFT_KEY,JSON.stringify({v:1,set:SET_ID,a:answers,t:new Date().toISOString()}));
+    localStorage.setItem(DRAFT_KEY,JSON.stringify({v:1,set:SET_ID,a:answers,t:new Date().toISOString(),cid:cid,sig:cidSig,res:result}));
     $('savedHint').textContent='已自动保存 · '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
   }catch(e){}
   updateProgress();
@@ -396,6 +411,110 @@ function render(){
     root.appendChild(card);
   });
   updateProgress();
+  applyResult();
+}
+
+// ---- submit / result ---------------------------------------------------------
+function newCid(){
+  try{ if(window.crypto && typeof crypto.randomUUID==='function') return crypto.randomUUID(); }catch(e){}
+  var b=new Uint8Array(16);
+  try{ crypto.getRandomValues(b); }catch(e){ for(var i=0;i<16;i++) b[i]=Math.floor(Math.random()*256); }
+  b[6]=(b[6]&0x0f)|0x40; b[8]=(b[8]&0x3f)|0x80;
+  var h=Array.prototype.map.call(b,function(x){return ('0'+x.toString(16)).slice(-2);}).join('');
+  return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+}
+// What goes to the server: only questions that have an answer. Multiple choice
+// is stored as "A,B" in the draft but sent as a sorted array of keys.
+function payloadAnswers(){
+  var list=[];
+  items.forEach(function(q){
+    if(!filled(q)) return;
+    var v=answers[q.qref], a;
+    if(Array.isArray(q.options) && q.options.length){
+      var keys=(typeof v==='string'?v:'').split(',').filter(function(k){return k!=='';});
+      a=q.qtype==='multi_choice'?keys.sort():keys[0];
+    } else if(Array.isArray(v)){
+      a=v.map(function(x){return typeof x==='string'?x:'';});
+    } else a=v;
+    list.push({qref:q.qref,answer:a});
+  });
+  return list;
+}
+function submitMsg(t){ $('submitMsg').textContent=t||''; }
+function showSubmitArea(){
+  if(!result && !submitting){ var b=$('btnSubmit'); b.disabled=false; b.textContent='提交'; }
+  $('submitCard').style.display=result?'none':'block';
+  $('resultCard').style.display=result?'block':'none';
+}
+function setLocked(on){
+  document.querySelectorAll('#qs input,#qs textarea').forEach(function(x){ x.disabled=!!on; });
+}
+// 「已提交到大脑」 only when the brain itself confirmed (mode graded + brain_recorded).
+function brainConfirmed(r){ return !!r && r.mode==='graded' && r.brain_recorded===true; }
+function applyResult(){
+  document.querySelectorAll('#qs .vd').forEach(function(n){ n.remove(); });
+  var box=$('resultCard'); box.innerHTML='';
+  if(!result){ setLocked(false); showSubmitArea(); return; }
+  var confirmed=brainConfirmed(result);
+  var byRef={}; result.results.forEach(function(r){ if(r && typeof r.qref==='string') byRef[r.qref]=r; });
+  document.querySelectorAll('#qs section[data-qref]').forEach(function(card){
+    var r=byRef[card.getAttribute('data-qref')]; if(!r) return;
+    var cls='pend', txt='待核对';
+    if(r.status==='unanswered'){ cls='none'; txt='未作答'; }
+    else if(confirmed && r.status==='graded' && typeof r.correct==='boolean'){
+      if(r.correct){ cls='ok'; txt='✓ 答对了'; } else { cls='wrong'; txt='✗ 不对'; }
+    }
+    card.appendChild(el('div','vd '+cls,txt));
+  });
+  var sm=result.summary||{};
+  var total=+sm.total||0, un=+sm.unanswered||0;
+  box.className='card resbox '+(confirmed?'done':'soft2');
+  if(confirmed){
+    box.appendChild(el('h2',null,'已提交到大脑'));
+    box.appendChild(el('div','sum','共 '+total+' 题 · 答对 '+(+sm.correct||0)+' · 答错 '+Math.max(0,(+sm.graded||0)-(+sm.correct||0))+' · 待核对 '+(+sm.pending||0)+' · 未作答 '+un));
+    if((+sm.pending||0)>0) box.appendChild(el('p','meta','「待核对」是这道题暂时没有判分，不是做错了。'));
+  } else {
+    box.appendChild(el('h2',null,'已提交（暂未判分）'));
+    box.appendChild(el('div','sum','共 '+total+' 题 · 已作答 '+(total-un)+' · 未作答 '+un));
+    box.appendChild(el('p','meta','答案已经收好，家长会稍后核对，现在不显示对错。'));
+    if(result.archived===false) box.appendChild(el('p','msg bad','这次提交没能保存下来，请告诉家长。'));
+  }
+  if(result.replayed) box.appendChild(el('p','meta','这份提交之前已经收到过，下面是当时的结果。'));
+  var again=el('button','btn-primary','再做一次'); again.type='button'; again.id='btnAgain'; again.style.marginTop='10px';
+  again.onclick=resetAll;
+  box.appendChild(again);
+  setLocked(true); showSubmitArea();
+}
+function resetAll(){
+  answers={}; cid=null; cidSig=null; result=null;
+  try{ localStorage.removeItem(DRAFT_KEY); }catch(e){}
+  render(); $('savedHint').textContent=''; submitMsg('');
+  window.scrollTo(0,0);
+}
+function submit(){
+  if(submitting || result) return;
+  var list=payloadAnswers();
+  if(!list.length){ submitMsg('还没有作答，先做几道题再提交。'); return; }
+  var sig=JSON.stringify(list);
+  if(!cid || cidSig!==sig){ cid=newCid(); cidSig=sig; }   // same answers => same id => the retry is idempotent
+  saveDraftNow();
+  submitting=true; submitMsg('');
+  var btn=$('btnSubmit'); btn.disabled=true; btn.textContent='提交中…'; $('btnClear').disabled=true;
+  api('POST','/api/practice/'+SET_ID+'/grade',{client_attempt_id:cid,answers:list}).then(function(r){
+    var j=r.json;
+    if(r.status===200 && j && j.client_attempt_id===cid && Array.isArray(j.results) && j.summary){
+      result=j; saveDraftNow(); applyResult(); try{ $('resultCard').scrollIntoView({block:'start'}); }catch(e){} return;
+    }
+    if(r.status===401){ showGate('登录已过期，请重新输入家庭码；答案还在，登录后再点提交。'); return; }
+    if(r.status===429){ submitMsg('这套题一小时内提交次数用完了，请稍后再试。答案还在。'); return; }
+    if((r.status===400||r.status===409||r.status===404) && j && j.message){ submitMsg('没提交成功：'+j.message+'。'); return; }
+    submitMsg('没提交成功（服务暂时不可用）。答案都还在，稍后再点一次「提交」。');
+  }).catch(function(){
+    submitMsg('连不上练习站服务。答案都还在，网络好了再点一次「提交」。');
+  }).then(function(){
+    submitting=false; $('btnClear').disabled=false;
+    if(!result){ btn.disabled=false; btn.textContent='提交'; }
+  });
 }
 
 // ---- wiring --------------------------------------------------------------------
@@ -413,12 +532,14 @@ $('gateForm').addEventListener('submit',function(ev){
   .then(function(){ $('gateBtn').disabled=false; });
 });
 $('btnClear').onclick=function(){
+  if(submitting) return;
   if(!confirm('清空本页填写？')) return;
-  answers={}; try{ localStorage.removeItem(DRAFT_KEY); }catch(e){} render(); $('savedHint').textContent='';
+  resetAll();
 };
+$('btnSubmit').onclick=submit;
 $('btnLogout').onclick=function(){
   api('POST','/api/logout').then(function(){
-    items=[]; $('qs').innerHTML=''; $('submitCard').style.display='none'; $('countPill').textContent='已退出'; showGate('');
+    items=[]; $('qs').innerHTML=''; $('submitCard').style.display='none'; $('resultCard').style.display='none'; $('countPill').textContent='已退出'; showGate('');
   },function(){});
 };
 window.addEventListener('pagehide',saveDraftNow);

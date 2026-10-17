@@ -20,6 +20,7 @@ import (
 	"time"
 
 	ruyisite "github.com/abcd9845/ruyi-english-daily/server"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/attempts"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/auth"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/brain"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/config"
@@ -60,10 +61,17 @@ type fakeBrain struct {
 	alwaysExpired  bool
 	tickets        []string
 	listQueries    []url.Values // every query the client sent to the list endpoint
+
+	// grading (draft contract)
+	gradeToken string
+	gradeMode  string // "" ok | "fail" (500) | "off" (404) | "norecord" (recorded:false)
+	gradeReqs  [][]byte
+	gradeSeen  map[string][]byte // client_attempt_id -> reply (idempotent)
+	gradeBank  int               // grade calls that used the bank:read token (must stay 0)
 }
 
 func newFakeBrain(t *testing.T) *fakeBrain {
-	f := &fakeBrain{token: rnd(t, "tok-"), calls: map[string]int{}}
+	f := &fakeBrain{token: rnd(t, "tok-"), gradeToken: rnd(t, "gtok-"), calls: map[string]int{}, gradeSeen: map[string][]byte{}}
 	mux := http.NewServeMux()
 	jerr := func(w http.ResponseWriter, code int, c string) {
 		w.Header().Set("Content-Type", "application/json")
@@ -123,6 +131,67 @@ func newFakeBrain(t *testing.T) *fakeBrain {
 		items = scr
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": nil})
+	})
+	mux.HandleFunc("POST /v1/bank/grade", func(w http.ResponseWriter, r *http.Request) {
+		f.bump("grade")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.gradeMode == "off" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Header.Get("Authorization") {
+		case "Bearer " + f.gradeToken:
+		case "Bearer " + f.token:
+			f.gradeBank++
+			jerr(w, 403, "forbidden")
+			return
+		default:
+			jerr(w, 401, "unauthorized")
+			return
+		}
+		if f.gradeMode == "fail" {
+			jerr(w, 500, "internal")
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		f.gradeReqs = append(f.gradeReqs, body)
+		var req struct {
+			CID   string `json:"client_attempt_id"`
+			Items []struct {
+				QRef   string `json:"qref"`
+				Answer any    `json:"answer"`
+			} `json:"items"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if prev, ok := f.gradeSeen[req.CID]; ok {
+			f.calls["grade_replay"]++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(prev)
+			return
+		}
+		var items []map[string]any
+		for _, it := range req.Items {
+			o := map[string]any{"qref": it.QRef, "status": "pending_key", "correct": nil}
+			a, _ := json.Marshal(it.Answer)
+			switch it.QRef {
+			case "example.set:math:1":
+				o["status"], o["correct"] = "graded", string(a) == `["1","2","3"]`
+			case "example.set:math:2":
+				o["status"], o["correct"] = "graded", string(a) == `"B"`
+			case "example.set:math:4":
+				o["status"] = "unsupported"
+			case "example.set:math:77": // a qref nobody asked about: must be ignored
+			}
+			items = append(items, o)
+		}
+		items = append(items, map[string]any{"qref": "example.set:math:5", "status": "graded", "correct": true}) // never asked
+		resp := map[string]any{"client_attempt_id": req.CID, "attempt_id": "brain-" + req.CID[:8], "recorded": f.gradeMode != "norecord", "items": items}
+		b, _ := json.Marshal(resp)
+		f.gradeSeen[req.CID] = b
+		f.calls["grade_new"]++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
 	})
 	mux.HandleFunc("POST /v1/media/{sha}/ticket", func(w http.ResponseWriter, r *http.Request) {
 		f.bump("ticket")
@@ -211,9 +280,10 @@ func (f *fakeBrain) total() int {
 }
 
 type env struct {
+	attDir  string
 	ts      *httptest.Server
 	brain   *fakeBrain
-	logs    *bytes.Buffer
+	logs    *syncBuf
 	code    string
 	secret  string
 	topic   string
@@ -226,11 +296,26 @@ type opts struct {
 	noTopic  bool
 	brainURL string // override (e.g. dead address)
 	sets     string // RUYI_SETS_FILE content; "" = no sets
+
+	grade       bool          // configure the grade token
+	attemptsDir string        // "" = a fresh temp dir
+	noAttempts  bool          // Attempts store nil
+	ntfyURL     string        // "" = ntfy base is a dead address
+	maxPerHour  int           // 0 = default 5
+	auto        []string      // RUYI_AUTO_SOURCES
+	autoTTL     time.Duration // 0 = default
+	retry       time.Duration // ntfy retry delay (0 = 150ms)
+	now         func() time.Time
+	reuse       *env // reuse brain + attempts dir of another env (restart simulation)
 }
 
 func newEnv(t *testing.T, o opts) *env {
 	t.Helper()
-	e := &env{brain: newFakeBrain(t), logs: &bytes.Buffer{}, code: rnd(t, "code-"), secret: rnd(t, "sec-"), topic: rnd(t, "topic-")}
+	e := &env{brain: newFakeBrain(t), logs: &syncBuf{}, code: rnd(t, "code-"), secret: rnd(t, "sec-"), topic: rnd(t, "topic-")}
+	if o.reuse != nil {
+		e.brain, e.code, e.secret, e.topic = o.reuse.brain, o.reuse.code, o.reuse.secret, o.reuse.topic
+		o.attemptsDir = o.reuse.attDir
+	}
 	if o.noTopic {
 		e.topic = ""
 	}
@@ -250,8 +335,28 @@ func newEnv(t *testing.T, o opts) *env {
 		bu = e.brain.URL
 	}
 	u, _ := url.Parse(bu)
-	bc, err := brain.New(brain.Config{BaseURL: u, Token: e.brain.token})
+	gt := ""
+	if o.grade {
+		gt = e.brain.gradeToken
+	}
+	bc, err := brain.New(brain.Config{BaseURL: u, Token: e.brain.token, GradeToken: gt})
 	must(t, err)
+	e.attDir = o.attemptsDir
+	if e.attDir == "" {
+		e.attDir = filepath.Join(t.TempDir(), "attempts")
+	}
+	var att *attempts.Store
+	if !o.noAttempts {
+		att = attempts.Open(e.attDir, slog.New(slog.NewTextHandler(e.logs, nil)))
+	}
+	ntfy := o.ntfyURL
+	if ntfy == "" {
+		ntfy = "http://127.0.0.1:1/"
+	}
+	retry := o.retry
+	if retry == 0 {
+		retry = 150 * time.Millisecond
+	}
 	secrets := []string{e.code, e.secret, e.brain.token, e.topic}
 	log := slog.New(slog.NewTextHandler(server.NewRedactWriter(e.logs, nil), &slog.HandlerOptions{Level: slog.LevelDebug}))
 	_ = secrets // logs are captured RAW (no redaction) so tests prove the code itself never logs secrets
@@ -264,7 +369,8 @@ func newEnv(t *testing.T, o opts) *env {
 	emb, err := embedded.New(ruyisite.Pages(), ruyisite.KaTeX())
 	must(t, err)
 	app := server.New(server.Deps{Auth: e.au, Limiter: server.NewLimiter(), Brain: bc, Static: h, Log: log,
-		Sources: []string{testSource}, Topic: e.topic, Sets: reg, Embedded: emb})
+		Sources: []string{testSource}, Topic: e.topic, Sets: reg, Embedded: emb,
+		Attempts: att, NtfyBase: ntfy, NtfyRetryDelay: retry, GradeMaxPerHour: o.maxPerHour, AutoSources: o.auto, AutoTTL: o.autoTTL, Now: o.now})
 	e.ts = httptest.NewServer(app)
 	t.Cleanup(e.ts.Close)
 	return e
@@ -317,3 +423,12 @@ func (e *env) session(t *testing.T) string {
 	t.Fatal("no cookie")
 	return ""
 }
+
+// syncBuf is a log sink that async goroutines (ntfy retry) may write to while a test reads it.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
+func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }

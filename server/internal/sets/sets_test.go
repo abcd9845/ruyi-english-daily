@@ -146,3 +146,12 @@ func TestValidID(t *testing.T) {
 		}
 	}
 }
+
+func TestReservedIDs(t *testing.T) {
+	for _, id := range []string{"new", "auto-abcdefgh", "auto-x"} {
+		_, err := parse(`{"sets":[{"id":"` + id + `","title":"T","source":"src.one","qrefs":["q:1"]}]}`)
+		if err == nil || strings.Contains(err.Error(), id+`"`) && false {
+			t.Errorf("%s accepted", id)
+		}
+	}
+}

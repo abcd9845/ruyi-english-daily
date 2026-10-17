@@ -21,6 +21,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -33,6 +34,13 @@ import (
 )
 
 const source = "math-intake.zz-yuekao-numberline-4y"
+
+// practiceSource is a second, purely synthetic source with 5 math questions in
+// the shape of the real exam list (Markdown + LaTeX stems, ________ blanks,
+// options with math). Nothing here is copied from a real paper. Every question
+// also carries answer/explanation/solution fields (as a brain with a write
+// token would send) so tests can prove the site strips them.
+const practiceSource = "math.synthetic.p0-demo"
 
 var digits = map[rune][5]string{
 	'0': {"111", "101", "101", "101", "111"}, '1': {"010", "110", "010", "010", "111"},
@@ -104,6 +112,33 @@ type question struct {
 	// FigureStatus is a pointer so that "key absent" can be mocked (the brain
 	// has not shipped the field yet).
 	FigureStatus *string `json:"figure_status,omitempty"`
+	// Only on practiceSource questions: must never reach a browser.
+	Answer      string `json:"answer,omitempty"`
+	Explanation string `json:"explanation,omitempty"`
+	Solution    string `json:"solution,omitempty"`
+}
+
+func practiceQuestions() []question {
+	mk := func(n int, qtype, stem, opts string) question {
+		q := question{QRef: fmt.Sprintf("example.set:math:%d", n), Subject: "math", Source: practiceSource, Set: "demo",
+			Number: strconv.Itoa(n), QType: qtype, Stem: stem, Media: []media{},
+			Answer: "MOCK-ANSWER-MARKER", Explanation: "MOCK-EXPLANATION-MARKER", Solution: "MOCK-SOLUTION-MARKER"}
+		if opts != "" {
+			q.Options = json.RawMessage(opts)
+		}
+		return q
+	}
+	return []question{
+		// 1: inline fractions, absolute value, sub/superscripts, a $$ block, 3 blanks
+		mk(1, "short_answer", "设 $m=-4$，$n=\\dfrac{2}{5}$，$k$ 为整数。\n\n(1) 计算 $\\left|m\\right|\\cdot n+k^{2}-m_{1}$ 得 ________ ；\n(2) 若 $t^{2}=16$，则 $t=$ ________ 或 ________ 。\n\n$$P=\\dfrac{m+n}{3}\\cdot w$$", ""),
+		// 2: choice, math in the stem and the options, a full-width paren blank
+		mk(2, "single_choice", "下列各数中，绝对值最小的是（ ）", `[{"key":"A","text":"$-2$","answer":true},{"key":"B","text":"$\\left|-\\dfrac{1}{3}\\right|$"},{"key":"C","text":"$0.5$"},{"key":"D","text":"$\\dfrac{3}{2}$"}]`),
+		// 3: escaping traps: | and < inside math, \\ row separator in a block, HTML-looking text, **bold**, `code`, full-width blanks
+		mk(3, "calculation", "**解方程组**（注意 `x<y` 的写法，下面这段 <script>window.__pwned=1</script> 只是文字）：\n\n$$\\begin{cases}x+y=3\\\\x-y=1\\end{cases}$$\n\n已知 $|x|<2$，求 $x=$ ＿＿＿＿＿ ，$y=$ ________ 。", ""),
+		// 4, 5: alternates, not in the demo set (4 has no blank and no options: a free-form answer area)
+		mk(4, "calculation", "（备选）计算 $\\dfrac{1}{2}+\\dfrac{1}{3}$，写出过程与结果。", ""),
+		mk(5, "single_choice", "（备选）$2^{3}$ 等于（ ）", `[{"key":"A","text":"$6$"},{"key":"B","text":"$8$"}]`),
+	}
 }
 
 func selfSigned() tls.Certificate {
@@ -259,6 +294,12 @@ func main() {
 				return
 			}
 		}
+		if r.URL.Query().Get("source") == practiceSource {
+			bump("list_practice")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": practiceQuestions(), "next_cursor": nil})
+			return
+		}
 		if r.URL.Query().Get("source") != source {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
@@ -338,6 +379,94 @@ func main() {
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 		_, _ = w.Write(b)
+	})
+	// Draft grading endpoint (see internal/brain/grade.go). Synthetic answer keys
+	// for the practiceSource questions live ONLY here. MOCK_GRADE=off -> 404,
+	// MOCK_GRADE_FAIL=1 -> 500. Idempotent on client_attempt_id.
+	gradeToken := os.Getenv("MOCK_GRADE_TOKEN")
+	if gradeToken == "" {
+		gradeToken = "grade-" + token
+	}
+	var gmu sync.Mutex
+	gradeStore := map[string][]byte{}
+	var lastGrade []byte
+	keys := map[string]any{
+		"example.set:math:1": []any{"1", "2", "3"},
+		"example.set:math:2": "B",
+		"example.set:math:5": "B",
+	}
+	mux.HandleFunc("POST /v1/bank/grade", func(w http.ResponseWriter, r *http.Request) {
+		bump("grade")
+		if os.Getenv("MOCK_GRADE") == "off" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+gradeToken {
+			if bearer(r) {
+				bump("grade_with_bank_read_token")
+			}
+			apiErr(w, 403, "forbidden")
+			return
+		}
+		if os.Getenv("MOCK_GRADE_FAIL") == "1" {
+			apiErr(w, 500, "internal")
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		var req struct {
+			CID    string `json:"client_attempt_id"`
+			SetID  string `json:"set_id"`
+			Source string `json:"source"`
+			Items  []struct {
+				QRef   string `json:"qref"`
+				Answer any    `json:"answer"`
+			} `json:"items"`
+		}
+		if json.Unmarshal(body, &req) != nil || req.CID == "" {
+			apiErr(w, 400, "invalid_request")
+			return
+		}
+		gmu.Lock()
+		defer gmu.Unlock()
+		lastGrade = body
+		if prev, ok := gradeStore[req.CID]; ok {
+			bump("grade_replay")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(prev)
+			return
+		}
+		type outItem struct {
+			QRef    string `json:"qref"`
+			Status  string `json:"status"`
+			Correct *bool  `json:"correct"`
+		}
+		var items []outItem
+		for _, it := range req.Items {
+			o := outItem{QRef: it.QRef, Status: "pending_key"}
+			switch it.QRef {
+			case "example.set:math:4":
+				o.Status = "unsupported"
+			case "example.set:math:3":
+			default:
+				if want, ok := keys[it.QRef]; ok {
+					a, _ := json.Marshal(it.Answer)
+					wnt, _ := json.Marshal(want)
+					c := string(a) == string(wnt)
+					o.Status, o.Correct = "graded", &c
+				}
+			}
+			items = append(items, o)
+		}
+		resp, _ := json.Marshal(map[string]any{"client_attempt_id": req.CID, "attempt_id": "mock-" + req.CID[:8], "recorded": true, "items": items})
+		gradeStore[req.CID] = resp
+		bump("grade_new")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(resp)
+	})
+	mux.HandleFunc("GET /_mock/last-grade", func(w http.ResponseWriter, r *http.Request) {
+		gmu.Lock()
+		defer gmu.Unlock()
+		_, _ = w.Write(lastGrade)
 	})
 	// Test hooks.
 	mux.HandleFunc("POST /_mock/rotate-key", func(w http.ResponseWriter, r *http.Request) {

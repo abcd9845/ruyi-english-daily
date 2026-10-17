@@ -140,6 +140,10 @@ type Config struct {
 	InsecureTLS bool
 	CAFile      string
 	Now         func() time.Time
+	// GradeToken / GradePath configure the grade adapter (grade.go). An empty
+	// GradeToken means grading is not configured (Grade reports ErrGradeDisabled).
+	GradeToken string
+	GradePath  string
 }
 
 type ticket struct {
@@ -154,10 +158,12 @@ type listEntry struct {
 
 // Client is safe for concurrent use.
 type Client struct {
-	base  *url.URL
-	token string
-	hc    *http.Client
-	now   func() time.Time
+	base       *url.URL
+	token      string
+	gradeToken string
+	gradePath  string
+	hc         *http.Client
+	now        func() time.Time
 
 	mu      sync.Mutex
 	tickets map[string]ticket
@@ -202,7 +208,7 @@ func New(c Config) (*Client, error) {
 		now = time.Now
 	}
 	return &Client{
-		base: c.BaseURL, token: c.Token, now: now,
+		base: c.BaseURL, token: c.Token, now: now, gradeToken: c.GradeToken, gradePath: c.GradePath,
 		hc: &http.Client{
 			Transport:     tr,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -234,20 +240,7 @@ func (c *Client) do(ctx context.Context, method, rawURL string, bearer bool, bod
 	req.Header.Set("User-Agent", "ruyi-site/1")
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		// err is a *url.Error whose text contains the URL (and thus a ticket).
-		// Classify it instead of passing it on.
-		what := "brain unreachable"
-		var ne net.Error
-		var ce x509.UnknownAuthorityError
-		switch {
-		case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()):
-			what = "brain timeout"
-		case errors.As(err, &ce) || strings.Contains(err.Error(), "x509:") || strings.Contains(err.Error(), "tls:"):
-			what = "brain tls error"
-		case errors.Is(err, context.Canceled):
-			what = "request canceled"
-		}
-		return nil, &Error{Kind: KindUnavailable, What: what}
+		return nil, classifyTransport(err)
 	}
 	return resp, nil
 }
@@ -440,12 +433,21 @@ func SortQuestions(qs []Question) {
 // FindMedia looks up a sha256 in the cached list of source. If it is unknown
 // and the cache is not fresh from this instant, it refreshes once.
 func (c *Client) FindMedia(ctx context.Context, source, sha string) (*Media, error) {
+	return c.FindMediaWhere(ctx, source, sha, nil)
+}
+
+// FindMediaWhere is FindMedia restricted to questions for which keep returns
+// true (nil keeps all).
+func (c *Client) FindMediaWhere(ctx context.Context, source, sha string, keep func(Question) bool) (*Media, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		items, err := c.Source(ctx, source, attempt == 1)
 		if err != nil {
 			return nil, err
 		}
 		for _, q := range items {
+			if keep != nil && !keep(q) {
+				continue
+			}
 			for i := range q.Media {
 				if q.Media[i].SHA256 == sha {
 					m := q.Media[i]
@@ -559,4 +561,21 @@ func (c *Client) FetchMedia(ctx context.Context, sha string) (*Image, error) {
 	}
 	cancel()
 	return nil, &Error{Kind: KindTicket, What: "ticket retry exhausted"}
+}
+
+// classifyTransport converts a transport error (a *url.Error whose text holds
+// the URL, and thus possibly a ticket) into a safe classified Error.
+func classifyTransport(err error) *Error {
+	what := "brain unreachable"
+	var ne net.Error
+	var ce x509.UnknownAuthorityError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()):
+		what = "brain timeout"
+	case errors.As(err, &ce) || strings.Contains(err.Error(), "x509:") || strings.Contains(err.Error(), "tls:"):
+		what = "brain tls error"
+	case errors.Is(err, context.Canceled):
+		what = "request canceled"
+	}
+	return &Error{Kind: KindUnavailable, What: what}
 }

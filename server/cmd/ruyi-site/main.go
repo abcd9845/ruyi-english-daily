@@ -14,9 +14,11 @@ import (
 	"time"
 
 	ruyisite "github.com/abcd9845/ruyi-english-daily/server"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/attempts"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/auth"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/brain"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/config"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/embedded"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/server"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/staticfiles"
 )
@@ -46,7 +48,7 @@ func run() error {
 		log.Warn("allowlisted file missing from static dir (will 404)", "file", m)
 	}
 
-	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile})
+	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, GradeToken: cfg.BrainGradeToken, GradePath: cfg.BrainGradePath, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile})
 	if err != nil {
 		return err
 	}
@@ -54,14 +56,34 @@ func run() error {
 		log.Warn("brain TLS verification is DISABLED (loopback address only)")
 	}
 
+	emb, err := embedded.New(ruyisite.Pages(), ruyisite.KaTeX())
+	if err != nil {
+		return errors.New("embedded files unreadable")
+	}
+	if cfg.Sets != nil {
+		log.Info("practice sets loaded", "sets", cfg.Sets.Len())
+	}
+
+	att := attempts.Open(cfg.AttemptsDir, log)
+	defer att.Close()
+
 	app := server.New(server.Deps{
-		Auth:    auth.New(cfg.FamilyCode, cfg.SessionSecret, cfg.SessionTTL, cfg.CookieSecure, nil),
-		Limiter: server.NewLimiter(),
-		Brain:   bc,
-		Static:  static,
-		Log:     log,
-		Sources: cfg.AllowedSource,
-		Topic:   cfg.NtfyTopic,
+		Auth:     auth.New(cfg.FamilyCode, cfg.SessionSecret, cfg.SessionTTL, cfg.CookieSecure, nil),
+		Limiter:  server.NewLimiter(),
+		Brain:    bc,
+		Static:   static,
+		Log:      log,
+		Sources:  cfg.AllowedSource,
+		Topic:    cfg.NtfyTopic,
+		Sets:     cfg.Sets,
+		Embedded: emb,
+
+		Attempts:        att,
+		NtfyBase:        cfg.NtfyBaseURL,
+		NtfyRetryDelay:  cfg.NtfyRetryDelay,
+		GradeMaxPerHour: cfg.GradeMaxPerHour,
+		AutoSources:     cfg.AutoSources,
+		AutoTTL:         cfg.AutoTTL,
 	})
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -78,7 +100,8 @@ func run() error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Info("listening", "addr", cfg.Listen, "static_files", len(entries), "cookie_secure", cfg.CookieSecure,
-		"ntfy_configured", cfg.NtfyTopic != "")
+		"ntfy_configured", cfg.NtfyTopic != "", "grading_configured", cfg.BrainGradeToken != "",
+		"auto_sources", len(cfg.AutoSources), "grade_max_per_hour", cfg.GradeMaxPerHour)
 
 	select {
 	case err := <-errc:

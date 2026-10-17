@@ -62,6 +62,13 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 | `RUYI_LOG_LEVEL` | 否 | `debug`/`info`（默认）/`warn`/`error` |
 | `RUYI_NTFY_TOPIC` | 否 | 动态页提交用的 ntfy topic，登录后由 `/api/config` 下发；未设则按钮显示「提交通道未配置」 |
 | `RUYI_ALLOWED_SOURCES` | 否 | 逗号分隔的 source 白名单 |
+| `RUYI_BRAIN_GRADE_TOKEN` | 否 | **判分令牌**（单独的令牌，不能等于 `RUYI_BRAIN_TOKEN`；只应能"判分并记录一次作答"）。空 = 不判分，提交走降级（只归档 + 提醒） |
+| `RUYI_BRAIN_GRADE_PATH` | 否 | 判分接口路径，默认 `/v1/bank/grade`（**草案**，契约集中在 `internal/brain/grade.go`） |
+| `RUYI_ATTEMPTS_DIR` | 否 | 作答归档目录，默认 `/var/lib/ruyi-site/attempts`（0700，文件 0600） |
+| `RUYI_GRADE_MAX_PER_HOUR` | 否 | 每套每小时提交上限（会话与 IP 各限），默认 5，范围 1–1000 |
+| `RUYI_NTFY_BASE_URL` / `RUYI_NTFY_RETRY_DELAY` | 否 | ntfy 地址（默认 `https://ntfy.sh/`）/ 失败后重试等待（默认 1m）；一般不用配 |
+| `RUYI_AUTO_SOURCES` / `RUYI_AUTO_TTL` | 否 | 允许自动出题的 source（默认空=关）/ 自动套有效期（默认 6h） |
+| `RUYI_SETS_FILE` | 否 | 练习套配置 JSON（见下「通用套练习页」）。未设 → 没有套，`/api/practice/*` 404，其余功能不变。文件有误启动即退出，报错只写位置不写内容 |
 
 日志输出到 stderr（journald），只记方法、路径（不含 query）、状态码、耗时、来源 IP；另有一层写入器把所有已配置的秘密值（令牌、家庭码、会话密钥、topic）替换成 `[redacted]`。
 
@@ -69,6 +76,56 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 
 `static-allowlist.txt` 由 `make allowlist`（`scripts/gen-allowlist.sh`）从 `git ls-files` 生成：仓库里除 `server/`、`docs/`、`.gitignore` 以外的所有受跟踪文件（旧页 17 个 + `m/numberline-4y/index.html`）。
 `go test` 会拿它与 `git ls-files` 比对，不一致就失败；新增页面 = 改清单 + 重新编译，需要评审。清单编进二进制，不读磁盘上的清单。
+
+## 通用套练习页（P0，Issue #10）
+
+一套题 = 一个页面：`/m/practice/?set=<id>`，题目由 `RUYI_SETS_FILE` 配置，公式用本地 KaTeX 渲染。P0 只作答并把草稿存在本机；**提交 / 判分 / 归档 / 提醒见下一节（P1–P3）**。
+
+套配置（样例 `deploy/sets.example.json`，只有占位 qref；真实套的 qref 只放在部署环境的文件里，不进仓库）：
+
+```json
+{"sets":[{"id":"demo-1","title":"示例套","source":"<大脑 source key>","qrefs":["<qref>","<qref>"]}]}
+```
+
+- `id` 必须匹配 `[a-z0-9_-]{1,64}`、不得重复；`qrefs` 不能空、不得重复；未知字段、尾随内容都会报错。
+- `GET /api/practice/{set_id}`（需登录）：用现有只读大脑接口拉整卷（只发 `source/limit/cursor`），按 qrefs 白名单过滤、按配置顺序返回
+  `{set_id,title,items:[{ordinal,qref,qtype,stem_md,options?:[{key,text_md}],blanks?,figure_status,media}],missing_qrefs}`。
+  不返回答案/解析（客户端只解码需要的字段，且从不发 `include_answer`）。配置里有但库里没取到的 qref 进 `missing_qrefs`（不 500）。
+  `blanks` = 题干**非公式部分**里连续 ≥4 个 `_`/`＿` 的段数（与页面画的输入框数一致）。
+- 图片仍走 `/api/media/{source}/{sha256}`；只因套而开放的 source 只放行白名单题目的图，`/api/sets/{source}` 对它仍是 404。
+- 页面 `server/web/m/practice/index.html` 与 KaTeX（`server/vendor/katex`，仅 woff2，版本与哈希见 `vendor/README.md`）都 `go:embed` 进二进制：**部署不需要往 ECS 静态目录拷这些文件**。
+  `/vendor/katex/…` 只放行内嵌的精确文件，其它 `/vendor/…` 都是 404；页面带 CSP（`default-src 'none'`，只允许本站脚本/样式/字体/连接）。
+- 页面 Markdown 只支持最小安全子集：先转义 HTML，再保护数学片段，处理段落、换行、`**粗体**`、`` `行内代码` ``；公式 `$…$` `$$…$$` `\(…\)` `\[…\]`（`trust` 关，解析失败回退原文）。
+- 草稿键 `ruyi-practice-<set_id>-v1`（`{v,set,a:{qref:答案},t}`，不含家庭码）；作答区比旧页大、字号 18px、触控目标 ≥44px。
+- 图：只有大脑明确标 `figure_status=missing` 的题才显示「图未入库」灰块；`unknown/none` 不显示（本期的题本来就没有图）。
+
+## 提交、判分、归档、提醒、自动出题（P1–P3）
+
+上线清单与回滚见 **`DEPLOY-P3.md`**。
+
+**大脑抽象（P1）**：`internal/brain.Bank` = `ListBySource` / `LookupByQrefs` / `SelectForPractice` / `Grade`。大脑还没有对应接口的部分由适配层模拟（整卷拉取 + 白名单 / 随机 / 顺序）；
+`wrong_only`、`due_first` 没有大脑接口，一律返回 `ErrUnsupported`（HTTP 501），不自己编逻辑。判分的线上契约（草案 `POST /v1/bank/grade`）全部写在 `internal/brain/grade.go`，换契约只改那一个文件。
+
+**`POST /api/practice/{set_id}/grade`（需登录，JSON）**：
+
+```json
+{"client_attempt_id":"<uuid>","answers":[{"qref":"<套内 qref>","answer":"B"}]}
+```
+
+- 答案形状按题型校验：单选 `"B"`（必须是选项 key）、多选 `["A","C"]`、填空 `["…","…"]`（个数 = 题干空数，每格 ≤200 字）、自由作答 `"…"`（≤2000 字）；未知字段/控制字符/超长/不属于该套的 qref 一律 400，且**不会到达大脑**。没作答的题不用传。
+- `client_attempt_id` 是**大脑侧幂等键**：同 id 重复提交返回第一次的结果（`replayed:true`），不重复判分、不重复归档、不重复提醒；重启后从归档文件恢复。页面里同一份答案重试沿用同一个 id，改了答案换新 id。
+- **只有大脑确认**（回复里 `recorded:true`、带大脑自己的 `attempt_id`、回显了 `client_attempt_id`）才是 `mode:"graded"` / `brain_recorded:true`，页面才显示「已提交到大脑」。
+  判分令牌没配 / 大脑不可用 / 回复没有确认 → `mode:"archive_only"`：所有题 `pending_key`、`correct:null`，页面显示「已提交（暂未判分）」，**绝不出现**「已记入大脑 / 已提交到大脑」。`pending_key`、`unsupported` 一律「待核对」，不显示对错。
+- 限速：每套每小时 `RUYI_GRADE_MAX_PER_HOUR` 次新提交（会话与来源 IP 各自计），超了 429 + `Retry-After`；重复提交同一个 id 与校验失败不占额度。
+- 响应只有 `client_attempt_id,set_id,mode,brain_recorded,results[{qref,status,correct}],summary{total,graded,correct,pending,unanswered},archived,notify,replayed`，没有答案、解析、大脑内部 id。
+- 本站**不持有大脑写权限**：唯一的写是上面这个判分令牌调用的判分接口；本站不直接写大脑任何别的东西。
+
+**归档（P3）**：每次新提交追加一行 JSON 到 `$RUYI_ATTEMPTS_DIR/attempts.jsonl`（目录 0700、文件 0600、写后 fsync；内容见 `DEPLOY-P3.md`），不含 cookie/令牌/家庭码/topic。目录写不了：照常判分和提醒，响应 `archived:false`，日志只一条 error（不带路径/内容）。它是大脑不可用时的兜底凭据。
+
+**ntfy 提醒（P3）**：服务端向 `RUYI_NTFY_TOPIC` 发一条"打招呼"，如 `如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。`（降级时是 `…已提交（未判分）。`），正文后附 JSON 明细。**不是审批环节**，失败不影响判分，异步重试一次，日志里不出现 topic/地址。
+
+**自动出题（3.5）**：`GET /api/practice/new?source=&n=1..20[&order=random|seq][&seed=N]`（需登录；`RUYI_AUTO_SOURCES` 为空时整个入口 404）。
+返回 `{set_id:"auto-<8位>",url,title,requested,count,truncated,note?,expires_at}`；题不够 n 就全给并带 `note`；套存在内存里，`RUYI_AUTO_TTL` 后失效，其 qref 白名单同样约束判分与取图。`wrong_only=1` → 501 `{"error":"wrong_only_unavailable"}`。
 
 ## 构建与测试
 
@@ -95,5 +152,5 @@ make acceptance  # 起 mock 大脑 + 新服务，跑 test/acceptance.sh（含无
 
 - 来源 IP 取自 TCP 对端地址，不信任 `X-Forwarded-For`。若以后放在反向代理后面，限速会变成"所有人共用一个 IP"，需要先加可信代理配置。
 - 目前是明文 http；家庭码与 cookie 可被链路窃听（方案已记录）。
-- 页面用 `textContent` 渲染题干，题干里若有 LaTeX/Markdown 会原样显示。
-- 没有"检查客观题"：`bank:read` 取不到标准答案（`include_answer` 无 `bank:write` 返回 403），服务端也绝不发该参数，页面不编造答案。
+- 数轴页（`/m/numberline-4y/`）用 `textContent` 渲染题干，不解析 LaTeX/Markdown；通用练习页才解析。
+- 站点自己不判对错：`bank:read` 取不到标准答案（`include_answer` 无 `bank:write` 返回 403），服务端也绝不发该参数；对错只来自大脑判分接口的回复，拿不到就显示「待核对」。

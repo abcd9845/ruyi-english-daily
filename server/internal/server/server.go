@@ -241,7 +241,9 @@ type questionOut struct {
 	QType   string      `json:"qtype"`
 	Stem    string      `json:"stem"`
 	Options []optionOut `json:"options,omitempty"`
-	Media   []mediaOut  `json:"media"`
+	// FigureStatus is ok / missing / none / unknown (never empty).
+	FigureStatus string     `json:"figure_status"`
+	Media        []mediaOut `json:"media"`
 }
 
 func (s *Server) validSource(src string) bool {
@@ -260,7 +262,11 @@ func (s *Server) sets(w http.ResponseWriter, r *http.Request, source string) {
 	}
 	out := make([]questionOut, 0, len(items))
 	for i, q := range items {
-		qo := questionOut{Ordinal: i + 1, QRef: q.QRef, QType: q.QType, Stem: q.Stem, Media: []mediaOut{}}
+		qo := questionOut{Ordinal: i + 1, QRef: q.QRef, QType: q.QType, Stem: q.Stem, Media: []mediaOut{}, FigureStatus: q.Figure()}
+		if qo.FigureStatus == brain.FigureOK && len(q.Media) == 0 {
+			// data inconsistency on the brain side: says "has figure" but lists none
+			s.Log.Warn("figure_status ok but media empty", "qref", q.QRef)
+		}
 		if q.Number != nil {
 			qo.Number = *q.Number
 		}

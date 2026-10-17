@@ -107,6 +107,30 @@ type Question struct {
 	Stem    string          `json:"stem"`
 	Options json.RawMessage `json:"options"`
 	Media   []Media         `json:"media"`
+	// FigureStatus is the brain's read-only derived field: ok / missing / none /
+	// unknown. It may be absent (not live yet); absent is treated as unknown.
+	FigureStatus *string `json:"figure_status"`
+}
+
+// Figure statuses as delivered to the page.
+const (
+	FigureOK      = "ok"
+	FigureMissing = "missing"
+	FigureNone    = "none"
+	FigureUnknown = "unknown"
+)
+
+// Figure returns the normalized figure_status: a missing key or any value
+// outside the four known ones counts as unknown.
+func (q Question) Figure() string {
+	if q.FigureStatus == nil {
+		return FigureUnknown
+	}
+	switch *q.FigureStatus {
+	case FigureOK, FigureMissing, FigureNone:
+		return *q.FigureStatus
+	}
+	return FigureUnknown
 }
 
 // Config configures a Client.
@@ -270,7 +294,7 @@ func upstreamErr(resp *http.Response) *Error {
 // ---- question list ---------------------------------------------------------
 
 // Source returns the active questions of a source, sorted by question number
-// (numeric first, then lexical, then qref). The caller must have validated
+// (major, minor, suffix; unparsable last, stable). The caller must have validated
 // source. Results are cached for listTTL.
 func (c *Client) Source(ctx context.Context, source string, forceFresh bool) ([]Question, error) {
 	c.mu.Lock()
@@ -358,35 +382,59 @@ func normalize(in []Question, source string) []Question {
 		q.Media = ms
 		out = append(out, q)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return less(out[i], out[j]) })
+	SortQuestions(out)
 	return out
 }
 
-func num(q Question) (int, bool) {
-	if q.Number == nil {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(*q.Number))
-	return n, err == nil
+var numberRe = regexp.MustCompile(`^(\d+)\((\d+)\)(.*)$`)
+
+type numKey struct {
+	major, minor int
+	suffix       string
 }
 
-func less(a, b Question) bool {
-	an, aok := num(a)
-	bn, bok := num(b)
-	switch {
-	case aok && bok && an != bn:
-		return an < bn
-	case aok != bok:
-		return aok // numeric numbers first
-	case !aok && !bok:
-		if (a.Number == nil) != (b.Number == nil) {
-			return a.Number != nil // questions without a number last
-		}
-		if a.Number != nil && *a.Number != *b.Number {
-			return *a.Number < *b.Number
-		}
+// parseNumber splits a question number such as "11(2)③" into (11, 2, "③").
+// Numbers that do not match, or are absent, report ok=false.
+func parseNumber(q Question) (numKey, bool) {
+	if q.Number == nil {
+		return numKey{}, false
 	}
-	return a.QRef < b.QRef
+	m := numberRe.FindStringSubmatch(*q.Number)
+	if m == nil {
+		return numKey{}, false
+	}
+	maj, err1 := strconv.Atoi(m[1])
+	min, err2 := strconv.Atoi(m[2])
+	if err1 != nil || err2 != nil {
+		return numKey{}, false
+	}
+	return numKey{maj, min, m[3]}, true
+}
+
+// less orders by (major, minor, suffix as string). Numbers that cannot be
+// parsed sort after all parsed ones; among themselves (and for equal keys)
+// the original order is kept because the caller uses a stable sort.
+func less(a, b Question) bool {
+	ak, aok := parseNumber(a)
+	bk, bok := parseNumber(b)
+	switch {
+	case aok && bok:
+		if ak.major != bk.major {
+			return ak.major < bk.major
+		}
+		if ak.minor != bk.minor {
+			return ak.minor < bk.minor
+		}
+		return ak.suffix < bk.suffix
+	case aok != bok:
+		return aok
+	}
+	return false
+}
+
+// SortQuestions sorts in place by question number (stable).
+func SortQuestions(qs []Question) {
+	sort.SliceStable(qs, func(i, j int) bool { return less(qs[i], qs[j]) })
 }
 
 // FindMedia looks up a sha256 in the cached list of source. If it is unknown

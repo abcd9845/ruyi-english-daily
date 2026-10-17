@@ -50,6 +50,7 @@ type fakeBrain struct {
 	failFirstMedia bool
 	alwaysExpired  bool
 	tickets        []string
+	listQueries    []url.Values // every query the client sent to the list endpoint
 }
 
 func newFakeBrain(t *testing.T) *fakeBrain {
@@ -62,14 +63,29 @@ func newFakeBrain(t *testing.T) *fakeBrain {
 	}
 	mux.HandleFunc("GET /v1/bank/questions", func(w http.ResponseWriter, r *http.Request) {
 		f.bump("list")
+		f.mu.Lock()
+		f.listQueries = append(f.listQueries, r.URL.Query())
+		f.mu.Unlock()
 		if r.Header.Get("Authorization") != "Bearer "+f.token {
 			jerr(w, 401, "unauthorized")
 			return
 		}
 		var items []map[string]any
 		for n := 1; n <= 60; n++ {
-			q := map[string]any{"qref": fmt.Sprintf("math:q%02d", n), "source": testSource, "number": strconv.Itoa(n),
+			q := map[string]any{"qref": fmt.Sprintf("math:q%02d", n), "source": testSource, "number": fakeNumber(n),
 				"qtype": "fill_blank", "stem": fmt.Sprintf("stem %d <b>x</b>", n), "media": []any{}}
+			switch n {
+			case 1:
+				q["figure_status"] = "ok"
+			case 2:
+				q["figure_status"] = "missing"
+			case 4:
+				q["figure_status"] = "none"
+			case 5:
+				q["figure_status"] = "ok" // inconsistent: ok but no media
+			case 6:
+				q["figure_status"] = "bogus"
+			}
 			if n == 3 {
 				q["qtype"] = "single_choice"
 				q["options"] = json.RawMessage(`[{"key":"A","text":"1"},{"key":"B","text":"2"}]`)
@@ -85,10 +101,12 @@ func newFakeBrain(t *testing.T) *fakeBrain {
 			}
 			items = append(items, q)
 		}
-		// reverse (the real list is newest-first)
-		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
-			items[i], items[j] = items[j], items[i]
+		// scrambled order (the real list is updated_at DESC, not number order)
+		scr := make([]map[string]any, 60)
+		for i := range items {
+			scr[(i*37+11)%60] = items[i]
 		}
+		items = scr
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": nil})
 	})
@@ -124,6 +142,16 @@ func newFakeBrain(t *testing.T) *fakeBrain {
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Server.Close)
 	return f
+}
+
+// fakeNumber is the number of the question at sorted position n: "1(1)", "1(2)", "1(3)", "2(1)" …
+// with a circled suffix on position 12 ("4(3)③") to look like the real exam.
+func fakeNumber(n int) string {
+	s := fmt.Sprintf("%d(%d)", (n-1)/3+1, (n-1)%3+1)
+	if n == 12 {
+		s += "③"
+	}
+	return s
 }
 
 func (f *fakeBrain) bump(k string) { f.mu.Lock(); f.calls[k]++; f.mu.Unlock() }

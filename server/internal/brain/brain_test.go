@@ -125,13 +125,16 @@ func TestOversizeAndWrongTypeImage(t *testing.T) {
 	}
 }
 
-func TestPaginationAndSorting(t *testing.T) {
+func TestPaginationAndFiltering(t *testing.T) {
 	pages := map[string]string{
-		"": `{"items":[{"qref":"c","number":"10","stem":"s","media":[]},{"qref":"b","number":"2","stem":"s","media":[]}],"next_cursor":"p2"}`,
-		"p2": `{"items":[{"qref":"a","number":"1","stem":"s"},{"qref":"z","number":"P3","stem":"s","media":[]},{"qref":"y","stem":"s","media":[]},
-		   {"qref":"other","source":"someone.else","number":"0","media":[]}],"next_cursor":null}`,
+		"":   `{"items":[{"qref":"c","number":"10(1)","stem":"s","media":[]},{"qref":"b","number":"2(1)","stem":"s","media":[]}],"next_cursor":"p2"}`,
+		"p2": `{"items":[{"qref":"a","number":"1(1)","stem":"s"},{"qref":"other","source":"someone.else","number":"0(0)","media":[]}],"next_cursor":null}`,
 	}
+	var keys []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k := range r.URL.Query() {
+			keys = append(keys, k)
+		}
 		if r.URL.Query().Get("source") != "s.x" || r.Header.Get("Authorization") != "Bearer tok" {
 			w.WriteHeader(400)
 			return
@@ -149,8 +152,52 @@ func TestPaginationAndSorting(t *testing.T) {
 	for _, q := range items {
 		got = append(got, q.QRef)
 	}
-	if strings.Join(got, ",") != "a,b,c,z,y" { // numeric first (1,2,10), then "P3", then no number
+	if strings.Join(got, ",") != "a,b,c" { // paginated, foreign-source row dropped, sorted 1(1) 2(1) 10(1)
 		t.Fatalf("order: %v", got)
+	}
+	for _, k := range keys {
+		if k != "source" && k != "limit" && k != "cursor" {
+			t.Errorf("forbidden query parameter sent: %s", k)
+		}
+	}
+}
+
+func q(number *string, ref string) Question { return Question{QRef: ref, Number: number} }
+func sp(s string) *string                   { return &s }
+
+func TestSortByMajorMinorSuffix(t *testing.T) {
+	in := []Question{
+		q(sp("10(1)"), "a"), q(sp("2(10)"), "b"), q(sp("2(2)"), "c"), q(sp("11(2)③"), "d"), q(sp("11(2)①"), "e"),
+		q(sp("11(2)②"), "f"), q(sp("11(1)"), "g"), q(sp("1(1)"), "h"), q(sp("18(4)"), "i"), q(sp("9(3)"), "j"),
+		q(sp("weird"), "u1"), q(nil, "u2"), q(sp("5"), "u3"), q(sp("2(1)b"), "k"), q(sp("2(1)a"), "l"), q(sp("2(1)"), "m"),
+	}
+	SortQuestions(in)
+	var got []string
+	for _, x := range in {
+		got = append(got, x.QRef)
+	}
+	// 1(1) 2(1) 2(1)a 2(1)b 2(2) 2(10) 9(3) 10(1) 11(1) 11(2)① 11(2)② 11(2)③ 18(4) then unparsable in original order
+	want := "h,m,l,k,c,b,j,a,g,e,f,d,i,u1,u2,u3"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("got  %s\nwant %s", strings.Join(got, ","), want)
+	}
+	// stable for equal keys
+	dup := []Question{q(sp("3(1)"), "x"), q(sp("3(1)"), "y"), q(sp("3(1)"), "z")}
+	SortQuestions(dup)
+	if dup[0].QRef != "x" || dup[1].QRef != "y" || dup[2].QRef != "z" {
+		t.Fatal("sort not stable")
+	}
+}
+
+func TestFigureNormalization(t *testing.T) {
+	for in, want := range map[string]string{"ok": "ok", "missing": "missing", "none": "none", "unknown": "unknown", "": "unknown", "OK": "unknown", "weird": "unknown"} {
+		s := in
+		if got := (Question{FigureStatus: &s}).Figure(); got != want {
+			t.Errorf("%q -> %q want %q", in, got, want)
+		}
+	}
+	if (Question{}).Figure() != "unknown" {
+		t.Error("absent key must be unknown")
 	}
 }
 

@@ -25,7 +25,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,6 +101,9 @@ type question struct {
 	Stem    string          `json:"stem"`
 	Options json.RawMessage `json:"options,omitempty"`
 	Media   []media         `json:"media"`
+	// FigureStatus is a pointer so that "key absent" can be mocked (the brain
+	// has not shipped the field yet).
+	FigureStatus *string `json:"figure_status,omitempty"`
 }
 
 func selfSigned() tls.Certificate {
@@ -116,6 +118,8 @@ func selfSigned() tls.Certificate {
 	der, _ := x509.CreateCertificate(rand.Reader, tpl, tpl, &priv.PublicKey, priv)
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}
 }
+
+func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
 
 func main() {
 	token := os.Getenv("MOCK_TOKEN")
@@ -145,32 +149,82 @@ func main() {
 	now := func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
 
 	images := map[string][]byte{}
+	// Question numbers look like the real exam: "1(1)", "11(2)③", "18(3)" ...
+	// 18 major questions, 60 distinct numbers (6 majors have 4 parts, 12 have 3;
+	// major 11 has 11(1), 11(2)①, 11(2)②, 11(2)③).
+	var numbers []string
+	for m := 1; m <= 18; m++ {
+		switch m {
+		case 11:
+			numbers = append(numbers, "11(1)", "11(2)①", "11(2)②", "11(2)③")
+		case 1, 2, 3, 4, 12:
+			for i := 1; i <= 4; i++ {
+				numbers = append(numbers, fmt.Sprintf("%d(%d)", m, i))
+			}
+		default:
+			for i := 1; i <= 3; i++ {
+				numbers = append(numbers, fmt.Sprintf("%d(%d)", m, i))
+			}
+		}
+	}
+	if len(numbers) != 60 {
+		fmt.Fprintln(os.Stderr, "mock number table has", len(numbers), "entries, want 60")
+		os.Exit(1)
+	}
+	str := func(v string) *string { return &v }
+	noMedia := os.Getenv("MOCK_NO_MEDIA") == "1"
 	var qs []question
-	for n := 1; n <= 60; n++ {
+	for n := 1; n <= 60; n++ { // n = position in the correct (sorted) order
 		q := question{QRef: fmt.Sprintf("math:%s:q%02d", source, n), Subject: "math", Source: source, Set: "main",
-			Number: strconv.Itoa(n), Media: []media{}}
+			Number: numbers[n-1], Media: []media{}}
 		if n <= 30 {
 			q.QType = "single_choice"
-			q.Stem = fmt.Sprintf("（模拟题 %d）数轴上点 A 表示的数是？", n)
+			q.Stem = fmt.Sprintf("（模拟题 %s）数轴上点 A 表示的数是？", q.Number)
 			q.Options = json.RawMessage(`[{"key":"A","text":"-2"},{"key":"B","text":"-1"},{"key":"C","text":"1"},{"key":"D","text":"2"}]`)
 		} else {
-			q.QType = "fill_blank"
-			q.Stem = fmt.Sprintf("（模拟题 %d）在数轴上，与原点距离为 3 的点表示的数是 ____ 。", n)
+			q.QType = "fill_blank" // options key omitted, as the real list does
+			q.Stem = fmt.Sprintf("（模拟题 %s）在数轴上，与原点距离为 3 的点表示的数是 ____ 。", q.Number)
 		}
-		if n != 17 {
+		withImage := true
+		switch n {
+		case 17: // figure needed but not in the library
+			q.FigureStatus, withImage = str("missing"), false
+		case 25: // confirmed: no figure needed -> no placeholder at all
+			q.FigureStatus, withImage = str("none"), false
+		case 26: // figure_status key absent, no media -> unknown -> placeholder
+			withImage = false
+		case 27: // explicit unknown, no media -> placeholder
+			q.FigureStatus, withImage = str("unknown"), false
+		case 28: // inconsistent: says ok but media is empty -> placeholder + server warn
+			q.FigureStatus, withImage = str("ok"), false
+		case 29: // none, yet media exists -> the media is still shown
+			q.FigureStatus = str("none")
+		case 30: // media present, key absent (old brain)
+		default:
+			q.FigureStatus = str("ok")
+		}
+		if noMedia { // MOCK_NO_MEDIA=1: the real situation today - no figure has been ingested yet
+			withImage, q.FigureStatus = false, nil
+		}
+		if withImage {
 			b, sha := makePNG(n, 0)
 			images[sha] = b
-			q.Media = append(q.Media, media{SHA256: sha, Mime: "image/png", Bytes: len(b), Ordinal: 1, Slot: "stem", Alt: fmt.Sprintf("第%d题数轴", n)})
+			q.Media = append(q.Media, media{SHA256: sha, Mime: "image/png", Bytes: len(b), Ordinal: 1, Slot: "stem", Alt: fmt.Sprintf("第%s题数轴", q.Number)})
 		}
-		if n == 5 { // an option figure too
+		if n == 5 && !noMedia { // an option figure too
 			b, sha := makePNG(5, 1)
 			images[sha] = b
 			q.Media = append(q.Media, media{SHA256: sha, Mime: "image/png", Bytes: len(b), Ordinal: 2, Slot: "option", OptionKey: "B", Alt: "选项B图"})
 		}
 		qs = append(qs, q)
 	}
-	// Real server orders by updated_at desc: emulate with reverse order.
-	sort.Slice(qs, func(i, j int) bool { return qs[i].QRef > qs[j].QRef })
+	// The real list is updated_at DESC, not number order: return it scrambled
+	// (deterministic permutation; 37 is coprime to 60).
+	shuffled := make([]question, 60)
+	for i := range qs {
+		shuffled[(i*37+11)%60] = qs[i]
+	}
+	qs = shuffled
 
 	var smu sync.Mutex
 	stats := map[string]int{}
@@ -307,10 +361,10 @@ func main() {
 		_ = json.NewEncoder(w).Encode(stats)
 	})
 	mux.HandleFunc("GET /_mock/shas", func(w http.ResponseWriter, r *http.Request) {
-		// sha of question N's first image: /_mock/shas?n=7
-		n := r.URL.Query().Get("n")
+		// sha of the first image of the question at sorted position N: /_mock/shas?n=7
+		n := fmt.Sprintf("math:%s:q%02d", source, atoi(r.URL.Query().Get("n")))
 		for _, q := range qs {
-			if q.Number == n && len(q.Media) > 0 {
+			if q.QRef == n && len(q.Media) > 0 {
 				_, _ = w.Write([]byte(q.Media[0].SHA256 + "\n"))
 				return
 			}

@@ -205,7 +205,10 @@ function render(){
     var optMedia=media.filter(function(m){return m.slot==='option';});
     var shown=0;
     stemMedia.forEach(function(m){ var f=makeImg(m); if(f){ card.appendChild(f); shown++; } });
-    if(shown===0 && optMedia.length===0){ card.appendChild(el('div','noimg','图未入库')); }
+    // Placeholder rules: any displayable media -> show it. No media: figure_status
+    // 'none' (confirmed no figure needed) -> nothing; 'missing', 'unknown', an absent
+    // key, or 'ok' with no media (inconsistent data) -> grey 「图未入库」.
+    if(shown===0 && optMedia.length===0 && q.figure_status!=='none'){ card.appendChild(el('div','noimg','图未入库')); }
 
     var opts=Array.isArray(q.options)?q.options:[];
     if(opts.length){

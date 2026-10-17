@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -342,12 +343,12 @@ func TestSetsShape(t *testing.T) {
 		t.Fatalf("count %d", v.Count)
 	}
 	for i, it := range v.Items {
-		if it.Ordinal != i+1 || it.Number == "" || it.QRef == "" {
+		if it.Ordinal != i+1 || it.Number != fakeNumber(i+1) || it.QRef != fmt.Sprintf("math:q%02d", i+1) {
 			t.Fatalf("item %d: %+v", i, it)
 		}
 	}
 	first := v.Items[0]
-	if first.Number != "1" || len(first.Media) != 2 {
+	if first.Number != "1(1)" || len(first.Media) != 2 {
 		t.Fatalf("first: %+v", first)
 	}
 	// ordered by media ordinal; explanation / invalid / svg entries are dropped
@@ -493,5 +494,61 @@ func TestRedactWriter(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "s3cret-value") || strings.Contains(buf.String(), "a+b%26c") {
 		t.Fatalf("not redacted: %q", buf.String())
+	}
+}
+
+func TestFigureStatusPassThroughAndWarn(t *testing.T) {
+	e := newEnv(t, opts{})
+	_, b := e.do(t, "GET", "/api/sets/"+testSource, "", nil, e.session(t))
+	var v struct {
+		Items []struct {
+			FigureStatus string `json:"figure_status"`
+			Media        []any  `json:"media"`
+		}
+	}
+	must(t, json.Unmarshal(b, &v))
+	want := []string{"ok", "missing", "unknown", "none", "ok", "unknown"} // ok, missing, key absent, none, ok-but-empty, bogus value
+	for i, w := range want {
+		if v.Items[i].FigureStatus != w {
+			t.Errorf("item %d figure_status=%q want %q", i+1, v.Items[i].FigureStatus, w)
+		}
+	}
+	for i, it := range v.Items {
+		if it.FigureStatus == "" {
+			t.Errorf("item %d: figure_status must never be empty", i+1)
+		}
+	}
+	if len(v.Items[4].Media) != 0 {
+		t.Error("q05 should have no media")
+	}
+	logs := e.logs.String()
+	if strings.Count(logs, "figure_status ok but media empty") != 1 || !strings.Contains(logs, "math:q05") {
+		t.Errorf("expected exactly one warn for q05 (ok but empty):\n%s", logs)
+	}
+	if strings.Contains(logs, "math:q01") && strings.Contains(logs, "figure_status ok but media empty qref=math:q01") {
+		t.Error("q01 (ok with media) must not warn")
+	}
+}
+
+// The client may only send source, limit and cursor to the list endpoint; the
+// brain rejects other parameters (and include_answer needs bank:write).
+func TestListQueryOnlySourceLimitCursor(t *testing.T) {
+	e := newEnv(t, opts{})
+	c := e.session(t)
+	e.do(t, "GET", "/api/sets/"+testSource+"?include_answer=true&status=active&subject=math", "", nil, c)
+	e.brain.mu.Lock()
+	defer e.brain.mu.Unlock()
+	if len(e.brain.listQueries) == 0 {
+		t.Fatal("brain not called")
+	}
+	for _, q := range e.brain.listQueries {
+		for k := range q {
+			if k != "source" && k != "limit" && k != "cursor" {
+				t.Errorf("client sent forbidden list parameter %q", k)
+			}
+		}
+		if q.Get("source") != testSource || q.Get("limit") != "500" {
+			t.Errorf("unexpected source/limit: %v", q)
+		}
 	}
 }

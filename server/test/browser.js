@@ -11,6 +11,7 @@ const path = require('path');
 
 const base = process.argv[2], outDir = process.argv[3], chromeBin = process.argv[4] || 'google-chrome';
 const brainDown = process.env.BRAIN_DOWN === '1'; // mode: the site's brain is unreachable
+const allMissing = process.env.ALL_MISSING === '1'; // mode: no figure ingested yet (real brain today)
 const code = process.env.BROWSER_CODE || '';
 if (!base || !outDir || !code) { console.error('usage: BROWSER_CODE=… node browser.js <base> <outdir> [chrome]'); process.exit(2); }
 fs.mkdirSync(outDir, { recursive: true });
@@ -85,6 +86,15 @@ const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); 
   }
   const rendered = await waitFor(`document.querySelectorAll('#qs section.card').length>0`);
   check('login through the form renders questions', rendered);
+  if (allMissing) {
+    await waitFor(`document.querySelectorAll('#qs .noimg').length>0`);
+    const r = await ev(`({cards:document.querySelectorAll('#qs section.card').length, ph:[...document.querySelectorAll('#qs .noimg')].filter(n=>n.textContent.includes('图未入库')).length, imgs:document.images.length})`);
+    check('no figures ingested: all 60 questions render with 「图未入库」 placeholders, no images', r.cards === 60 && r.ph === 60 && r.imgs === 0, JSON.stringify(r));
+    await shot('numberline-all-missing.png');
+    console.log(`\n${results.length - failed}/${results.length} browser checks passed`);
+    chrome.kill('SIGKILL'); await sleep(400); try { fs.rmSync(prof, { recursive: true, force: true }); } catch (_) {}
+    process.exit(failed ? 1 : 0);
+  }
   const total = await ev(`document.querySelectorAll('#qs section.card').length`);
   check('60 question cards', total === 60, 'cards=' + total);
   await ev(`document.querySelectorAll('#qs img').forEach(i=>{i.loading='eager'}); 1`);
@@ -93,17 +103,22 @@ const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); 
     const cards=[...document.querySelectorAll('#qs section.card')];
     const withImg=cards.filter(c=>c.querySelector('.fig img'));
     const loaded=[...document.images].filter(i=>i.naturalWidth>0).length;
-    const placeholders=cards.filter(c=>[...c.querySelectorAll('.noimg')].some(n=>n.textContent.includes('图未入库'))).map(c=>c.querySelector('.qno').textContent);
-    // image must sit below the stem
+    const placeholders=cards.filter(c=>[...c.querySelectorAll('.noimg')].some(n=>n.textContent.includes('图未入库'))).map(c=>c.id);
     let below=0, bad=[];
     withImg.forEach(c=>{ const s=c.querySelector('.stem').getBoundingClientRect(); const i=c.querySelector('.fig img').getBoundingClientRect(); if(i.top>=s.bottom-1) below++; else bad.push(c.id); });
     const broken=[...document.images].filter(i=>i.complete && i.naturalWidth===0).length;
-    return {cards:cards.length, withImg:withImg.length, images:document.images.length, loaded, broken, placeholders, below, bad};
+    const q25=document.getElementById('q25'), q29=document.getElementById('q29');
+    return {cards:cards.length, withImg:withImg.length, images:document.images.length, loaded, broken, placeholders, below, bad,
+      q25_img:!!q25.querySelector('img'), q25_noimg:!!q25.querySelector('.noimg'), q29_img:!!q29.querySelector('.fig img'), q29_noimg:!!q29.querySelector('.noimg'),
+      labels:[1,36,38,60].map(n=>document.querySelector('#q'+n+' .qno').textContent)};
   })()`);
   console.log('  dom:', JSON.stringify(st));
-  check('every image loaded (no broken images)', st.broken === 0 && st.loaded === st.images && st.images >= 59, `images=${st.images} loaded=${st.loaded}`);
-  check('images are below the stem', st.below === st.withImg && st.withImg > 0, `below=${st.below}/${st.withImg}`);
-  check('only the no-media question shows 图未入库', st.placeholders.length === 1 && st.placeholders[0].includes('17'), JSON.stringify(st.placeholders));
+  check('every image loaded (no broken images)', st.broken === 0 && st.loaded === st.images && st.images === 56, `images=${st.images} loaded=${st.loaded}`);
+  check('images are below the stem', st.below === st.withImg && st.withImg === 55, `below=${st.below}/${st.withImg}`);
+  check('placeholder 「图未入库」 only for missing / unknown / absent-key / ok-but-empty (ordinals 17,26,27,28)', JSON.stringify(st.placeholders) === JSON.stringify(['q17','q26','q27','q28']), JSON.stringify(st.placeholders));
+  check('figure_status=none, no media: no placeholder and no image (ordinal 25)', !st.q25_img && !st.q25_noimg);
+  check('figure_status=none but media present: image still shown, no placeholder (ordinal 29)', st.q29_img && !st.q29_noimg);
+  check('question numbers shown verbatim from the library, in sorted order', st.labels[0].includes('第 1(1) 题') && st.labels[1].includes('11(2)①') && st.labels[2].includes('11(2)③') && st.labels[3].includes('18(3)'), JSON.stringify(st.labels));
 
   // answer something; draft must not hold the family code
   await ev(`(() => { const t=document.querySelector('#q31 input[type=text]'); t.value='3'; t.dispatchEvent(new Event('input',{bubbles:true}));
@@ -130,7 +145,7 @@ const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); 
     const url = await ev(`window.__ntfy[0].url`);
     check('payload shape (type/learner/set/answers/qref, no family code)',
       p.type === 'ruyi-mi-numberline-4y-submit' && p.learner === '如意' && p.set.source === 'math-intake.zz-yuekao-numberline-4y' &&
-      p.answers.length === 60 && p.answers.every(a => a.qref && 'typed' in a) && !JSON.stringify(p).includes(code) && p.answers.find(a => a.n === '31').typed === '3',
+      p.answers.length === 60 && p.answers.every(a => a.qref && 'typed' in a) && !JSON.stringify(p).includes(code) && p.answers.find(a => a.ordinal === 31).typed === '3' && p.answers.find(a => a.ordinal === 38).n === '11(2)③',
       'answered=' + p.answered);
     check('ntfy url came from /api/config (https://ntfy.sh/…)', /^https:\/\/ntfy\.sh\/[A-Za-z0-9_-]+$/.test(url));
   } else {

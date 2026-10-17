@@ -143,10 +143,21 @@ get sets "$A/api/sets/$SOURCE" -b "$JAR"; expect "D1 /api/sets 200" "$CODE_HTTP"
 SETS="$WORK/resp/sets.b"
 expect "D2 60 questions" "$(jq '.items|length' "$SETS")" 60
 expect "D3 ordinals 1..60 in order" "$(jq -r '[.items[].ordinal]==[range(1;61)]' "$SETS")" true
-expect "D4 question numbers 1..60 in numeric order (mock list is reversed)" "$(jq -r '[.items[].number|tonumber]==[range(1;61)]' "$SETS")" true
-expect "D5 no-media questions = exactly [17]" "$(jq -c '[.items[]|select(.media|length==0)|.number|tonumber]' "$SETS")" '[17]'
-expect "D6 every other question has >=1 image" "$(jq '[.items[]|select(.media|length>0)]|length' "$SETS")" 59
+# Real numbers look like "1(1)", "11(2)③": the site must sort by (major, minor, suffix), not trust list order.
+echo "Authorization: Bearer $TOKEN" > "$WORK/mockhdr"
+curl -s -H @"$WORK/mockhdr" "http://127.0.0.1:$PORT_MOCK/v1/bank/questions?source=$SOURCE&limit=500" > "$WORK/rawlist.json"
+RAWKEYS='[.items[].number|capture("^(?<a>\\d+)\\((?<b>\\d+)\\)(?<c>.*)$")|[(.a|tonumber),(.b|tonumber),.c]]'
+expect "D4a mock list is NOT in number order (scrambled like updated_at DESC)" "$(jq -r "$RAWKEYS"' as $k | $k != ($k|sort)' "$WORK/rawlist.json")" true
+expect "D4b site output IS sorted by (major, minor, suffix)" "$(jq -r "$RAWKEYS"' as $k | $k == ($k|sort)' "$SETS")" true
+expect "D4c 60 distinct numbers, majors 1..18, includes 11(2)③" "$(jq -r '([.items[].number]|unique|length)==60 and ([.items[].number|capture("^(?<a>\\d+)").a|tonumber]|unique|min==1 and max==18) and ([.items[].number]|index("11(2)③") != null)' "$SETS")" true
+expect "D4d first/last numbers" "$(jq -c '[.items[0].number,.items[59].number]' "$SETS")" '["1(1)","18(3)"]'
+expect "D5 questions with no media = ordinals [17,25,26,27,28]" "$(jq -c '[.items[]|select(.media|length==0)|.ordinal]' "$SETS")" '[17,25,26,27,28]'
+expect "D6 questions with >=1 image" "$(jq '[.items[]|select(.media|length>0)]|length' "$SETS")" 55
+expect "D6b figure_status passed through (absent key -> unknown)" "$(jq -c '[.items[]|select(.figure_status!="ok")|[.ordinal,.figure_status]]' "$SETS")" '[[17,"missing"],[25,"none"],[26,"unknown"],[27,"unknown"],[29,"none"],[30,"unknown"]]'
+expect "D6c figure_status is never empty" "$(jq -r '[.items[]|.figure_status|length>0]|all' "$SETS")" true
 expect "D7 image urls are rewritten to /api/media/{source}/{sha}" "$(jq -r '[.items[].media[].url|startswith("/api/media/'"$SOURCE"'/")]|all' "$SETS")" true
+expect "D8a items without options omit the key (fill_blank)" "$(jq -r '[.items[30:][]|has("options")]|any' "$SETS")" false
+expect "D8b no answer/explanation fields in output" "$(jq -r '[.items[]|keys[]]|map(select(.=="answer" or .=="explanation"))|length' "$SETS")" 0
 expect "D8 each item carries a qref" "$(jq -r '[.items[].qref|length>0]|all' "$SETS")" true
 expect "D9 choice options passed through (Q1 has A-D)" "$(jq -c '[.items[0].options[].key]' "$SETS")" '["A","B","C","D"]'
 expect "D10 Q5 has stem image + option-B image" "$(jq -c '[.items[4].media[]|[.slot,(.option_key // "")]]' "$SETS")" '[["stem",""],["option","B"]]'
@@ -156,9 +167,11 @@ for u in $(jq -r '.items[].media[].url' "$SETS"); do
   CODE_HTTP=$(curl -s -b "$JAR" -D "$WORK/resp/img.h" -o "$WORK/resp/img.b" -w '%{http_code}' "$A$u")
   if [ "$CODE_HTTP" = 200 ] && head -c 8 "$WORK/resp/img.b" | od -An -c | tr -d ' ' | grep -q 'PNG' && grep -qi '^content-type: image/png' "$WORK/resp/img.h"; then okimg=$((okimg+1)); else badimg=$((badimg+1)); fi
 done
-[ "$badimg" = 0 ] && [ "$okimg" = 60 ] && ok "D11 all $okimg images fetched: 200, PNG magic, Content-Type image/png" || bad "D11 images" "ok=$okimg bad=$badimg"
+[ "$badimg" = 0 ] && [ "$okimg" = 56 ] && ok "D11 all $okimg images fetched: 200, PNG magic, Content-Type image/png" || bad "D11 images" "ok=$okimg bad=$badimg"
 u7=$(jq -r '.items[6].media[0].url' "$SETS"); get img "$A$u7" -b "$JAR"
 grep -qi '^cache-control: private' "$WORK/resp/img.h" && ok "D12 image Cache-Control: private" || bad "D12 Cache-Control"
+# the site must never ask the brain for answers: the mock rejects unknown query keys, and include_answer would be one
+grep -q 'include_answer' "$SRV/internal/brain/brain.go" && bad "D12b include_answer referenced in client code" || ok "D12b client code never references include_answer / status / other list parameters"
 # source / sha injection
 for s in '..%2f..%2fv1%2fbank%2fsources' 'a%2fb' "$SOURCE%3Finclude_answer%3Dtrue" 'MATH' 'other.valid-source' '%2e%2e'; do
   get inj "$A/api/sets/$s" -b "$JAR"; [ "$CODE_HTTP" = 404 ] && ok "D13 sets source '$s' -> 404" || bad "D13 sets source '$s'" "got $CODE_HTTP"
@@ -180,7 +193,7 @@ get img "$A/api/media/$SOURCE/$(jq -r '.items[8].media[0].sha256 // empty' "$SET
 get img "$A$u7" -b "$JAR"; expect "E5 image still 200 after brain rotated its ticket key (ticket_invalid -> refresh)" "$CODE_HTTP" 200
 # "reload the page": all images again
 badimg=0; for u in $(jq -r '.items[].media[].url' "$SETS"); do c=$(curl -s -b "$JAR" -o /dev/null -w '%{http_code}' "$A$u"); [ "$c" = 200 ] || badimg=$((badimg+1)); done
-expect "E6 after expiry, reload fetches all 60 images (no broken)" "$badimg" 0
+expect "E6 after expiry, reload fetches all 56 images (no broken)" "$badimg" 0
 expect "E7 Authorization never sent on ticketed image GET" "$(MSTAT | jq '.media_with_authorization // 0')" 0
 
 section "F. Criterion 2 — no token / ticket / secrets in anything the browser can see"
@@ -282,6 +295,7 @@ grep -qE 'v1\.[0-9]{9,11}\.[0-9a-f]{20,}' "$WORK/alllogs" && bad "K3 ticket-shap
 cat "$WORK"/A4.log >> "$WORK/alllogs"
 grep -qiE "bearer|authorization|ticket=|cookie:|set-cookie|QUERYMARK|HDRMARK|COOKIEMARK" "$WORK/alllogs" && bad "K4 header/query material in logs" || ok "K4 request with ?ticket=…, Authorization and Cookie headers left no trace in logs (query/headers never logged)"
 grep -q 'path=/index.html ' "$WORK/alllogs" && ok "K4b the request itself was logged (path only)" || bad "K4b request line missing"
+grep -q 'figure_status ok but media empty qref=math:intake' "$WORK/alllogs" || grep -q 'figure_status ok but media empty' "$WORK/alllogs" && ok "K6 inconsistent figure_status=ok/no media produced a warn log (qref only)" || bad "K6 warn log missing"
 grep -q 'login failed' "$WORK/alllogs" && grep -q 'brain request failed' "$WORK/alllogs" && ok "K5 failure events are logged (sanity: logs are not empty)" || bad "K5 sanity"
 say "     sample log lines (verbatim):"; { grep 'login failed' "$WORK/alllogs" | head -1; grep 'brain request failed' "$WORK/alllogs" | head -1; grep 'msg=request' "$WORK/alllogs" | head -1; } | sed 's/^/       /' | tee -a "$RESULTS"
 
@@ -292,6 +306,14 @@ if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/d
   cat "$WORK/browser.out" | tee -a "$RESULTS"
   [ "$BRC" = 0 ] && ok "L1 browser checks (all passed)" || bad "L1 browser checks"
   kill "$PID_BR" 2>/dev/null
+  start_mock mockNM 18201 MOCK_NO_MEDIA=1; wait_http "http://127.0.0.1:18201/_mock/stats"
+  start_site NM 18202 "http://127.0.0.1:18201"; wait_http "http://127.0.0.1:18202/healthz"
+  post_login nm "http://127.0.0.1:18202" "$CODE" -c "$WORK/jarNM"; get nm "http://127.0.0.1:18202/api/sets/$SOURCE" -b "$WORK/jarNM"
+  expect "M1 brain has no figures yet (today's real state): 60 questions, all with empty media" "$(jq -c '[(.items|length),([.items[]|select(.media|length==0)]|length)]' "$WORK/resp/nm.b")" '[60,60]'
+  ALL_MISSING=1 BROWSER_CODE="$CODE" node "$HERE/browser.js" "http://127.0.0.1:18202" "$SHOTS" > "$WORK/browser3.out" 2>&1; BRC=$?
+  cat "$WORK/browser3.out" | tee -a "$RESULTS"
+  [ "$BRC" = 0 ] && ok "L3 whole page of placeholders when no figure is ingested (all passed)" || bad "L3 all-missing browser check"
+  kill "$PID_NM" 2>/dev/null
   start_site BRD 18200 "http://127.0.0.1:1"; wait_http "http://127.0.0.1:18200/healthz"
   BRAIN_DOWN=1 BROWSER_CODE="$CODE" node "$HERE/browser.js" "http://127.0.0.1:18200" "$SHOTS" > "$WORK/browser2.out" 2>&1; BRC=$?
   cat "$WORK/browser2.out" | tee -a "$RESULTS"

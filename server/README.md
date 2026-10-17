@@ -13,7 +13,7 @@
 | `GET /api/session` | `{"authenticated":bool}` |
 | `POST /api/logout` | 清 cookie |
 | `GET /api/config` | 需 cookie。`{"ntfy_url":"https://ntfy.sh/<topic>"|null}`，topic 来自 `RUYI_NTFY_TOPIC` |
-| `GET /api/sets/{source}` | 需 cookie。题目列表（见下），图 URL 改写为 `/api/media/{source}/{sha256}` |
+| `GET /api/sets/{source}` | 需 cookie。题目列表（见下），按题号排序，图 URL 改写为 `/api/media/{source}/{sha256}`，附 `figure_status` |
 | `GET /api/media/{source}/{sha256}` | 需 cookie。服务端取票→取图→回图（`Content-Type: image/*`，`Cache-Control: private`） |
 
 没有 cookie → 401。服务端**不写大脑**，不放任何密钥进页面。
@@ -26,6 +26,17 @@ POST /v1/media/{sha256}/ticket                           Authorization: Bearer <
 GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 ```
 
+- 列表请求**只发 `source`、`limit`、`cursor`** 三个参数（大脑只接受 13 个已知参数，其余 400；`include_answer` 需要 `bank:write`，**本服务绝不发**，也不发 `status`）。一次 `limit=500` 取完（数轴卷 active 共 60 题），按 `next_cursor` 翻页直到 `null`。
+- 返回字段：`qref, number, qtype, stem, options, media, figure_status`；`options`/`number` 没有时键省略；默认不含答案/讲解。
+- **题号排序**：`number` 是字符串，形如 `1(1)`、`11(2)③`、`18(4)`。服务端用 `^(\d+)\((\d+)\)(.*)$` 取（大题号, 小题号, 后缀）排序，后缀按字符串比较；解析不到（含没有 number）的排最后，保持原顺序（稳定）。页面显示库里的 `number` 原文；另给 1..N 的位置序号 `ordinal`。
+- **缺图语义**（`figure_status` 是大脑新增的只读派生字段，**可选**，缺键 = `unknown`）：
+  | 情况 | 页面 |
+  |---|---|
+  | 有 media（stem/figure/option） | 显示图（`none` 但有 media 也照样显示） |
+  | 无 media，`missing` / `unknown` / 缺键 / 其他值 | 灰底「图未入库」 |
+  | 无 media，`none` | 不显示任何占位 |
+  | 无 media，`ok`（数据不一致） | 灰底「图未入库」，服务端记一条 warn（只含 qref） |
+  **注意：数轴卷目前 60 题的图都还没入库，真实环境里整页都是占位，这是预期。**
 - 票据缓存到过期前 30 秒；取图遇 401（`ticket_expired` / `ticket_invalid`）→ 丢弃票据、重取一次、重试一次。
 - 只转发 png/jpeg/gif/webp（不转 svg）；响应体上限：列表 8 MiB、图 5 MiB；超时：列表 10 s、图 20 s；不跟随重定向。
 - `source` 必须匹配 `^[a-z0-9][a-z0-9_.:-]{1,127}$` **且**在 `RUYI_ALLOWED_SOURCES` 内（默认只有 `math-intake.zz-yuekao-numberline-4y`）；
@@ -83,4 +94,4 @@ make acceptance  # 起 mock 大脑 + 新服务，跑 test/acceptance.sh（含无
 - 来源 IP 取自 TCP 对端地址，不信任 `X-Forwarded-For`。若以后放在反向代理后面，限速会变成"所有人共用一个 IP"，需要先加可信代理配置。
 - 目前是明文 http；家庭码与 cookie 可被链路窃听（方案已记录）。
 - 页面用 `textContent` 渲染题干，题干里若有 LaTeX/Markdown 会原样显示。
-- 没有"检查客观题"：`bank:read` 取不到标准答案（`include_answer` 需要 `bank:write`），页面不编造答案。
+- 没有"检查客观题"：`bank:read` 取不到标准答案（`include_answer` 无 `bank:write` 返回 403），服务端也绝不发该参数，页面不编造答案。

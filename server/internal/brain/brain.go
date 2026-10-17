@@ -440,12 +440,21 @@ func SortQuestions(qs []Question) {
 // FindMedia looks up a sha256 in the cached list of source. If it is unknown
 // and the cache is not fresh from this instant, it refreshes once.
 func (c *Client) FindMedia(ctx context.Context, source, sha string) (*Media, error) {
+	return c.FindMediaWhere(ctx, source, sha, nil)
+}
+
+// FindMediaWhere is FindMedia restricted to questions for which keep returns
+// true (nil keeps all).
+func (c *Client) FindMediaWhere(ctx context.Context, source, sha string, keep func(Question) bool) (*Media, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		items, err := c.Source(ctx, source, attempt == 1)
 		if err != nil {
 			return nil, err
 		}
 		for _, q := range items {
+			if keep != nil && !keep(q) {
+				continue
+			}
 			for i := range q.Media {
 				if q.Media[i].SHA256 == sha {
 					m := q.Media[i]

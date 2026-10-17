@@ -34,6 +34,13 @@ import (
 
 const source = "math-intake.zz-yuekao-numberline-4y"
 
+// practiceSource is a second, purely synthetic source with 5 math questions in
+// the shape of the real exam list (Markdown + LaTeX stems, ________ blanks,
+// options with math). Nothing here is copied from a real paper. Every question
+// also carries answer/explanation/solution fields (as a brain with a write
+// token would send) so tests can prove the site strips them.
+const practiceSource = "math.synthetic.p0-demo"
+
 var digits = map[rune][5]string{
 	'0': {"111", "101", "101", "101", "111"}, '1': {"010", "110", "010", "010", "111"},
 	'2': {"111", "001", "111", "100", "111"}, '3': {"111", "001", "111", "001", "111"},
@@ -104,6 +111,33 @@ type question struct {
 	// FigureStatus is a pointer so that "key absent" can be mocked (the brain
 	// has not shipped the field yet).
 	FigureStatus *string `json:"figure_status,omitempty"`
+	// Only on practiceSource questions: must never reach a browser.
+	Answer      string `json:"answer,omitempty"`
+	Explanation string `json:"explanation,omitempty"`
+	Solution    string `json:"solution,omitempty"`
+}
+
+func practiceQuestions() []question {
+	mk := func(n int, qtype, stem, opts string) question {
+		q := question{QRef: fmt.Sprintf("example.set:math:%d", n), Subject: "math", Source: practiceSource, Set: "demo",
+			Number: strconv.Itoa(n), QType: qtype, Stem: stem, Media: []media{},
+			Answer: "MOCK-ANSWER-MARKER", Explanation: "MOCK-EXPLANATION-MARKER", Solution: "MOCK-SOLUTION-MARKER"}
+		if opts != "" {
+			q.Options = json.RawMessage(opts)
+		}
+		return q
+	}
+	return []question{
+		// 1: inline fractions, absolute value, sub/superscripts, a $$ block, 3 blanks
+		mk(1, "short_answer", "设 $m=-4$，$n=\\dfrac{2}{5}$，$k$ 为整数。\n\n(1) 计算 $\\left|m\\right|\\cdot n+k^{2}-m_{1}$ 得 ________ ；\n(2) 若 $t^{2}=16$，则 $t=$ ________ 或 ________ 。\n\n$$P=\\dfrac{m+n}{3}\\cdot w$$", ""),
+		// 2: choice, math in the stem and the options, a full-width paren blank
+		mk(2, "single_choice", "下列各数中，绝对值最小的是（ ）", `[{"key":"A","text":"$-2$","answer":true},{"key":"B","text":"$\\left|-\\dfrac{1}{3}\\right|$"},{"key":"C","text":"$0.5$"},{"key":"D","text":"$\\dfrac{3}{2}$"}]`),
+		// 3: escaping traps: | and < inside math, \\ row separator in a block, HTML-looking text, **bold**, `code`, full-width blanks
+		mk(3, "calculation", "**解方程组**（注意 `x<y` 的写法，下面这段 <script>window.__pwned=1</script> 只是文字）：\n\n$$\\begin{cases}x+y=3\\\\x-y=1\\end{cases}$$\n\n已知 $|x|<2$，求 $x=$ ＿＿＿＿＿ ，$y=$ ________ 。", ""),
+		// 4, 5: alternates, not in the demo set (4 has no blank and no options: a free-form answer area)
+		mk(4, "calculation", "（备选）计算 $\\dfrac{1}{2}+\\dfrac{1}{3}$，写出过程与结果。", ""),
+		mk(5, "single_choice", "（备选）$2^{3}$ 等于（ ）", `[{"key":"A","text":"$6$"},{"key":"B","text":"$8$"}]`),
+	}
 }
 
 func selfSigned() tls.Certificate {
@@ -258,6 +292,12 @@ func main() {
 				apiErr(w, 400, "invalid_query")
 				return
 			}
+		}
+		if r.URL.Query().Get("source") == practiceSource {
+			bump("list_practice")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": practiceQuestions(), "next_cursor": nil})
+			return
 		}
 		if r.URL.Query().Get("source") != source {
 			w.Header().Set("Content-Type", "application/json")

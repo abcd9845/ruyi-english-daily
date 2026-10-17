@@ -18,6 +18,8 @@ import (
 	"github.com/abcd9845/ruyi-english-daily/server/internal/auth"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/brain"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/config"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/embedded"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/sets"
 )
 
 const (
@@ -37,6 +39,10 @@ type Deps struct {
 	Log     *slog.Logger
 	Sources []string
 	Topic   string
+	// Sets is the practice-set registry (RUYI_SETS_FILE); nil/empty = no sets.
+	Sets *sets.Registry
+	// Embedded serves the compiled-in practice page and KaTeX; nil = none.
+	Embedded *embedded.Handler
 }
 
 // Server is the top-level http.Handler.
@@ -113,6 +119,8 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	case p == "/api" || strings.HasPrefix(p, "/api/"):
 		h.Set("Cache-Control", "no-store")
 		s.api(w, r)
+	case s.Embedded != nil && s.Embedded.Handles(p):
+		s.Embedded.ServeHTTP(w, r)
 	default:
 		s.Static.ServeHTTP(w, r)
 	}
@@ -132,6 +140,13 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(p, "/api/sets/"):
 		src := strings.TrimPrefix(p, "/api/sets/")
 		s.need(w, r, http.MethodGet, s.authed(func(w http.ResponseWriter, r *http.Request) { s.sets(w, r, src) }))
+	case p == "/api/practice" || strings.HasPrefix(p, "/api/practice/"):
+		if s.Sets.Len() == 0 {
+			writeErr(w, http.StatusNotFound, "not_found", "")
+			return
+		}
+		id := strings.TrimPrefix(strings.TrimPrefix(p, "/api/practice"), "/")
+		s.need(w, r, http.MethodGet, s.authed(func(w http.ResponseWriter, r *http.Request) { s.practice(w, r, id) }))
 	case strings.HasPrefix(p, "/api/media/"):
 		rest := strings.TrimPrefix(p, "/api/media/")
 		i := strings.IndexByte(rest, '/')
@@ -297,12 +312,23 @@ func (s *Server) sets(w http.ResponseWriter, r *http.Request, source string) {
 }
 
 func (s *Server) media(w http.ResponseWriter, r *http.Request, source, sha string) {
-	if !s.validSource(source) || !brain.ValidSHA(sha) {
+	if len(source) > 128 || !s.srcRe.MatchString(source) || !brain.ValidSHA(sha) {
 		writeErr(w, http.StatusNotFound, "not_found", "")
 		return
 	}
 	// Only figures that belong to this source's current questions are served.
-	if _, err := s.Brain.FindMedia(r.Context(), source, sha); err != nil {
+	// A source that is allowed only through a practice set serves just the
+	// figures of that set's whitelisted questions.
+	var keep func(brain.Question) bool
+	switch {
+	case s.allow[source]:
+	case s.Sets.HasSource(source):
+		keep = func(q brain.Question) bool { return s.Sets.AllowsQRef(source, q.QRef) }
+	default:
+		writeErr(w, http.StatusNotFound, "not_found", "")
+		return
+	}
+	if _, err := s.Brain.FindMediaWhere(r.Context(), source, sha, keep); err != nil {
 		s.brainErr(w, "media-lookup", err)
 		return
 	}

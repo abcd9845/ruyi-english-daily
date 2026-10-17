@@ -62,6 +62,7 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 | `RUYI_LOG_LEVEL` | 否 | `debug`/`info`（默认）/`warn`/`error` |
 | `RUYI_NTFY_TOPIC` | 否 | 动态页提交用的 ntfy topic，登录后由 `/api/config` 下发；未设则按钮显示「提交通道未配置」 |
 | `RUYI_ALLOWED_SOURCES` | 否 | 逗号分隔的 source 白名单 |
+| `RUYI_SETS_FILE` | 否 | 练习套配置 JSON（见下「通用套练习页」）。未设 → 没有套，`/api/practice/*` 404，其余功能不变。文件有误启动即退出，报错只写位置不写内容 |
 
 日志输出到 stderr（journald），只记方法、路径（不含 query）、状态码、耗时、来源 IP；另有一层写入器把所有已配置的秘密值（令牌、家庭码、会话密钥、topic）替换成 `[redacted]`。
 
@@ -69,6 +70,28 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 
 `static-allowlist.txt` 由 `make allowlist`（`scripts/gen-allowlist.sh`）从 `git ls-files` 生成：仓库里除 `server/`、`docs/`、`.gitignore` 以外的所有受跟踪文件（旧页 17 个 + `m/numberline-4y/index.html`）。
 `go test` 会拿它与 `git ls-files` 比对，不一致就失败；新增页面 = 改清单 + 重新编译，需要评审。清单编进二进制，不读磁盘上的清单。
+
+## 通用套练习页（P0，Issue #10）
+
+一套题 = 一个页面：`/m/practice/?set=<id>`，题目由 `RUYI_SETS_FILE` 配置，公式用本地 KaTeX 渲染。**本期不提交、不判分、不发 ntfy**，只作答并把草稿存在本机。
+
+套配置（样例 `deploy/sets.example.json`，只有占位 qref；真实套的 qref 只放在部署环境的文件里，不进仓库）：
+
+```json
+{"sets":[{"id":"demo-1","title":"示例套","source":"<大脑 source key>","qrefs":["<qref>","<qref>"]}]}
+```
+
+- `id` 必须匹配 `[a-z0-9_-]{1,64}`、不得重复；`qrefs` 不能空、不得重复；未知字段、尾随内容都会报错。
+- `GET /api/practice/{set_id}`（需登录）：用现有只读大脑接口拉整卷（只发 `source/limit/cursor`），按 qrefs 白名单过滤、按配置顺序返回
+  `{set_id,title,items:[{ordinal,qref,qtype,stem_md,options?:[{key,text_md}],blanks?,figure_status,media}],missing_qrefs}`。
+  不返回答案/解析（客户端只解码需要的字段，且从不发 `include_answer`）。配置里有但库里没取到的 qref 进 `missing_qrefs`（不 500）。
+  `blanks` = 题干**非公式部分**里连续 ≥4 个 `_`/`＿` 的段数（与页面画的输入框数一致）。
+- 图片仍走 `/api/media/{source}/{sha256}`；只因套而开放的 source 只放行白名单题目的图，`/api/sets/{source}` 对它仍是 404。
+- 页面 `server/web/m/practice/index.html` 与 KaTeX（`server/vendor/katex`，仅 woff2，版本与哈希见 `vendor/README.md`）都 `go:embed` 进二进制：**部署不需要往 ECS 静态目录拷这些文件**。
+  `/vendor/katex/…` 只放行内嵌的精确文件，其它 `/vendor/…` 都是 404；页面带 CSP（`default-src 'none'`，只允许本站脚本/样式/字体/连接）。
+- 页面 Markdown 只支持最小安全子集：先转义 HTML，再保护数学片段，处理段落、换行、`**粗体**`、`` `行内代码` ``；公式 `$…$` `$$…$$` `\(…\)` `\[…\]`（`trust` 关，解析失败回退原文）。
+- 草稿键 `ruyi-practice-<set_id>-v1`（`{v,set,a:{qref:答案},t}`，不含家庭码）；作答区比旧页大、字号 18px、触控目标 ≥44px。
+- 图：只有大脑明确标 `figure_status=missing` 的题才显示「图未入库」灰块；`unknown/none` 不显示（本期的题本来就没有图）。
 
 ## 构建与测试
 
@@ -95,5 +118,5 @@ make acceptance  # 起 mock 大脑 + 新服务，跑 test/acceptance.sh（含无
 
 - 来源 IP 取自 TCP 对端地址，不信任 `X-Forwarded-For`。若以后放在反向代理后面，限速会变成"所有人共用一个 IP"，需要先加可信代理配置。
 - 目前是明文 http；家庭码与 cookie 可被链路窃听（方案已记录）。
-- 页面用 `textContent` 渲染题干，题干里若有 LaTeX/Markdown 会原样显示。
+- 数轴页（`/m/numberline-4y/`）用 `textContent` 渲染题干，不解析 LaTeX/Markdown；通用练习页才解析。
 - 没有"检查客观题"：`bank:read` 取不到标准答案（`include_answer` 无 `bank:write` 返回 403），服务端也绝不发该参数，页面不编造答案。

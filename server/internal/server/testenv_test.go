@@ -26,6 +26,7 @@ import (
 	"github.com/abcd9845/ruyi-english-daily/server/internal/brain"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/config"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/embedded"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/mockqueue"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/server"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/sets"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/staticfiles"
@@ -71,10 +72,11 @@ type fakeBrain struct {
 	// "idem" (409 idempotency_conflict) | "unknown" (404 unknown_qref)
 	gradeMode   string
 	gradeReqs   [][]byte
-	gradeAuths  []string          // Authorization header of every grade call
-	gradeSeen   map[string]string // ps:<cid>:<qref> -> canonical answer
-	gradeIDs    map[string]int64  // ps:<cid>:<qref> -> attempt id
-	gradeDayCnt map[string]int    // qref -> writes today
+	gradeAuths  []string             // Authorization header of every grade call
+	gradeSeen   map[string]string    // ps:<cid>:<qref> -> canonical answer
+	gradeIDs    map[string]int64     // ps:<cid>:<qref> -> attempt id
+	gradeAt     map[string]time.Time // ps:<cid>:<qref> -> answered_at the key was created with (zero = none)
+	gradeDayCnt map[string]int       // qref -> writes today
 	gradeSeq    int64
 	gradeQuery  []string // raw query of every grade call (must stay empty)
 	gradeBank   int      // grade calls that used the bank:read token (must stay 0)
@@ -89,6 +91,11 @@ type fakeBrain struct {
 	pickAuths  []string
 	pickBank   int // pick-practice calls that used the bank:read token (refused with 403)
 
+	// pending-answer queue mock (contract v1.0) and its third (notify) token
+	q           *mockqueue.Mock
+	notifyToken string
+	queueHints  bool // grade items carry queueable / queueable_reason
+
 	// brainID is the one brain this fake serves (the real brain's token scope); "" = "ruyi".
 	brainID string
 }
@@ -101,7 +108,7 @@ func (f *fakeBrain) wantBrain() string {
 }
 
 func newFakeBrain(t *testing.T) *fakeBrain {
-	f := &fakeBrain{token: rnd(t, "tok-"), gradeToken: rnd(t, "gtok-"), calls: map[string]int{}, gradeSeen: map[string]string{}, gradeIDs: map[string]int64{}, gradeDayCnt: map[string]int{}, revs: map[string]int{}}
+	f := &fakeBrain{token: rnd(t, "tok-"), gradeToken: rnd(t, "gtok-"), calls: map[string]int{}, gradeSeen: map[string]string{}, gradeIDs: map[string]int64{}, gradeAt: map[string]time.Time{}, gradeDayCnt: map[string]int{}, revs: map[string]int{}}
 	mux := http.NewServeMux()
 	jerr := func(w http.ResponseWriter, code int, c string) { jerrf(w, code, c) }
 	mux.HandleFunc("GET /v1/bank/questions", func(w http.ResponseWriter, r *http.Request) {
@@ -190,10 +197,51 @@ func newFakeBrain(t *testing.T) *fakeBrain {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(pngBytes)
 	})
+	f.notifyToken = rnd(t, "ntok-")
+	f.q = mockqueue.New(mockqueue.Config{Brain: "ruyi", WriteToken: f.gradeToken, NotifyToken: f.notifyToken, Env: fakeQueueEnv{f}})
+	f.q.Register(mux)
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Server.Close)
 	return f
 }
+
+// fakeQueueEnv is the grade-side state the queue mock shares (attempt ids, day counts).
+type fakeQueueEnv struct{ f *fakeBrain }
+
+var fakeKnownQ = regexp.MustCompile(`^example\.set:(math|open):[1-9]$`)
+
+func (e fakeQueueEnv) Lookup(q string) (string, bool) {
+	return "pending_key", fakeKnownQ.MatchString(q)
+}
+func (e fakeQueueEnv) Attempt(key string) (int64, bool) {
+	e.f.mu.Lock()
+	defer e.f.mu.Unlock()
+	id, ok := e.f.gradeIDs[key]
+	return id, ok
+}
+func (e fakeQueueEnv) DayCount(q string) int {
+	e.f.mu.Lock()
+	defer e.f.mu.Unlock()
+	return e.f.gradeDayCnt[q]
+}
+func (e fakeQueueEnv) Seen(key string) (string, time.Time, bool) {
+	e.f.mu.Lock()
+	defer e.f.mu.Unlock()
+	_, ok := e.f.gradeIDs[key]
+	return "", e.f.gradeAt[key], ok
+}
+func (e fakeQueueEnv) Write(key, q, canon string, at time.Time) int64 {
+	e.f.mu.Lock()
+	defer e.f.mu.Unlock()
+	e.f.gradeAt[key] = at
+	e.f.gradeSeq++
+	e.f.gradeIDs[key] = e.f.gradeSeq
+	e.f.gradeSeen[key] = canon
+	e.f.gradeDayCnt[q]++
+	e.f.calls["queue_new_attempt"]++
+	return e.f.gradeSeq
+}
+func (e fakeQueueEnv) Now() time.Time { return time.Now() }
 
 func (f *fakeBrain) curRev(q string) int {
 	if v, ok := f.revs[q]; ok {
@@ -586,8 +634,26 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 				f.gradeIDs[key] = f.gradeSeq
 				o["attempt_id"] = f.gradeSeq
 				f.gradeSeen[key] = a
+				if it.AnsweredAt != "" {
+					if t, err := time.Parse(time.RFC3339, it.AnsweredAt); err == nil {
+						f.gradeAt[key] = t
+					}
+				}
+				if f.gradeMode != "cap3" {
+					f.gradeDayCnt[ref]++ // the real brain counts every new write; cap3 does its own counting above
+				}
 				f.calls["grade_new_item"]++
 				newWrites = true
+			}
+		}
+		if f.queueHints {
+			st, _ := o["status"].(string)
+			qb, qr := f.q.Queueable(ref, st)
+			o["queueable"] = qb
+			if qr == "" {
+				o["queueable_reason"] = nil
+			} else {
+				o["queueable_reason"] = qr
 			}
 		}
 		items = append(items, o)
@@ -663,6 +729,7 @@ type env struct {
 	au      *auth.Authenticator
 	staticD string
 	app     *server.Server
+	qDir    string
 }
 
 type opts struct {
@@ -691,6 +758,18 @@ type opts struct {
 	gradeAsRead bool   // configure the site's grade token as the fake's bank:read token (a token without the write scope)
 	brainID     string // the site's configured brain id (RUYI_BRAIN_ID); "" = unset
 	fakeBrainID string // the only brain id the fake brain serves; "" = ruyi
+
+	// pending-answer queue (S1)
+	queue            bool          // RUYI_QUEUE_ENABLED (needs grade)
+	queueNotify      bool          // poller configured (EnableNotify; no background goroutine unless queueLoop)
+	queueLoop        bool          // run StartQueue (sweep + poller goroutines)
+	queueDir         string        // "" = a fresh temp dir
+	queuePoll        time.Duration // 0 = 45s
+	queueSweep       time.Duration
+	queueQuiet       time.Duration
+	queueHook        func(stage string) bool
+	queueNoHint      bool   // the fake's grade carries no queueable hints
+	queueNotifyToken string // overrides the notify token the site is configured with
 }
 
 func newEnv(t *testing.T, o opts) *env {
@@ -699,6 +778,9 @@ func newEnv(t *testing.T, o opts) *env {
 	if o.reuse != nil {
 		e.brain, e.code, e.secret, e.topic = o.reuse.brain, o.reuse.code, o.reuse.secret, o.reuse.topic
 		o.attemptsDir = o.reuse.attDir
+		if o.queueDir == "" {
+			o.queueDir = o.reuse.qDir
+		}
 	}
 	if o.noTopic {
 		e.topic = ""
@@ -730,11 +812,23 @@ func newEnv(t *testing.T, o opts) *env {
 	if o.gradeAsRead {
 		gt = e.brain.token
 	}
-	bc, err := brain.New(brain.Config{BaseURL: u, Token: e.brain.token, GradeToken: gt, BrainID: o.brainID})
+	nt := ""
+	if o.queue && o.queueNotify {
+		nt = e.brain.notifyToken
+		if o.queueNotifyToken != "" {
+			nt = o.queueNotifyToken
+		}
+	}
+	e.brain.queueHints = o.queue && !o.queueNoHint
+	bc, err := brain.New(brain.Config{BaseURL: u, Token: e.brain.token, GradeToken: gt, BrainID: o.brainID, NotifyToken: nt})
 	must(t, err)
 	e.attDir = o.attemptsDir
 	if e.attDir == "" {
 		e.attDir = filepath.Join(t.TempDir(), "attempts")
+	}
+	e.qDir = o.queueDir
+	if o.queue && e.qDir == "" {
+		e.qDir = filepath.Join(t.TempDir(), "queue")
 	}
 	var att *attempts.Store
 	if !o.noAttempts {
@@ -764,8 +858,18 @@ func newEnv(t *testing.T, o opts) *env {
 	must(t, err)
 	app := server.New(server.Deps{Auth: e.au, Limiter: server.NewLimiter(), Brain: bc, Static: h, Log: log,
 		Sources: []string{testSource}, Topic: e.topic, Sets: reg, Embedded: emb,
-		Attempts: att, NtfyBase: ntfy, NtfyRetryDelay: retry, NtfyAttemptTimeout: o.ntfyTimeout, NtfyRequestWait: o.ntfyWait, GradeMaxPerHour: o.maxPerHour, AutoSources: o.auto, AutoTTL: o.autoTTL, SkipDeferred: o.skipDeferred, Now: o.now})
+		Attempts: att, NtfyBase: ntfy, NtfyRetryDelay: retry, NtfyAttemptTimeout: o.ntfyTimeout, NtfyRequestWait: o.ntfyWait, GradeMaxPerHour: o.maxPerHour, AutoSources: o.auto, AutoTTL: o.autoTTL, SkipDeferred: o.skipDeferred, Now: o.now,
+		Queue: bc, QueueEnabled: o.queue, QueueNotify: o.queueNotify, QueueDir: e.qDir, QueuePoll: o.queuePoll, QueueSweep: o.queueSweep, QueueQuiet: o.queueQuiet, QueueHook: o.queueHook, QueueViewTTL: time.Nanosecond,
+		QueueJitter: func() float64 { return 0 }})
 	e.app = app
+	if o.queue {
+		t.Cleanup(app.CloseQueue)
+		if o.queueLoop {
+			app.StartQueue()
+		} else if o.queueNotify {
+			must(t, app.EnableNotify())
+		}
+	}
 	e.ts = httptest.NewServer(app)
 	t.Cleanup(e.ts.Close)
 	return e

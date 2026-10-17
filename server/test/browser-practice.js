@@ -9,6 +9,8 @@
 // BROWSER_FLOW=smoke: the local test set ?set=smoke-test (needs a sets file with it): answer, 检查, submit; archive-only wording, never 已提交到大脑.
 // BROWSER_FLOW=dailylimit (needs the mock brain with the real daily cap + a site with grading): 「今天约还剩N次」, the confirm
 // dialog, 3 successes then a 429 daily_cap (archived, not recorded), rate_limited wording, 「不入大脑」 badges.
+// BROWSER_FLOW=queue (needs MOCK_URL = a mock brain started with MOCK_QUEUE=1, and a site with RUYI_QUEUE_ENABLED=1): the AI first-pass
+// status under each queued answer: 待解答 → AI 判卷中 → AI初评·待家长核 (full text, escaped), timeout copy, purged, polling schedule, reload.
 // Against the mock brain's synthetic questions. Logs in through the real form, fills
 // answers, reloads, clears; writes mobile-viewport screenshots to <out-dir>.
 const { spawn } = require('child_process');
@@ -137,7 +139,7 @@ async function submitFlow(base, graded, tag) {
   } else {
     check(tag + 'archive-only: heading says 已提交（暂未判分）', res.h === '已提交（暂未判分）' && res.sum === '共 3 题 · 已作答 3 · 未作答 0', res.h + ' / ' + res.sum);
     check(tag + 'archive-only: every question is 待核对 — no ✓/✗ verdict at all', res.vd.every(v => v && v.startsWith('待核对（不入大脑）|vd pend')) && !/[✓✗]/.test(res.page), JSON.stringify(res.vd));
-    check(tag + 'archive-only: page never says 已记入大脑 / 已提交到大脑; every badge and the card say 不入大脑', !res.page.includes('已记入大脑') && !res.page.includes('已提交到大脑') && res.vd.every(v => v.startsWith('待核对（不入大脑）|')) && res.page.includes('暂不入大脑'), 'text scanned: ' + res.page.length + ' chars ' + JSON.stringify(res.vd));
+    check(tag + 'archive-only: page never says 已记入大脑 / 已提交到大脑; every badge and the card say 不入大脑', !res.page.includes('已记入大脑') && !res.page.includes('已提交到大脑') && res.vd.every(v => v.startsWith('待核对（不入大脑）|')) && res.page.includes('答案先存档') && !res.page.includes('家长会'), 'text scanned: ' + res.page.length + ' chars ' + JSON.stringify(res.vd));
   }
   check(tag + 'inputs locked after submitting, 再做一次 offered, submit button hidden', res.locked && res.again && res.submitHidden);
   const ls = await ev(`JSON.parse(localStorage.getItem('ruyi-practice-demo-1-v1'))`);
@@ -216,6 +218,135 @@ const loginAndLoad = async (url, n) => {
   return waitFor(`document.querySelectorAll('#qs section.card').length===${n}`);
 };
 
+
+// S1: the AI first-pass status of queued answers (mock brain with MOCK_QUEUE=1; site with the queue on).
+const mockQ = (op, params) => new Promise((res, rej) => {
+  const u = new URL(process.env.MOCK_URL + '/_mock/queue/' + op + '?' + new URLSearchParams(params));
+  const rq = require('http').request(u, { method: 'POST' }, r => { r.resume(); r.on('end', res); });
+  rq.on('error', rej); rq.end();
+});
+async function queueFlow(base) {
+  const resultShown = `getComputedStyle(document.getElementById('resultCard')).display==='block'`;
+  const cards = n => `document.querySelectorAll('#qs section.card').length===${n}`;
+  const Q3 = 'example.set:math:3';
+  const st3 = () => ev(`(() => { const c = document.querySelector('#qs section[data-qref="${Q3}"] .qst'); return c ? c.getAttribute('data-ui') : null; })()`);
+  const waitUI = (ui, ms) => waitFor(`(() => { const c = document.querySelector('#qs section[data-qref="${Q3}"] .qst'); return !!c && c.getAttribute('data-ui') === ${JSON.stringify(ui)}; })()`, ms || 15000);
+  // the real schedule is 15 s / 60 s: scale every long timer down so the run is quick (the real numbers are asserted below)
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const st = window.setTimeout; window.setTimeout = (f, d, ...a) => st(f, d >= 15000 ? d / 50 : d, ...a); })();` }, sid);
+  check('[queue] demo set loads', await loginAndLoad(base + '/m/practice/?set=demo-1', 3));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid); await waitFor(cards(3));
+  check('[queue] polling schedule: 15 s for the first 5 minutes, then 60 s', await ev(`(() => { const d = window.__ruyiQ.delay; return d(0) === 15000 && d(299999) === 15000 && d(300000) === 60000 && d(3600000) === 60000; })()`));
+
+  const submitOnce = async () => {
+    await fillDemo(); await sleep(400);
+    await ev(`window.confirm = () => true; 1`);
+    await ev(`document.getElementById('btnSubmit').click(); 1`);
+    return waitFor(resultShown);
+  };
+  // --- 1. submit: the unkeyed answer (q3, pending_key) is queued; graded ones are not
+  check('[queue] submit: result card appears', await submitOnce());
+  check('[queue] the queued answer (q3) shows a status box right away (待解答 / 排队 / AI 判卷中)', await waitFor(`!!document.querySelector('#qs section[data-qref="${Q3}"] .qst')`));
+  check('[queue] graded answers (q1, q2) get NO status box', await ev(`document.querySelectorAll('#qs .qst').length === 1`));
+  check('[queue] first status is waiting: 待解答（排队中），预计 24 小时内出结果', await waitUI('waiting') && (await ev(`document.querySelector('#qs .qst .qst-l').textContent`)).includes('预计 24 小时内出结果'), String(await st3()));
+  check('[queue] banner under the heading explains the wait', await waitFor(`!!document.getElementById('qBanner') && document.getElementById('qBanner').textContent.includes('还在等 1 题')`));
+  check('[queue] no upload control and no reanalyze/re-run button anywhere (S2/S3 are not part of S1)',
+    await ev(`document.querySelectorAll('input[type=file]').length === 0 && ![...document.querySelectorAll('button')].some(b => /重新分析|重判|重新判|reanaly/i.test(b.textContent))`));
+  check('[queue] the badge of a queued answer does not say 不入大脑', await ev(`!document.querySelector('#qs section[data-qref="${Q3}"] .vd').textContent.includes('不入大脑')`));
+  await shotEl('queue-waiting.png', '#q3');
+  // --- 2. brain claims it -> AI 判卷中 (the page polls on its own)
+  await mockQ('advance', { qref: Q3, to: 'claimed' });
+  check('[queue] claimed -> AI 判卷中 (picked up by the poll, no reload)', await waitUI('ai_working'));
+  // --- 3. first pass with full text; hostile text is shown as text
+  const evil = '12 <img src=x onerror="window.__xss=1"> $x^2$';
+  await mockQ('advance', { qref: Q3, to: 'compared', answer: evil, rationale: '第一步 <b>粗体</b>\n第二步 $\\dfrac{1}{2}$', compare: 'match' });
+  check('[queue] compared -> AI初评·待家长核', await waitUI('ai_first_pass'));
+  const fp = await ev(`(() => { const q = document.querySelector('#qs section[data-qref="${Q3}"] .qst'); return {label: q.querySelector('.qst-l').textContent, box: (q.querySelector('.aibox')||{}).innerText || '', imgs: q.querySelectorAll('img').length, bold: q.querySelectorAll('b').length, xss: window.__xss === 1, banner: document.getElementById('qBanner').textContent, cmp: (q.querySelector('.qst-c')||{}).textContent}; })()`);
+  check('[queue] first-pass label and the FULL AI text (answer + rationale) are shown, labelled AI初评·待家长核', fp.label === 'AI 初评 · 待家长核' && fp.box.includes('AI初评·待家长核') && fp.box.includes('AI 的答案') && fp.box.includes('12') && fp.box.includes('第一步') && fp.box.includes('第二步'), JSON.stringify(fp));
+  check('[queue] AI text is escaped: no injected <img>, <b>, no script ran', fp.imgs === 0 && fp.bold === 0 && !fp.xss, JSON.stringify([fp.imgs, fp.bold, fp.xss]));
+  check('[queue] math in the AI text is typeset (KaTeX)', await waitFor(`document.querySelectorAll('#qs .aibox .katex').length >= 1`));
+  check('[queue] match: 「两位 AI 助手的答案一致，待家长核」 (never a judgement of the child\'s answer) and the banner (AI 初评已出 1 题（待家长核）)', (fp.cmp || '') === '两位 AI 助手的答案一致，待家长核' && !/和你的|你答/.test(fp.cmp || '') && fp.banner.includes('AI 初评已出 1 题（待家长核）'), fp.banner);
+  await shotEl('queue-firstpass.png', '#q3');
+  // --- 4. everything processed: polling stops (no more GET .../queue)
+  await sleep(1500);
+  await ev(`(() => { window.__qreq = 0; const of = window.fetch; window.fetch = (u, o) => { if (String(u).includes('/queue')) window.__qreq++; return of(u, o); }; return 1; })()`);
+  await sleep(2500);
+  check('[queue] all processed -> the page stops polling (0 requests in 2.5 s even at the scaled speed)', (await ev(`window.__qreq`)) === 0 && (await ev(`window.__ruyiQ.state().active`)) === false);
+  // --- 5. reload keeps everything (state comes from the site, not from the draft)
+  await send('Page.reload', {}, sid); await waitFor(cards(3));
+  check('[queue] after a reload the first-pass text is back (status is re-read, nothing re-queued)', await waitUI('ai_first_pass') && await ev(`document.querySelector('#qs .aibox').innerText.includes('第二步')`));
+  // --- 6. second submission: hidden tab does not poll; timeout copy
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+  await waitFor(`document.querySelectorAll('#qs .qst').length === 0`);
+  check('[queue] 再做一次: status boxes are gone with the old result', await ev(`document.querySelectorAll('#qs .qst').length === 0 && !document.getElementById('qBanner')`));
+  check('[queue] second submit succeeds', await submitOnce() && await waitUI('waiting'));
+  await ev(`Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'}); 1`);
+  await mockQ('advance', { qref: Q3, to: 'expired' });
+  await sleep(2500);
+  check('[queue] a hidden tab does not poll (status unchanged after the brain moved on)', (await st3()) === 'waiting');
+  await ev(`Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'visible'}); document.dispatchEvent(new Event('visibilitychange')); 1`);
+  check('[queue] back in view: expired -> 「超过 24 小时仍没有结果，已转人工」', await waitUI('expired') && (await ev(`document.querySelector('#qs section[data-qref="${Q3}"] .qst-l').textContent`)) === '超过 24 小时仍没有结果，已转人工');
+  // --- 7. third submission: purged = deleted, no text
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+  await waitFor(`document.querySelectorAll('#qs .qst').length === 0`);
+  check('[queue] third submit succeeds', await submitOnce() && await waitUI('waiting'));
+  await mockQ('advance', { qref: Q3, to: 'purged' });
+  check('[queue] purged -> 「家长已删除这道题的解析」 and no AI text', await waitUI('purged') && await ev(`document.querySelectorAll('#qs .aibox').length === 0 && document.querySelector('#qs .qst-l').textContent === '家长已删除这道题的解析'`));
+  // --- 7b. (r5 P3-E) queue ON, the question is full: the confirm no longer says the brain rejects the whole batch
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+  await waitFor(`document.querySelectorAll('#qs .qst').length === 0`);
+  await fillDemo(); await sleep(600);
+  await ev(`window.__cf = []; window.confirm = t => { window.__cf.push(t); return false; }; document.getElementById('btnSubmit').click(); 1`);
+  await sleep(500);
+  const cf7 = await ev(`window.__cf`);
+  check('[queue][P3-E] full question, queue on: the confirm says "先存档、没有 AI 初评" and separates the grade path, never 「拒收整批」', cf7.length === 1 && cf7[0].includes('今天的 3 次已经用完') && cf7[0].includes('这几题这次只会先存档，没有 AI 初评') && cf7[0].includes('同批的其他题一起退回') && !cf7[0].includes('拒收整批'), JSON.stringify(cf7));
+  // --- 8. (r4 P3-A/P3-C) queue ON: /api/config says so; the 4th-time wording is the queue one;
+  // an enqueue that failed (retrying) must not be called 「不入大脑 / 没有 AI 初评」 anywhere on the page
+  const cfg = await ev(`fetch('/api/config').then(r => r.json())`);
+  check('[queue] /api/config tells the page the queue is on ({"queue":true})', cfg && cfg.queue === true, JSON.stringify(cfg));
+  await mockQ('config', { enqueue_mode: '500' });
+  check('[queue] free-3 loads', await loginAndLoad(base + '/m/practice/?set=free-3', 1));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid); await waitFor(cards(1));
+  await ev(`(() => { const f = document.querySelector('#qs input[type=text], #qs input:not([type]), #qs textarea'); f.value = 'x'; f.dispatchEvent(new Event('input', {bubbles: true})); return 1; })()`);
+  await sleep(400);
+  await ev(`window.confirm = () => true; document.getElementById('btnSubmit').click(); 1`);
+  check('[queue] enqueue failing: result card appears', await waitFor(resultShown));
+  const rt = await resultInfo();
+  check('[queue][P3-C] enqueue retrying: row, paragraph, status box and banner all say 正在排队; none says 不入大脑 / 没有 AI 初评 / 不自动判分（不入大脑）',
+    rt.vd.join().includes('正在排队') && !/不入大脑|没有 AI 初评|家长会核对|家长会看/.test(rt.page) && rt.page.includes('正在排队（会自动重试）') && rt.page.includes('还在等 1 题'), JSON.stringify(rt.vd) + ' | ' + rt.page.slice(0, 400));
+  // --- 8b. (r5 P3-F) a reopened page whose old result says "still retrying" while the status API says the enqueue was given up:
+  // status box, row and paragraph all follow the status
+  await ev(`(() => { const of = window.fetch; window.fetch = (u, o) => { // the real status, with the still-retrying answers turned into "given up"
+    if (!/attempts\\/[^/]+\\/queue$/.test(String(u)) || (o && o.method === 'POST')) return of(u, o);
+    return of(u, o).then(r => r.json()).then(v => { v.items.forEach(i => { if (i.ui_state === 'enqueue_retry') { i.ui_state = 'not_queued'; i.reason = 'retry_exhausted'; i.label = '暂时没能排队，答案已存档'; } });
+      v.summary = Object.assign({}, v.summary, {not_queued: v.items.length, enqueue_retry: 0, any_pending: false});
+      return new Response(JSON.stringify(v), {status: 200, headers: {'Content-Type': 'application/json'}}); }); }; return 1; })()`);
+  await waitFor(`document.body.innerText.includes('这些题暂时没能排队')`, 8000);
+  await sleep(600);
+  const ex = await resultInfo();
+  check('[queue][P3-F] retry exhausted after a reopen: status box, row and paragraph all say 暂时没能排队，答案已存档; no 正在排队 / 等 AI 初评 left',
+    ex.vd.join().includes('暂时没能排队，答案已存档') && ex.page.split('暂时没能排队，答案已存档').length >= 4 && !/正在排队|等 AI 初评/.test(ex.page), JSON.stringify(ex.vd) + ' | ' + ex.page.slice(0, 500));
+  await mockQ('config', { enqueue_mode: '' });
+  // --- 9. (r5) mismatch: the assistants disagree, no proposed answer: no empty AI box, only the plain sentence; never a judgement of the child
+  await send('Page.reload', {}, sid); await waitFor(cards(1));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid); await waitFor(cards(1));
+  await ev(`(() => { const f = document.querySelector('#qs input[type=text], #qs input:not([type]), #qs textarea'); f.value = 'y'; f.dispatchEvent(new Event('input', {bubbles: true})); return 1; })()`);
+  await sleep(400);
+  await ev(`window.confirm = () => true; document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(resultShown);
+  const Q4 = 'example.set:math:4';
+  await waitFor(`!!document.querySelector('#qs section[data-qref="${Q4}"] .qst[data-ui="waiting"]')`);
+  await mockQ('advance', { qref: Q4, to: 'compared', compare: 'mismatch' });
+  check('[queue][r5] mismatch, no proposed answer: first-pass box with only 「AI 没有一致答案，需要家长看」, no AI answer area, no 和你的/你答',
+    await waitFor(`!!document.querySelector('#qs section[data-qref="${Q4}"] .qst[data-ui="ai_first_pass"]')`) &&
+    await ev(`(() => { const q = document.querySelector('#qs section[data-qref="${Q4}"] .qst'); return q.querySelector('.qst-c').textContent === 'AI 没有一致答案，需要家长看' && !q.querySelector('.aibox') && !/和你的|你答/.test(document.body.innerText); })()`));
+  check('[queue][r5] the banner promises no parent notice when the notify poller is off (this site runs without NOTIFY_ENABLED)', !(await ev(`document.body.innerText`)).includes('家长手机会收到提醒'));
+  check('[queue] no family code / token in storage or page', !(await ev(`JSON.stringify(Object.assign({}, localStorage)) + document.body.innerText`)).includes(code));
+  return finish();
+}
+
 // Final-contract states in a real browser, against the mock brain (grade token configured, auto sets on).
 async function contractFlow(base) {
   const cards = n => `document.querySelectorAll('#qs section.card').length===${n}`;
@@ -266,9 +397,9 @@ async function contractFlow(base) {
   // 3. daily cap (429): message, answers kept, not marked submitted
   await hookFetchReply(429, {error: 'daily_cap', message: '今天这题的次数已用完，已留档，未记入大脑。（每题每天只能提交 3 次，明天再提交才会记入大脑。）'});
   await ev(`document.getElementById('btnSubmit').click(); 1`);
-  await waitFor(`document.getElementById('submitMsg').textContent.includes('次数已用完')`);
+  await waitFor(`document.getElementById('submitMsg').textContent.includes('交满 3 次')`);
   const cap = await resultInfo();
-  check('[contract] 429 daily_cap: 「今天这题的次数已用完，已留档，未记入大脑」, answers stay, no result card', cap.msg.includes('今天这题的次数已用完，已留档，未记入大脑') && !cap.shown && (await ev(`document.querySelectorAll('#q1 input.blank')[0].value`)) === '5/4', cap.msg);
+  check('[contract] 429 daily_cap: queue OFF wording (交满 3 次 … 先存档 … 才会记入大脑; nothing about 排队 / AI 初评), no 家长会核对/不入大脑, answers stay, no result card', cap.msg === '今天这题已经交满 3 次，这次答案先存档；明天再交一次才会记入大脑。' && !/家长会|不入大脑|未记入大脑|AI 初评|排队/.test(cap.msg) && !cap.shown && (await ev(`document.querySelectorAll('#q1 input.blank')[0].value`)) === '5/4', cap.msg);
   await ev(`localStorage.clear(); 1`);
 
   // 4. recorded:false (unsupported): the page must NOT say it was submitted to the brain
@@ -279,9 +410,32 @@ async function contractFlow(base) {
   await ev(`document.getElementById('btnSubmit').click(); 1`);
   await waitFor(resultShown);
   const un = await resultInfo();
-  check('[contract] unsupported (recorded:false): heading 已提交（仅留档，未记入大脑）, badge 不自动判分, never 已提交到大脑',
-    un.h === '已提交（仅留档，未记入大脑）' && un.vd.join() === '不自动判分（不入大脑）' && !un.page.includes('已提交到大脑') && !un.page.includes('已记入大脑'), un.h + ' / ' + un.vd.join());
+  check('[contract] unsupported (recorded:false): heading 已提交（答案先存档）, badge 不自动判分, no 家长会/未记入大脑, never 已提交到大脑',
+    un.h === '已提交（答案先存档）' && !/家长会|未记入大脑/.test(un.page) && un.vd.join() === '不自动判分（不入大脑）' && !un.page.includes('已提交到大脑') && !un.page.includes('已记入大脑'), un.h + ' / ' + un.vd.join());
   await shot('practice-result-unsupported.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
+  await ev(`localStorage.clear(); 1`);
+
+  // the queue refused the answer for daily_cap: the first-screen card speaks the new wording only
+  check('[contract] free-form set loads again', await loginAndLoad(base + '/m/practice/?set=free-3', 1));
+  if (await ev(resultShown)) { await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300); } // a restored earlier result would be mistaken for the new one
+  await ev(`(() => { const t = document.querySelector('#q1 textarea.ans'); t.value = '1/2+1/3=5/6'; t.dispatchEvent(new Event('input', {bubbles: true})); return 1; })()`);
+  await sleep(400);
+  await ev(`(() => { // answer the grade call with a daily_cap-refused queue object, echoing the page's own attempt id
+    if (!window.__origFetch) window.__origFetch = window.fetch;
+    const of = window.__origFetch;
+    window.fetch = (u, o) => {
+      if (!String(u).includes('/grade')) return of(u, o);
+      const cid = JSON.parse(o.body).client_attempt_id;
+      return Promise.resolve(new Response(JSON.stringify({client_attempt_id: cid, set_id: 'free-3', mode: 'graded', brain_recorded: false, recorded_count: 0, archived: true,
+        results: [{qref: 'example.set:math:4', status: 'unsupported', recorded: false}], summary: {total: 1, unanswered: 0, unsupported: 1, graded: 0, correct: 0, pending: 0, recorded: 0},
+        queue: {enqueue: 'failed', items: [{qref: 'example.set:math:4', enq: 'not_queued', reason: 'daily_cap'}]}}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+    };
+    return 1; })()`);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(resultShown);
+  const dc = await resultInfo();
+  check('[contract] daily_cap (queue): heading 已提交（答案先存档）, row 「今天已交满 3 次，先存档」, paragraph says 没有 AI 初评; no 家长会 / 不入大脑 / 未记入大脑 anywhere',
+    dc.h === '已提交（答案先存档）' && dc.vd.join() === '今天已交满 3 次，先存档' && dc.page.includes('没有 AI 初评') && !/家长会|不入大脑|未记入大脑/.test(dc.page), dc.h + ' / ' + dc.vd.join());
   await ev(`localStorage.clear(); 1`);
 
   // 5. a brain-picked set: origin tags and 「参考答案待核，不自动判」
@@ -327,7 +481,7 @@ async function dailyLimitFlow(base) {
     check(`[limit] submission ${i + 1}: graded, 已提交到大脑`, await waitFor(resultShown) && (await resultInfo()).h === '已提交到大脑');
     const cf = await ev(`window.__confirms`);
     check(`[limit] submission ${i + 1}: confirm says "本次提交后…约还剩${wantLeft[i]}次"`, cf.length === 1 && cf[0].includes('约还剩' + wantLeft[i] + '次') && !cf[0].includes('，还剩'), JSON.stringify(cf));
-    const want = wantLeft[i] === '0' ? '今天这题的次数已用完（再提交只会留档，不入大脑）' : '今天约还剩 ' + wantLeft[i] + ' 次';
+    const want = wantLeft[i] === '0' ? '今天这题已交满 3 次，再交只存档；明天再交一次才会记入大脑。' : '今天约还剩 ' + wantLeft[i] + ' 次';
     check(`[limit] after submission ${i + 1} the labels read: ${want}`, await waitFor(`[...document.querySelectorAll('#qs .quota')].length===3 && [...document.querySelectorAll('#qs .quota')].every(q => q.textContent === ${JSON.stringify(want)})`), JSON.stringify(await lefts()));
     await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300);
     await fillDemo(); await sleep(400);
@@ -337,7 +491,7 @@ async function dailyLimitFlow(base) {
   // 4. the 4th: the confirm warns that it will not be recorded; accepting gives 429 daily_cap
   await hookFetch(0, false); await hookConfirm('true');
   await ev(`document.getElementById('btnSubmit').click(); 1`);
-  check('[limit] 4th: 「已留档，未记入大脑」 message from the 429, no result card, answers kept', await waitFor(`document.getElementById('submitMsg').textContent.includes('今天这题的次数已用完，已留档，未记入大脑')`));
+  check('[limit] 4th (queue OFF): the daily_cap wording from the 429 promises neither 排队 nor AI 初评, no result card, answers kept', await waitFor(`document.getElementById('submitMsg').textContent === '今天这题已经交满 3 次，这次答案先存档；明天再交一次才会记入大脑。'`));
   const c4 = await ev(`({c: window.__confirms, shown: ${resultShown}, q1: [...document.querySelectorAll('#q1 input.blank')].map(e => e.value).join('|'), caps: document.querySelectorAll('#qs .vd.cap').length, dis: document.getElementById('btnSubmit').disabled, ids: window.__bodies.map(b => JSON.parse(b).client_attempt_id), ls: JSON.parse(localStorage.getItem('ruyi-practice-demo-1-v1') || 'null')})`);
   check('[limit] 4th: the confirm warned 「已经用完 … 不会记入大脑」', c4.c.length === 1 && c4.c[0].includes('今天的 3 次已经用完') && c4.c[0].includes('不会记入大脑') && c4.c[0].includes('约还剩0次'), JSON.stringify(c4.c));
   check('[limit] 4th: not marked submitted, answers kept, capped questions marked, button usable', !c4.shown && c4.q1 === '5/4||-3' && c4.caps === 3 && !c4.dis, JSON.stringify([c4.shown, c4.q1, c4.caps]));
@@ -372,7 +526,7 @@ async function dailyLimitFlow(base) {
   const un = await resultInfo();
   const cf1 = await ev(`window.__confirms`);
   check('[limit] single question: confirm reads 「每题每天只能提交3次，本次提交后约还剩2次。」', cf1.length === 1 && cf1[0].startsWith('每题每天只能提交3次，本次提交后约还剩2次。（按本站提交记录估算）'), JSON.stringify(cf1));
-  check('[limit] unsupported: badge 「不自动判分（不入大脑）」, card says 不入大脑, never 已提交到大脑', un.vd.join() === '不自动判分（不入大脑）' && un.page.includes('（不入大脑）') && !un.page.includes('已提交到大脑'), un.vd.join() + ' / ' + un.h);
+  check('[limit] unsupported: badge 「不自动判分（不入大脑）」, card says 不入大脑, never 已提交到大脑', un.vd.join() === '不自动判分（不入大脑）' && un.page.includes('（不入大脑）') && !/家长会/.test(un.page) && !un.page.includes('已提交到大脑'), un.vd.join() + ' / ' + un.h);
   await shot('practice-limit-unsupported.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
   return finish();
 }
@@ -388,7 +542,7 @@ async function notReadyFlow(base) {
   await waitFor(`getComputedStyle(document.getElementById('resultCard')).display==='block'`);
   const r = await resultInfo();
   check('[not-ready] heading 已提交（暂未判分）, 大脑接口还没准备好, every badge 待核对（不入大脑）, no verdict',
-    r.h === '已提交（暂未判分）' && r.page.includes('大脑接口还没准备好') && r.vd.every(v => v === '待核对（不入大脑）') && !/[✓✗]/.test(r.page) && !r.page.includes('已提交到大脑') && !r.page.includes('已记入大脑'), r.h + ' / ' + r.vd.join());
+    r.h === '已提交（暂未判分）' && r.page.includes('大脑接口还没准备好') && r.vd.every(v => v === '待核对（不入大脑）') && !/家长会/.test(r.page) && !/[✓✗]/.test(r.page) && !r.page.includes('已提交到大脑') && !r.page.includes('已记入大脑'), r.h + ' / ' + r.vd.join());
   await shot('practice-result-notready.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
   return finish();
 }
@@ -462,6 +616,7 @@ async function smokeFlow(base) {
 
   if (flow === 'contract') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return contractFlow(base); }
   if (flow === 'dailylimit') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return dailyLimitFlow(base); }
+  if (flow === 'queue') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return queueFlow(base); }
   if (flow === 'notready') { return notReadyFlow(base); }
   if (flow === 'smoke') { return smokeFlow(base); }
   if (flow === 'archive') {

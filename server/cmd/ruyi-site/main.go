@@ -46,6 +46,9 @@ func run() error {
 	}
 	logw := server.NewRedactWriter(os.Stderr, cfg.Secrets())
 	log := slog.New(slog.NewTextHandler(logw, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	for _, w := range cfg.Warnings {
+		log.Warn("configuration warning", "detail", w)
+	}
 
 	entries, err := staticfiles.ParseAllowlist(ruyisite.StaticAllowlist)
 	if err != nil {
@@ -56,7 +59,12 @@ func run() error {
 		log.Warn("allowlisted file missing from static dir (will 404)", "file", m)
 	}
 
-	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, GradeToken: cfg.BrainGradeToken, GradePath: cfg.BrainGradePath, LookupPath: cfg.BrainLookupPath, PickPath: cfg.BrainPickPath, BrainID: cfg.BrainID, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile})
+	notifyTok := ""
+	if cfg.QueueEnabled && cfg.QueueNotifyEnabled {
+		notifyTok = cfg.BrainNotifyToken // the third token exists in the client only when the poller may run
+	}
+	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, GradeToken: cfg.BrainGradeToken, GradePath: cfg.BrainGradePath, LookupPath: cfg.BrainLookupPath, PickPath: cfg.BrainPickPath, BrainID: cfg.BrainID, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile,
+		NotifyToken: notifyTok, PendingPath: cfg.BrainPendingPath})
 	if err != nil {
 		return err
 	}
@@ -92,8 +100,13 @@ func run() error {
 
 	att := attempts.Open(cfg.AttemptsDir, log)
 	defer att.Close()
+	if cfg.QueueEnabled { // a queue without a usable state directory must not start
+		if err := server.ProbeQueueDir(cfg.QueueStateDir); err != nil {
+			return err
+		}
+	}
 
-	app := server.New(server.Deps{
+	deps := server.Deps{
 		Auth:     auth.New(cfg.FamilyCode, cfg.SessionSecret, cfg.SessionTTL, cfg.CookieSecure, nil),
 		Limiter:  server.NewLimiter(),
 		Brain:    bc,
@@ -111,7 +124,18 @@ func run() error {
 		AutoSources:     cfg.AutoSources,
 		SkipDeferred:    cfg.SkipDeferred,
 		AutoTTL:         cfg.AutoTTL,
-	})
+
+		QueueEnabled: cfg.QueueEnabled,
+		QueueNotify:  cfg.QueueNotifyEnabled,
+		QueueDir:     cfg.QueueStateDir,
+		QueuePoll:    cfg.QueuePoll,
+	}
+	if cfg.QueueEnabled {
+		deps.Queue = bc
+	}
+	app := server.New(deps)
+	defer app.CloseQueue()
+	app.StartQueue()
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           app,
@@ -128,7 +152,7 @@ func run() error {
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Info("listening", "addr", cfg.Listen, "static_files", len(entries), "cookie_secure", cfg.CookieSecure,
 		"ntfy_configured", cfg.NtfyTopic != "", "grading_configured", cfg.BrainGradeToken != "",
-		"auto_sources", len(cfg.AutoSources), "grade_max_per_hour", cfg.GradeMaxPerHour, "brain_id", brainIDOrDefault(cfg.BrainID))
+		"queue_enabled", cfg.QueueEnabled, "queue_notify", cfg.QueueNotifyEnabled, "auto_sources", len(cfg.AutoSources), "grade_max_per_hour", cfg.GradeMaxPerHour, "brain_id", brainIDOrDefault(cfg.BrainID))
 
 	select {
 	case err := <-errc:

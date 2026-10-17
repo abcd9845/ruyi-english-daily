@@ -272,8 +272,23 @@ func summaryLine(r *attempts.Record) string {
 	default:
 		b.WriteString("已提交。")
 	}
+	// S1: answers the brain would not queue because today's 3 tries of that question are used
+	if n := dailyCapUnqueued(r); n > 0 {
+		fmt.Fprintf(&b, "%d 题未排队（今天已满 3 次），答案在存档里。", n)
+	}
 	fmt.Fprintf(&b, "attempt %s。", r.ClientAttemptID[:8])
 	return b.String()
+}
+
+// dailyCapUnqueued counts the answers of the record the queue refused for daily_cap.
+func dailyCapUnqueued(r *attempts.Record) int {
+	n := 0
+	for _, it := range r.Items {
+		if it.Queue != nil && it.Queue.Enq == enqNotQueued && it.Queue.Reason == "daily_cap" {
+			n++
+		}
+	}
+	return n
 }
 
 // testSummaryLine: the summary of a local test set submission. It says plainly

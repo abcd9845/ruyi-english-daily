@@ -72,6 +72,8 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 | `RUYI_GRADE_MAX_PER_HOUR` | 否 | 每套每小时提交上限（会话与 IP 各限），默认 5，范围 1–1000 |
 | `RUYI_NTFY_BASE_URL` / `RUYI_NTFY_RETRY_DELAY` | 否 | ntfy 地址（默认 `https://ntfy.sh/`）/ 失败后第一次重试前的等待（默认 1m，第二次重试前翻倍）；一般不用配 |
 | `RUYI_AUTO_SOURCES` / `RUYI_AUTO_TTL` | 否 | 允许自动出题的 source（默认空=关）/ 自动套有效期（默认 6h） |
+| `RUYI_QUEUE_ENABLED` / `RUYI_QUEUE_NOTIFY_ENABLED` | 否 | `0`（默认）/`1`。S1 待解答队列 / 完成提醒轮询，见下「待解答队列」。队列需要 `RUYI_BRAIN_GRADE_TOKEN`；提醒需要 `RUYI_BRAIN_NOTIFY_TOKEN` 和 `RUYI_NTFY_TOPIC` |
+| `RUYI_BRAIN_NOTIFY_TOKEN` / `RUYI_QUEUE_POLL_SECONDS` / `RUYI_QUEUE_STATE_DIR` / `RUYI_BRAIN_PENDING_PATH` | 否 | 第三枚令牌（只用于 events/ack，必须与另两枚不同）/ 轮询秒数 40–600（默认 45）/ 队列本地状态目录（默认 `/var/lib/ruyi-site/queue`，0700）/ 入队路径（默认 `/v1/bank/pending-answers`） |
 | `RUYI_SETS_FILE` | 否 | 练习套配置 JSON（见下「通用套练习页」）。未设 → 没有套，`/api/practice/*` 404，其余功能不变。文件有误启动即退出，报错只写位置不写内容 |
 
 日志输出到 stderr（journald），只记方法、路径（不含 query）、状态码、耗时、来源 IP；另有一层写入器把所有已配置的秘密值（令牌、家庭码、会话密钥、topic）替换成 `[redacted]`。
@@ -128,7 +130,7 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
  "answers":[{"qref":"<套内 qref>","answer":"B","rev":1}]}
 ```
 
-`rev` 是页面从大脑 lookup 拿到的题目版本（整数，可选），原样带给大脑；大脑回 409 `rev_mismatch` 就说明题目已更新。`answered_at` 由页面和 `client_attempt_id` 一起固定（重试时不变，大脑会比对），`attempt_kind` 只允许 `correction` / `variant`，`session_ref` 由服务端填套 id。向大脑发的请求体：`{brain:"ruyi", client_attempt_id, items:[{qref, answer, rev?, attempt_kind?, answered_at?, session_ref?, payload?}]}`，**严格契约**（大脑对未知字段、grade 上除 `?brain=` 以外的 query 一律 400），所以站点发之前自己校验：qref 小写上线（站点内仍用套里的原串匹配回显）、`answered_at` 只在 now-7d..now+1min 内的 RFC3339 才发（否则整段省略）、`rev` 须是 ≥1 的整数、`session_ref` 1..200、`payload` ≤4096 字节、答案是字符串或 ≤10 个字符串且每个 ≤500 字（超过的题**不发**，记为不自动判分、只留档）、`client_attempt_id` 须匹配 `^[A-Za-z0-9._:-]{1,160}$`、批量 1..50 题。幂等键是 `ps:<client_attempt_id>:<规范 qref>`（≤198 字符；别名先解析成规范 qref，所以用别名再交同一个 id 是重放）。回复 201（有新写入）或 200（全是重放/没有写回）；同键同答案重放 200 `duplicate:true`，**同键但 `answered_at` 与第一次不同 → 409 `idempotency_conflict`**，没带 `answered_at` 则按重放（`attempt_kind`/`session_ref`/`payload` 不参与比较）。
+`rev` 是页面从大脑 lookup 拿到的题目版本（整数，可选），原样带给大脑；大脑回 409 `rev_mismatch` 就说明题目已更新。`answered_at` 由页面和 `client_attempt_id` 一起固定（重试时不变，大脑会比对），`attempt_kind` 只允许 `correction` / `variant`，`session_ref` 在 #22 里由服务端填套 id，S1 起改填 `client_attempt_id`（队列开着时与入队的 `session_ref` 一致）。**关队列（`RUYI_QUEUE_ENABLED=0`）不会还原 grade 请求里的 `session_ref`，它仍是 cid（大脑侧不依赖这个值）；只有换回 #22 二进制才还原成套 id。**向大脑发的请求体：`{brain:"ruyi", client_attempt_id, items:[{qref, answer, rev?, attempt_kind?, answered_at?, session_ref?, payload?}]}`，**严格契约**（大脑对未知字段、grade 上除 `?brain=` 以外的 query 一律 400），所以站点发之前自己校验：qref 小写上线（站点内仍用套里的原串匹配回显）、`answered_at` 只在 now-7d..now+1min 内的 RFC3339 才发（否则整段省略）、`rev` 须是 ≥1 的整数、`session_ref` 1..200、`payload` ≤4096 字节、答案是字符串或 ≤10 个字符串且每个 ≤500 字（超过的题**不发**，记为不自动判分、只留档）、`client_attempt_id` 须匹配 `^[A-Za-z0-9._:-]{1,160}$`、批量 1..50 题。幂等键是 `ps:<client_attempt_id>:<规范 qref>`（≤198 字符；别名先解析成规范 qref，所以用别名再交同一个 id 是重放）。回复 201（有新写入）或 200（全是重放/没有写回）；同键同答案重放 200 `duplicate:true`，**同键但 `answered_at` 与第一次不同 → 409 `idempotency_conflict`**，没带 `answered_at` 则按重放（`attempt_kind`/`session_ref`/`payload` 不参与比较）。
 
 - 答案形状按题型校验：单选 `"B"`（必须是选项 key）、多选 `["A","C"]`、填空 `["…","…"]`（个数 = 题干空数，每格 ≤200 字）、自由作答 `"…"`（≤2000 字符，按字符计、不是字节；与大脑的上限相同，同一个常量 `brain.MaxAnswerLen`，≤2000 字符正常发大脑判分）；未知字段/控制字符/超长（含自由作答超过 2000 字符）/不属于该套的 qref 一律 400，且**不会到达大脑**。没作答的题不用传。
 - `client_attempt_id`（1–160 位 `[A-Za-z0-9._:-]`；页面用 UUID）是**大脑侧幂等键**的一部分：同 id、同答案重复提交返回第一次的结果（`replayed:true`），不重复判分、不重复归档、不重复提醒；重启后从归档文件恢复；归档丢了而大脑已有 → 大脑回 `duplicate:true` 和同一个 `attempt_id`，不重复记账。网络重试沿用同一个 id，用户改了答案换新 id。
@@ -149,6 +151,23 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 
 **自动出题（3.5）**：`GET /api/practice/new?source=&n=1..20[&order=random|seq][&seed=N]`（需登录；`RUYI_AUTO_SOURCES` 为空时整个入口 404）。
 返回 `{set_id:"auto-<8位>",url,title,requested,count,truncated,note?,expires_at}`；题不够 n 就全给并带 `note`；套存在内存里，`RUYI_AUTO_TTL` 后失效，其 qref 白名单同样约束判分与取图。新增 `mode=due_first|wrong_only|random`（缺省 = random，**默认关，仍需 `RUYI_AUTO_SOURCES`**）：`due_first`/`wrong_only` 走大脑 `pick-practice`，题文用 lookup 取；返回多 `mode`、`deferred`（带参考答案待核/不支持题型/缺图的题数）；每题带 `origin`（页面显示「复习」/「错题」）和 `ref_pending`（页面标「参考答案待核，不自动判」，是否保留由 `RUYI_PICK_SKIP_DEFERRED` 决定）。选题接口未部署 → 501「大脑接口未就绪」。旧参数 `wrong_only=1` / `due_first=1` 仍然接受（等价于对应 `mode`）；旧的"没有大脑接口就返回 501"的草稿路径已删除——有接口就用，没接口才 501。lookup 里没有的 qref 被丢弃，不崩。
+
+## 待解答队列（S1，`RUYI_QUEUE_ENABLED`，默认关）
+
+基于大脑接口契约 v1.0（`pending-answers` 入队、批量/单条读、`capabilities`、`events` + `ack`）。**开关关闭时站点行为与 #22 完全一致**（`golden_off_test.go` 用 #22 代码生成的黄金文件逐字节对照；`/api/practice/attempts/*` 不被路由，和旧版一样 400）。
+
+- **入队**：提交判分后，`pending_key` / `needs_review` / `unsupported` 且 `queueable≠false` 的答案再入队（顶层 `session_ref` 一律是 `client_attempt_id`（单题也传，`session_total=1`）；`session_total` = 该 `session_ref` 下**实际入队**的题数（grade 已判掉 / 提示不可入队的不计；整批原子，被拒就按逐项 `queueable_reason` 剔除永久不可入队的题，`session_total` 相应减小后重发一次）。同一 `session_ref` 的 `session_total` 必须前后一致，否则大脑整个请求返 400：站点把第一次发出的值记在 `links.jsonl`，补发沿用它（只有「被剔除」才会减小，且那时大脑还没写入）；老记录没有这个值时按「已入队数 + 本次要发的数」算）。已判分（graded）的不入队；网站自判（本地套）不入队。每次调用 3 秒超时，整个提交最多多花 7 秒；入队失败**不影响提交成功**，之后由后台（30 秒一轮）自动重试：指数退避 1、2、4 分钟，之后每 5 分钟一次，**一直重试到这道题的处理时限**（数学 24 小时 / 开放题 48 小时；入队前不知道题型时按 48 小时），到点仍没排上就转 `retry_exhausted`（页面「暂时没能排队，答案已存档」（不承诺通知：提醒只在 poller 开启、且这一套都处理完后才发，里面会写「N 题没能排队」））。页面触发的 `POST …/enqueue` 只是多一次幂等补发，**不占自动重试次数**，也不改自动重试的时间表；**没有手动按钮**。**大脑还没有入队端点（404，老大脑）**：站点判定「大脑未升级」，这些题直接记「未排队」（`not_ready`），不重试、不计失败次数，页面按「未排队」显示。
+- **答案由入队写入时**（`unsupported` 在 grade 里不落库）：网站把它当作已记录、计入「今天约还剩 N 次」；剩余次数优先取入队响应里的 `daily_remaining`。
+- **状态页数据**：`GET /api/practice/attempts/<cid>/queue`（纯读，永不入队；5 秒缓存；批量读 `GET /v1/brains/ruyi/pending?session_ref=<cid>&include=result`，路由未部署时退化为逐条读）。页面 15 秒轮询，5 分钟后 60 秒，标签页隐藏时不轮询，全部处理完停止。状态映射见 `internal/server/queue_view.go`（待解答（排队中）→ AI 判卷中 → **AI 初评 · 待家长核**（显示 AI 全文，含数学拟答案，不折叠）→ 家长已核；超时文案数学 24 小时 / 开放题 48 小时；purged = 「家长已删除这道题的解析」，不显示正文）。`POST /api/practice/attempts/<cid>/enqueue`（每个提交每分钟最多 2 次）只重发入队失败的那几题，幂等。
+- **完成提醒**（`RUYI_QUEUE_NOTIFY_ENABLED=1`）：独立 goroutine 每约 45 秒（±10%）读 `GET /v1/queue/events`（**只用第三枚 notify 令牌**）。顺序固定：**本地落盘（fsync + 原子替换 `notify.json`）→ `ack` → 才发 ntfy**，每套（`session_ref`）只发一条；发之前先把「发送中」落盘，发成功再追加 `sent.jsonl`。唯一可能重复的窗口：ntfy 返回 2xx 但「已发送」还没落盘就崩溃。重启后从本地状态补发，不会漏。
+- **本地状态丢失 / 损坏的对账**：`notify.json` 缺失而 `sent.jsonl` 或 `links.jsonl` 非空，或 `notify.json` 解析失败（改名为 `notify.json.corrupt-<unix时间>` 留存，不删），启动日志写 `reconciling`，对最近 4 天里**没发过**提醒的提交各读一次大脑（批量读）补齐终态，再按正常流程发（已在 `sent.jsonl` 的不会重发）。事件被大脑丢失/从未到达的提交，在预期截止 + 1 小时后也会触发同样的一次对账。`links.jsonl` 丢失时，旧提交的状态接口返回 404（页面不再显示状态；大脑那边的数据不受影响，家长仍可在大脑里核）。
+- **令牌**：读 / 写（`RUYI_BRAIN_GRADE_TOKEN`，也是入队令牌）/ notify 两两必须不同，启动时校验，错误只写变量名；令牌不进日志、页面、归档、状态文件。notify 令牌 403 只打 warn，**不会回退到写令牌**。
+
+- **「今天已满 3 次」（`daily_cap`）**：该题这次答案照常存档、不入队、没有 AI 初评；页面写「今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。」，同一提交里别的题照常入队。家长的提交提醒里多一句「N 题未排队（今天已满 3 次），答案在存档里」。
+- **归档里的 `queue` 行是提交那一刻的快照**（`enq` / `item_id` / `state:"queued"` / 截止时间 / 原因），**不随处理进度更新**；实时状态看 `links.jsonl`（入队结果）和大脑（`state`）。要核对「这题后来怎样了」别看归档的 `queue.state`。
+- **「今天约还剩 N 次」在补发窗口内可能与大脑不一致**：入队补发成功之前，这道 `unsupported` 答案还没写进大脑（站点不把它算进已用次数）；补发成功后才以入队响应里的 `daily_remaining` 为准。窗口内家长可能多看到 1 次余量，真正的 3 次上限只由大脑执行。
+
+新增环境变量见 `deploy/ruyi-site.env.example` 和 `DEPLOY-P3.md` §9。
 
 ## 本地测试套（smoke-test）
 

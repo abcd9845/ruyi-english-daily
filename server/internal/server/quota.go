@@ -28,10 +28,15 @@ const dailyLimit = 3
 type quotaTally struct {
 	mu  sync.Mutex
 	day map[string]map[string]int // shanghai day -> qref -> counted writes
+	// anchors: the brain's own daily_remaining for a question (S1 enqueue reply),
+	// with our local count at that moment; later local writes move it down.
+	anchors map[string]map[string]qAnchor
 }
 
+type qAnchor struct{ rem, base int }
+
 func newQuotaTally(st *attempts.Store) *quotaTally {
-	q := &quotaTally{day: map[string]map[string]int{}}
+	q := &quotaTally{day: map[string]map[string]int{}, anchors: map[string]map[string]qAnchor{}}
 	if st != nil {
 		for _, r := range st.Load(20000) {
 			q.add(r)
@@ -70,14 +75,57 @@ func (q *quotaTally) add(r *attempts.Record) {
 	}
 }
 
-func (q *quotaTally) used(day string, qrefs []string) map[string]int {
+// addOne counts one write the brain made outside an archived grade (a background enqueue).
+func (q *quotaTally) addOne(day, qref string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	m := q.day[day]
+	if m == nil {
+		m = map[string]int{}
+		q.day[day] = m
+	}
+	m[qref]++
+}
+
+// anchor records the brain's daily_remaining (0..3, after the write it just made).
+func (q *quotaTally) anchor(day, qref string, remaining int) {
+	if remaining < 0 || remaining > dailyLimit {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	m := q.anchors[day]
+	if m == nil {
+		m = map[string]qAnchor{}
+		q.anchors[day] = m
+	}
+	m[qref] = qAnchor{rem: remaining, base: q.day[day][qref]}
+	for k := range q.anchors { // keep a few days only
+		if k < shanghaiDay(time.Now().AddDate(0, 0, -3)) {
+			delete(q.anchors, k)
+		}
+	}
+}
+
+// used is, per question, how many of today's writes are known. The brain's
+// daily_remaining (when an enqueue reported it) wins over the local count; later
+// local writes are subtracted from it. Second result: how many answers came from the brain.
+func (q *quotaTally) used(day string, qrefs []string) (map[string]int, int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	out := map[string]int{}
+	n := 0
 	for _, ref := range qrefs {
-		out[ref] = q.day[day][ref]
+		cnt := q.day[day][ref]
+		if a, ok := q.anchors[day][ref]; ok {
+			left := min(max(a.rem-(cnt-a.base), 0), dailyLimit)
+			out[ref] = dailyLimit - left
+			n++
+			continue
+		}
+		out[ref] = cnt
 	}
-	return out
+	return out, n
 }
 
 // quota answers GET /api/practice/<set>/quota: for each question of the set,
@@ -97,7 +145,11 @@ func (s *Server) quota(w http.ResponseWriter, r *http.Request, id string) {
 	if set.Local { // a local test set never goes to the brain: no limit applies
 		body["used"] = map[string]int{}
 	} else {
-		body["used"] = s.quotaT.used(day, set.QRefs)
+		used, anchored := s.quotaT.used(day, set.QRefs)
+		body["used"] = used
+		if anchored > 0 { // the brain's own daily_remaining was used for some questions
+			body["basis"] = "brain_daily_remaining"
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, body)

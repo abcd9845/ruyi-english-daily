@@ -21,7 +21,8 @@ PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 ReadOnlyPaths=/opt/ruyi-english-daily
-ReadWritePaths=/var/log/ruyi-site
+# /var/lib/ruyi-site holds the attempts archive (RUYI_ATTEMPTS_DIR) and, with the S1 queue on, RUYI_QUEUE_STATE_DIR.
+ReadWritePaths=/var/log/ruyi-site /var/lib/ruyi-site
 CapabilityBoundingSet=
 LimitNOFILE=4096
 # SIGTERM -> graceful shutdown (10 s inside the program); give it a bit more.

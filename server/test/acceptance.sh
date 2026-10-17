@@ -585,7 +585,7 @@ expect "R1f archive says the same: per-item recorded flags" "$(head -1 "$WORK/at
 expect "R1g ntfy line says 3 of 4 went to the brain, the rest archive-only (never a flat 已提交)" "$(jq -rs '.[-1].body|split("完成于 ")[0]' "$WORK/ntfy.jsonl")" '如意练习：四态套 4 题，对 1，待核对 2，不自动判 1，已提交（3 题记入大脑，其余仅留档）。attempt 00000001。'
 # what went over the wire (the mock keeps the last grade body)
 LG=$(curl -s "$RMB/_mock/last-grade")
-expect "R2 wire format: brain=ruyi, id, items with qref/answer/rev/answered_at/session_ref, no token or family code in the body" "$(echo "$LG" | jq -c '[.brain,.client_attempt_id,(.items|length),(.items[0]|[.qref,.rev,.answered_at,.session_ref]),(.items|map(has("attempt_kind"))|any)]')" "[\"ruyi\",\"$(rcid 1)\",4,[\"example.set:math:1\",1,\"2026-10-17T08:00:00Z\",\"mix-4\"],false]"
+expect "R2 wire format: brain=ruyi, id, items with qref/answer/rev/answered_at/session_ref, no token or family code in the body" "$(echo "$LG" | jq -c '[.brain,.client_attempt_id,(.items|length),(.items[0]|[.qref,.rev,.answered_at,.session_ref]),(.items|map(has("attempt_kind"))|any)]')" "[\"ruyi\",\"$(rcid 1)\",4,[\"example.set:math:1\",1,\"2026-10-17T08:00:00Z\",\"$(rcid 1)\"],false]"
 echo "$LG" | grep -qF -e "$GTOKEN" -e "$TOKEN" -e "$CODE" && bad "R2b a token/family code is in the grade body" || ok "R2b grade body carries no token or family code"
 expect "R2c the grade call used the grade token only (read token never accepted for grading)" "$(mstat grade_with_bank_read_token "$RM")" 0
 # --- errors
@@ -933,6 +933,102 @@ run_bad x "${FULL[@]}" RUYI_BRAIN_ID='Bad Brain/1'
 [ "$RC" != 0 ] && echo "$OUT" | grep -q 'RUYI_BRAIN_ID' && ! echo "$OUT" | grep -qF 'Bad Brain' && ok "U12 invalid RUYI_BRAIN_ID -> exit $RC, names the variable, prints no value" || bad "U12 invalid brain id" "rc=$RC"
 for p in "$PID_T0" "$PID_T1" "$PID_T2"; do kill "$p" 2>/dev/null; done
 
+section "W. S1 pending-answer queue (RUYI_QUEUE_ENABLED) — mock brain + mock ntfy only; contract v1.0"
+NTOKEN="notify-$(rnd)"; WQ=18300; WS=18301
+start_mock mockWQ "$WQ" "MOCK_GRADE_TOKEN=$GTOKEN" MOCK_QUEUE=1 "MOCK_NOTIFY_TOKEN=$NTOKEN"; wait_http "http://127.0.0.1:$WQ/_mock/stats"
+WENV=("RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_NTFY_RETRY_DELAY=300ms" "RUYI_ATTEMPTS_DIR=$WORK/att-W" "RUYI_GRADE_MAX_PER_HOUR=200" \
+      "RUYI_QUEUE_ENABLED=1" "RUYI_QUEUE_NOTIFY_ENABLED=1" "RUYI_BRAIN_NOTIFY_TOKEN=$NTOKEN" "RUYI_QUEUE_STATE_DIR=$WORK/q-W" "RUYI_QUEUE_POLL_SECONDS=40")
+mkdir -p "$WORK/q-W"; chmod 700 "$WORK/q-W"
+start_site W "$WS" "http://127.0.0.1:$WQ" "${WENV[@]}"; WA="http://127.0.0.1:$WS"; wait_http "$WA/healthz"
+post_login w1 "$WA" "$CODE" -c "$WORK/jarW"
+wq() { curl -s "http://127.0.0.1:$WQ/_mock/queue/stats" | jq -r ".$1 // 0"; }
+WC=33333333-3333-4333-8333-333333333333
+N0=$(ntfy_n)
+gpost w1 "$WA" demo-1 "$(mkbody $WC)" -b "$WORK/jarW"
+expect "W1 grade with the queue on: 200, graded items untouched, the pending_key item queued" "$CODE_HTTP $(jq -c '[.queue.enqueue,(.queue.items|map([.qref,.enq]))]' "$WORK/resp/w1.b")" '200 ["ok",[["example.set:math:3","ok"]]]'
+expect "W1b only the pending answer reached the queue (graded ones are not queued), one batch, top-level session_ref" "$(wq enqueue_new_item) $(wq enqueue_calls) $(wq enqueue_400)" "1 1 0"
+expect "W1c the heads-up was sent once and the response is otherwise the #22 shape (queue is the only added key)" "$(( $(ntfy_n) - N0 )) $(jq -c 'keys' "$WORK/resp/w1.b")" '1 ["archived","brain_recorded","client_attempt_id","mode","notify","queue","recorded_count","results","set_id","summary"]'
+get wv "$WA/api/practice/attempts/$WC/queue" -b "$WORK/jarW"
+expect "W2 status page data: waiting, 待解答 label with 24 hours, reanalyze not offered" "$CODE_HTTP $(jq -c '[.items[0].ui_state,.items[0].hours,.items[0].reanalyze_enabled,(.items[0].label|test("待解答"))]' "$WORK/resp/wv.b")" '200 ["waiting",24,false,true]'
+E0=$(wq enqueue_calls); get wv2 "$WA/api/practice/attempts/$WC/queue" -b "$WORK/jarW"; get wv3 "$WA/api/practice/demo-1" -b "$WORK/jarW"
+expect "W3 opening the page / the status GET never queues anything (pure read)" "$(( $(wq enqueue_calls) - E0 ))" 0
+get wv4 "$WA/api/practice/attempts/$WC/queue"; expect "W3b the status endpoint needs a login" "$CODE_HTTP" 401
+get wv5 "$WA/api/practice/attempts/22222222-2222-4222-8222-222222222222/queue" -b "$WORK/jarW"; expect "W3c unknown submission -> 404" "$CODE_HTTP" 404
+curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/advance?qref=example.set:math:3&to=claimed" >/dev/null
+sleep 5.5   # the site caches a status for 5 s
+get wv "$WA/api/practice/attempts/$WC/queue" -b "$WORK/jarW"
+expect "W4 claimed -> AI 判卷中" "$(jq -r '.items[0].ui_state' "$WORK/resp/wv.b")" ai_working
+curl -s -X POST --get "http://127.0.0.1:$WQ/_mock/queue/advance" --data-urlencode "qref=example.set:math:3" --data-urlencode "to=compared" --data-urlencode "answer=AI-拟答案 12" --data-urlencode "rationale=AI-解析全文" --data-urlencode "compare=mismatch" >/dev/null
+sleep 5.5   # the site caches a status for 5 s
+get wv "$WA/api/practice/attempts/$WC/queue" -b "$WORK/jarW"
+expect "W5 compared -> AI初评·待家长核 with the FULL AI text and the plain 「AI 没有一致答案，需要家长看」 note (no judgement of the child's answer)" "$(jq -c '[.items[0].ui_state,.items[0].label,.items[0].result.proposed_answer,.items[0].result.rationale,(.items[0].compare_text == "AI 没有一致答案，需要家长看")]' "$WORK/resp/wv.b")" '["ai_first_pass","AI 初评 · 待家长核","AI-拟答案 12","AI-解析全文",true]'
+say "     waiting for the notify poller (45 s ±10%) ..."
+for _ in $(seq 1 80); do [ "$(grep -c 'AI初评已出' "$WORK/ntfy.jsonl")" -ge 1 ] && break; sleep 1; done
+expect "W6 exactly one 'AI初评已出，待家长核' notification, no answer text in it" "$(grep -c 'AI初评已出，待家长核' "$WORK/ntfy.jsonl") $(grep 'AI初评已出' "$WORK/ntfy.jsonl" | grep -c 'AI-拟答案\|AI-解析')" "1 0"
+expect "W6b the events were acked (ack after ingest), only the notify token touched events/ack" "$(wq ack_ok | awk '{print ($1>=1)}') $(wq write_token_on_events_endpoint) $(wq notify_token_on_write_endpoint) $(wq stats_calls)" "1 0 0 0"
+ls "$WORK/q-W" | tr '\n' ' ' | grep -q 'links.jsonl' && ls "$WORK/q-W" | grep -q 'notify.json' && ls "$WORK/q-W" | grep -q 'sent.jsonl' && ok "W7 state files exist (links.jsonl, notify.json, sent.jsonl)" || bad "W7 state files" "$(ls "$WORK/q-W")"
+expect "W7b state files are private (600) and the dir 700" "$(stat -c %a "$WORK/q-W/links.jsonl") $(stat -c %a "$WORK/q-W/notify.json") $(stat -c %a "$WORK/q-W")" "600 600 700"
+# restart: nothing is told twice, the status survives
+kill "$PID_W" 2>/dev/null; sleep 0.5
+start_site W2 "$WS" "http://127.0.0.1:$WQ" "${WENV[@]}"; wait_http "$WA/healthz"; sleep 3
+expect "W8 restart: no second notification" "$(grep -c 'AI初评已出' "$WORK/ntfy.jsonl")" 1
+post_login w1 "$WA" "$CODE" -c "$WORK/jarW"; get wv "$WA/api/practice/attempts/$WC/queue" -b "$WORK/jarW"
+expect "W8b restart: the status is still there (state files)" "$(jq -r '.items[0].ui_state' "$WORK/resp/wv.b")" ai_first_pass
+gpost w1r "$WA" demo-1 "$(mkbody $WC)" -b "$WORK/jarW"
+expect "W8c replay of the same submission keeps the queue state and queues nothing new" "$(jq -c '[.replayed,.queue.items[0].enq]' "$WORK/resp/w1r.b") $(wq enqueue_calls)" "[true,\"ok\"] 1"
+# purged item: the page says deleted, no text
+WC2=44444444-4444-4444-8444-444444444444
+gpost w2 "$WA" demo-1 "$(mkbody $WC2 '[{"qref":"example.set:math:3","answer":["p","q"]}]')" -b "$WORK/jarW"
+curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/advance?qref=example.set:math:3&to=purged" >/dev/null
+get wv "$WA/api/practice/attempts/$WC2/queue" -b "$WORK/jarW"
+expect "W9 purged -> 家长已删除这道题的解析, no AI text" "$(jq -c '[.items[0].ui_state,.items[0].label,(.items[0].result // null)]' "$WORK/resp/wv.b")" '["purged","家长已删除这道题的解析",null]'
+# unsupported (free-3): the enqueue writes the attempt
+gpost w3 "$WA" free-3 "$(mkbody 55555555-5555-4555-8555-555555555555 '[{"qref":"example.set:math:4","answer":"x"}]')" -b "$WORK/jarW"
+expect "W10 unsupported answer: queued, recorded by the enqueue (not 不入大脑 any more)" "$(jq -c '[.queue.items[0].enq,.recorded_count,.results[0].recorded]' "$WORK/resp/w3.b")" '["ok",1,true]'
+get wq1 "$WA/api/practice/free-3/quota" -b "$WORK/jarW"
+expect "W10b the daily quota counts the answer the enqueue wrote ('约还剩N次' now 2)" "$(jq -c '[.used["example.set:math:4"]]' "$WORK/resp/wq1.b")" '[1]'
+get wcfg "$WA/api/config" -b "$WORK/jarW"
+expect "W10c queue on: /api/config carries queue=true (the page words the daily limit by it)" "$(jq -c '.queue' "$WORK/resp/wcfg.b")" 'true'
+expect "W10d queue off (default site): /api/config has no queue key (= #22)" "$(printf %s "$CONFIG_BODY" | jq -c 'has("queue")')" 'false'
+# enqueue 500 -> submission still succeeds, retry is automatic
+curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/config?enqueue_mode=500" >/dev/null
+gpost w4 "$WA" demo-1 "$(mkbody 66666666-6666-4666-8666-666666666666 '[{"qref":"example.set:math:3","answer":["m","n"]}]')" -b "$WORK/jarW"
+expect "W11 enqueue failing: the submission is still 200 + archived, item marked enqueue failed (auto retry)" "$CODE_HTTP $(jq -c '[.archived,.queue.items[0].enq]' "$WORK/resp/w4.b")" '200 [true,"failed"]'
+curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/config?enqueue_mode=" >/dev/null
+CODE_HTTP=$(curl -sS -o "$WORK/resp/w4e.b" -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' -b "$WORK/jarW" "$WA/api/practice/attempts/66666666-6666-4666-8666-666666666666/enqueue")
+get wv "$WA/api/practice/attempts/66666666-6666-4666-8666-666666666666/queue" -b "$WORK/jarW"
+expect "W11b the single page-triggered retry queued it (idempotent: brain items +1 only)" "$CODE_HTTP $(jq -r '.items[0].ui_state' "$WORK/resp/wv.b")" '200 waiting'
+# an old brain (no enqueue endpoint: 404): "not queued", no retry, no failed try
+curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/config?enqueue_mode=off" >/dev/null
+W404=88888888-8888-4888-8888-888888888888; E0=$(wq enqueue_calls)
+gpost w5 "$WA" free-3 "$(mkbody $W404 '[{"qref":"example.set:math:4","answer":"o"}]')" -b "$WORK/jarW"
+CODE_HTTP=$(curl -sS -o "$WORK/resp/w5e.b" -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' -b "$WORK/jarW" "$WA/api/practice/attempts/$W404/enqueue")
+get wv "$WA/api/practice/attempts/$W404/queue" -b "$WORK/jarW"
+expect "W11c old brain (enqueue 404): 200 + archived, item not_queued/not_ready, ONE call only (no retry), shown as 未排队, not 'retrying'" "$(jq -c '[.archived,.queue.items[0].enq,.queue.items[0].reason]' "$WORK/resp/w5.b") $(( $(wq enqueue_calls) - E0 )) $(jq -c '[.items[0].ui_state,(.items[0].label|test("未排队")),.summary.enqueue_retry]' "$WORK/resp/wv.b")" '[true,"not_queued","not_ready"] 1 ["not_queued",true,0]'
+curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/config?enqueue_mode=" >/dev/null
+expect "W11d no request of this run ever carried a changed session_total (mock answers 400 for that)" "$(wq enqueue_total_mismatch)" 0
+# hygiene
+grep -qiE "$CODE|$TOKEN|$GTOKEN|$NTOKEN|$TOPIC" "$WORK/W.log" "$WORK/W2.log" && bad "W12 secrets in the site log" || ok "W12 no code/token/topic in the site log"
+grep -rqiE "$GTOKEN|$NTOKEN|$TOKEN|$TOPIC" "$WORK/q-W" "$WORK/att-W" && bad "W12b secrets in the queue state / archive" || ok "W12b no token/topic in the queue state files or the archive"
+# switch off = old behaviour
+start_site WO 18302 "http://127.0.0.1:$WQ" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-WO" "RUYI_GRADE_MAX_PER_HOUR=200" "RUYI_QUEUE_ENABLED=0"; wait_http "http://127.0.0.1:18302/healthz"
+post_login wo "http://127.0.0.1:18302" "$CODE" -c "$WORK/jarWO"; E0=$(wq enqueue_calls)
+gpost wo "http://127.0.0.1:18302" demo-1 "$(mkbody 77777777-7777-4777-8777-777777777777)" -b "$WORK/jarWO"
+get wov "http://127.0.0.1:18302/api/practice/attempts/77777777-7777-4777-8777-777777777777/queue" -b "$WORK/jarWO"
+expect "W13 RUYI_QUEUE_ENABLED=0: grade has the #22 keys (no queue), the status route is not served, the brain queue gets nothing" "$(jq -c 'has("queue")' "$WORK/resp/wo.b") $CODE_HTTP $(( $(wq enqueue_calls) - E0 ))" "false 400 0"
+kill "$PID_WO" 2>/dev/null
+# rollback with only the master switch off: the other queue variables stay in the env file and are ignored
+start_site WO2 18305 "http://127.0.0.1:$WQ" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-WO2" "RUYI_QUEUE_ENABLED=0" "RUYI_QUEUE_NOTIFY_ENABLED=1" "RUYI_BRAIN_NOTIFY_TOKEN=$NTOKEN" "RUYI_QUEUE_POLL_SECONDS=fast"
+wait_http "http://127.0.0.1:18305/healthz" && ok "W13b RUYI_QUEUE_ENABLED=0 + RUYI_QUEUE_NOTIFY_ENABLED=1 (+ a bad poll value) starts" || bad "W13b start with the queue off and notify on" "$(head -c 300 "$WORK/WO2.log")"
+grep -q 'configuration warning' "$WORK/WO2.log" && ! grep -qF "$NTOKEN" "$WORK/WO2.log" && ok "W13c ... the start log has a warning, no token" || bad "W13c warning in the log"
+kill "$PID_WO2" 2>/dev/null
+# startup validation: three identical tokens refuse to start; values never printed
+OUT=$(env -i PATH="$PATH" RUYI_LISTEN=127.0.0.1:18303 RUYI_STATIC_DIR="$STATIC" RUYI_FAMILY_CODE="$CODE" RUYI_SESSION_SECRET="$SECRET" RUYI_BRAIN_BASE_URL="http://127.0.0.1:$WQ" RUYI_BRAIN_TOKEN="$TOKEN" RUYI_BRAIN_GRADE_TOKEN="$TOKEN" RUYI_BRAIN_NOTIFY_TOKEN="$TOKEN" RUYI_QUEUE_ENABLED=1 RUYI_NTFY_TOPIC="$TOPIC" timeout 5 "$BIN" 2>&1); RC=$?
+[ "$RC" != 0 ] && [ "$RC" != 124 ] && echo "$OUT" | grep -q 'RUYI_BRAIN_NOTIFY_TOKEN' && ! echo "$OUT" | grep -qF "$TOKEN" && ok "W14 three identical tokens -> refuses to start (exit $RC), names the variable, prints no value" || bad "W14 identical tokens" "rc=$RC"
+OUT=$(env -i PATH="$PATH" RUYI_LISTEN=127.0.0.1:18304 RUYI_STATIC_DIR="$STATIC" RUYI_FAMILY_CODE="$CODE" RUYI_SESSION_SECRET="$SECRET" RUYI_BRAIN_BASE_URL="http://127.0.0.1:$WQ" RUYI_BRAIN_TOKEN="$TOKEN" RUYI_BRAIN_GRADE_TOKEN="$GTOKEN" RUYI_QUEUE_ENABLED=1 RUYI_QUEUE_STATE_DIR="/proc/nope/queue" timeout 5 "$BIN" 2>&1); RC=$?
+[ "$RC" != 0 ] && [ "$RC" != 124 ] && ok "W15 unusable queue state dir -> refuses to start (exit $RC)" || bad "W15 bad state dir" "rc=$RC"
+kill "$PID_W2" "$PID_mockWQ" 2>/dev/null
+
 if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/dev/null; then
   section "L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow"
   start_site BR 18199 "http://127.0.0.1:$PORT_MOCK"; wait_http "http://127.0.0.1:18199/healthz"
@@ -999,6 +1095,14 @@ if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/d
   expect "L10c refused attempts recorded nothing in the brain (recorded:false on every item) and only the 4 non-refused ones were announced (3 + 1)" "$(jq -c 'select(.brain_note=="daily_cap")|[.items[].recorded]|any' "$WORK/att-DL/attempts.jsonl" | sort -u | paste -sd' ') $(( $(ntfy_n) - ND0 ))" 'false 4'
   grep -qiE "$CODE|$TOKEN|$GTOKEN" "$WORK/DL.log" && bad "L10d secrets in the log of the daily-limit browser run" || ok "L10d no code/token in the log of the daily-limit browser run"
   kill "$PID_DL" "$PID_mockDL" 2>/dev/null
+  # --- S1 queue: AI first-pass status under queued answers
+  start_mock mockQB 18310 "MOCK_GRADE_TOKEN=$GTOKEN" MOCK_QUEUE=1 "MOCK_NOTIFY_TOKEN=$NTOKEN"; wait_http "http://127.0.0.1:18310/_mock/stats"
+  start_site QB 18311 "http://127.0.0.1:18310" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-QB" "RUYI_GRADE_MAX_PER_HOUR=200" "RUYI_QUEUE_ENABLED=1" "RUYI_QUEUE_STATE_DIR=$WORK/q-QB"; wait_http "http://127.0.0.1:18311/healthz"
+  MOCK_URL="http://127.0.0.1:18310" BROWSER_FLOW=queue BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18311" "$SHOTS" > "$WORK/browser10.out" 2>&1; BRC=$?
+  cat "$WORK/browser10.out" | tee -a "$RESULTS"
+  [ "$BRC" = 0 ] && ok "L11 queue status in headless Chrome: 待解答 → AI 判卷中 → AI初评·待家长核 (full escaped text), timeout copy, purged, polling schedule, hidden tab, reload (all passed)" || bad "L11 queue browser checks"
+  grep -qiE "$CODE|$TOKEN|$GTOKEN|$NTOKEN|$TOPIC" "$WORK/QB.log" && bad "L11b secrets in the log of the queue browser run" || ok "L11b no code/token in the log of the queue browser run"
+  kill "$PID_QB" "$PID_mockQB" 2>/dev/null
 fi
 
 kill "$PID_P" 2>/dev/null

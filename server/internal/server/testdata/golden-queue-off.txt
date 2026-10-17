@@ -1,0 +1,22 @@
+## graded-mix 200
+{"client_attempt_id":"11111111-1111-4111-8111-111111111111","set_id":"demo-1","mode":"graded","brain_recorded":true,"recorded_count":3,"results":[{"qref":"example.set:math:1","status":"graded","correct":true,"recorded":true,"attempt_id":1},{"qref":"example.set:math:2","status":"graded","correct":false,"recorded":true,"attempt_id":2},{"qref":"example.set:math:3","status":"pending_key","correct":null,"recorded":true,"attempt_id":3}],"summary":{"total":3,"graded":2,"correct":1,"pending":1,"unsupported":0,"unanswered":0,"recorded":3},"archived":true,"notify":"sent"}
+## replay 200
+{"client_attempt_id":"11111111-1111-4111-8111-111111111111","set_id":"demo-1","mode":"graded","brain_recorded":true,"recorded_count":3,"results":[{"qref":"example.set:math:1","status":"graded","correct":true,"recorded":true,"attempt_id":1},{"qref":"example.set:math:2","status":"graded","correct":false,"recorded":true,"attempt_id":2},{"qref":"example.set:math:3","status":"pending_key","correct":null,"recorded":true,"attempt_id":3}],"summary":{"total":3,"graded":2,"correct":1,"pending":1,"unsupported":0,"unanswered":0,"recorded":3},"archived":true,"replayed":true}
+## unsupported 200
+{"client_attempt_id":"22222222-2222-4222-8222-222222222222","set_id":"other-2","mode":"graded","brain_recorded":false,"recorded_count":0,"results":[{"qref":"example.set:math:4","status":"unsupported","correct":null,"recorded":false}],"summary":{"total":1,"graded":0,"correct":0,"pending":0,"unsupported":1,"unanswered":0,"recorded":0},"archived":true,"notify":"sent"}
+## bad-shape 400
+{"error":"bad_answer_shape","message":"作答格式和题型不匹配"}
+## GET /api/practice/demo-1/quota 200
+{"basis":"site_archive",<T>,"limit":3,"local":false,"set_id":"demo-1","used":{"example.set:math:1":1,"example.set:math:2":1,"example.set:math:3":1}}
+## GET /api/practice/other-2/quota 200
+{"basis":"site_archive",<T>,"limit":3,"local":false,"set_id":"other-2","used":{"example.set:math:4":0}}
+## GET /api/practice/attempts/11111111-1111-4111-8111-111111111111/queue 400
+{"error":"bad_set_id","message":"套编号不合法"}
+## POST /api/practice/attempts/11111111-1111-4111-8111-111111111111/enqueue 405
+{"error":"method_not_allowed"}
+## archive 0
+{"v":2,"client_attempt_id":"11111111-1111-4111-8111-111111111111","set_id":"demo-1","set_title":"演示套","source":"math.synthetic.p0-demo","submitted_at":"<T>","mode":"graded","sig":"bebdb18398c968863a177e27","items":[{"qref":"example.set:math:1","answer":["1","2","3"],"status":"graded","correct":true,"recorded":true,"attempt_id":1},{"qref":"example.set:math:2","answer":"A","status":"graded","correct":false,"recorded":true,"attempt_id":2},{"qref":"example.set:math:3","answer":"free text","status":"pending_key","correct":null,"recorded":true,"attempt_id":3}],"summary":{"total":3,"graded":2,"correct":1,"pending":1,"unsupported":0,"unanswered":0,"recorded":3},"client":{"ua":"Go-http-client/1.1","ip":"127.0.0.1"}}
+{"v":2,"client_attempt_id":"22222222-2222-4222-8222-222222222222","set_id":"other-2","set_title":"另一套","source":"math.synthetic.p0-demo","submitted_at":"<T>","mode":"graded","sig":"8eda32bcc249d84c6ea78dc9","items":[{"qref":"example.set:math:4","answer":["x"],"status":"unsupported","correct":null,"recorded":false}],"summary":{"total":1,"graded":0,"correct":0,"pending":0,"unsupported":1,"unanswered":0,"recorded":0},"client":{"ua":"Go-http-client/1.1","ip":"127.0.0.1"}}
+## ntfy 0
+/<topic> 如意练习：演示套 3 题，对 1，错 1，待核对 1，已提交。attempt 11111111。完成于 <T>。
+/<topic> 如意练习：另一套 1 题，对 0，不自动判 1，已提交（未记入大脑，仅留档）。attempt 22222222。完成于 <T>。

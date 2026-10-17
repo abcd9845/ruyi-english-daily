@@ -131,6 +131,11 @@ type GradeResult struct {
 	AttemptID int64
 	Recorded  bool
 	Duplicate bool
+	// Queueable / QueueableReason are the brain's additive static hint (契约 v1.0:
+	// queueable_reason ∈ not_needed | kind_not_enabled | question_not_found). Nil
+	// Queueable = the brain did not say (an older brain). Only read when the queue is on.
+	Queueable       *bool
+	QueueableReason string
 }
 
 // GradeResponse is the brain's confirmed reply.
@@ -245,6 +250,9 @@ func decodeGradeResponse(b []byte, req GradeRequest) (*GradeResponse, error) {
 			AttemptID json.RawMessage `json:"attempt_id"`
 			Recorded  bool            `json:"recorded"`
 			Duplicate bool            `json:"duplicate"`
+			// additive (契约 v1.0), ignored unless present
+			Queueable       *bool   `json:"queueable"`
+			QueueableReason *string `json:"queueable_reason"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(b, &v); err != nil {
@@ -291,6 +299,10 @@ func decodeGradeResponse(b []byte, req GradeRequest) (*GradeResponse, error) {
 			// contract: nothing is written, no attempt id; never claim otherwise
 		default:
 			r.Status = StatusPendingKey
+		}
+		r.Queueable = it.Queueable
+		if it.QueueableReason != nil && reasonRe2.MatchString(*it.QueueableReason) {
+			r.QueueableReason = *it.QueueableReason
 		}
 		out.Results = append(out.Results, r)
 	}

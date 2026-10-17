@@ -70,3 +70,17 @@ func TestGradeEnvRejects(t *testing.T) {
 		t.Errorf("grade token equal to the read token: %v", err)
 	}
 }
+
+func TestNtfyBaseURLTrailingSlash(t *testing.T) {
+	for _, in := range []string{"https://ntfy-me.com", "https://ntfy-me.com/"} {
+		m := valid(t)
+		m["RUYI_NTFY_BASE_URL"] = in
+		c, err := Load(env(m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.NtfyBaseURL != "https://ntfy-me.com/" {
+			t.Errorf("%q -> %q", in, c.NtfyBaseURL)
+		}
+	}
+}

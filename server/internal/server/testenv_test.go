@@ -301,6 +301,7 @@ type opts struct {
 	attemptsDir string        // "" = a fresh temp dir
 	noAttempts  bool          // Attempts store nil
 	ntfyURL     string        // "" = ntfy base is a dead address
+	ntfyRaw     *string       // when set: Deps.NtfyBase verbatim (nil = use ntfyURL rules)
 	maxPerHour  int           // 0 = default 5
 	auto        []string      // RUYI_AUTO_SOURCES
 	autoTTL     time.Duration // 0 = default
@@ -352,6 +353,9 @@ func newEnv(t *testing.T, o opts) *env {
 	ntfy := o.ntfyURL
 	if ntfy == "" {
 		ntfy = "http://127.0.0.1:1/"
+	}
+	if o.ntfyRaw != nil {
+		ntfy = *o.ntfyRaw
 	}
 	retry := o.retry
 	if retry == 0 {

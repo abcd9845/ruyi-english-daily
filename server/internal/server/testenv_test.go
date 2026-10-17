@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,7 +76,8 @@ type fakeBrain struct {
 	gradeIDs    map[string]int64  // ps:<cid>:<qref> -> attempt id
 	gradeDayCnt map[string]int    // qref -> writes today
 	gradeSeq    int64
-	gradeBank   int // grade calls that used the bank:read token (must stay 0)
+	gradeQuery  []string // raw query of every grade call (must stay empty)
+	gradeBank   int      // grade calls that used the bank:read token (must stay 0)
 	gradeFirst  bool
 
 	// lookup / pick-practice (contract)
@@ -90,11 +92,7 @@ type fakeBrain struct {
 func newFakeBrain(t *testing.T) *fakeBrain {
 	f := &fakeBrain{token: rnd(t, "tok-"), gradeToken: rnd(t, "gtok-"), calls: map[string]int{}, gradeSeen: map[string]string{}, gradeIDs: map[string]int64{}, gradeDayCnt: map[string]int{}, revs: map[string]int{}}
 	mux := http.NewServeMux()
-	jerr := func(w http.ResponseWriter, code int, c string) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(code)
-		fmt.Fprintf(w, `{"error":{"code":%q}}`, c)
-	}
+	jerr := func(w http.ResponseWriter, code int, c string) { jerrf(w, code, c) }
 	mux.HandleFunc("GET /v1/bank/questions", func(w http.ResponseWriter, r *http.Request) {
 		f.bump("list")
 		f.mu.Lock()
@@ -212,12 +210,29 @@ func (f *fakeBrain) lastGradeReq() map[string]any {
 	_ = json.Unmarshal(f.gradeReqs[len(f.gradeReqs)-1], &m)
 	return m
 }
+func (f *fakeBrain) lastGradeQuery() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.gradeQuery) == 0 {
+		return ""
+	}
+	return f.gradeQuery[len(f.gradeQuery)-1]
+}
 func (f *fakeBrain) gradeCalls() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.gradeReqs) }
 
+// jerrf answers like the real brain: {"code","message"} (+ details through jerrd).
 func jerrf(w http.ResponseWriter, code int, c string) {
+	jerrd(w, code, c, strings.ReplaceAll(c, "_", " "), nil)
+}
+
+func jerrd(w http.ResponseWriter, code int, c, msg string, details map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	fmt.Fprintf(w, `{"error":{"code":%q}}`, c)
+	m := map[string]any{"code": c, "message": msg}
+	if details != nil {
+		m["details"] = details
+	}
+	_ = json.NewEncoder(w).Encode(m)
 }
 
 // switchReply answers the generic "route not deployed" modes. true = handled.
@@ -225,6 +240,8 @@ func switchReply(w http.ResponseWriter, r *http.Request, mode string) bool {
 	switch mode {
 	case "off":
 		http.NotFound(w, r)
+	case "off-json": // the brain's catch-all 404: not_found / "not found", no details
+		jerrd(w, 404, "not_found", "not found", nil)
 	case "501":
 		jerrf(w, 501, "not_implemented")
 	case "fail":
@@ -247,6 +264,10 @@ func (f *fakeBrain) handleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, _ := io.ReadAll(r.Body)
+	if r.URL.RawQuery != "" {
+		jerrf(w, 400, "validation_failed")
+		return
+	}
 	f.lookupReqs = append(f.lookupReqs, body)
 	var req struct {
 		QRefs []string `json:"qrefs"`
@@ -263,17 +284,22 @@ func (f *fakeBrain) handleLookup(w http.ResponseWriter, r *http.Request) {
 		"stem": strings.Repeat("x ________ ", 11), "media": []any{}, "figure_status": "none"} // 11 blanks: over the contract's 10
 	items := []map[string]any{}
 	missing := []string{}
+	returned := map[string]bool{}
 	for _, ref := range req.QRefs {
-		q, ok := have[ref]
+		q, ok := have[fakeCanon(ref)]
 		if !ok {
 			missing = append(missing, ref)
 			continue
 		}
+		if returned[fakeCanon(ref)] { // two strings of one question: only the first is returned
+			continue
+		}
+		returned[fakeCanon(ref)] = true
 		c := map[string]any{}
 		for k, v := range q {
 			c[k] = v // the fake keeps answer/explanation markers on purpose: the site must strip them
 		}
-		c["rev"] = f.curRev(ref)
+		c["rev"] = f.curRev(fakeCanon(ref))
 		items = append(items, c)
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -295,7 +321,21 @@ func (f *fakeBrain) handlePick(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	n, _ := strconv.Atoi(q.Get("n"))
-	if q.Get("brain") != "ruyi" || n < 1 || (q.Get("mode") != "due_first" && q.Get("mode") != "wrong_only") || q.Get("source") != practiceSrc {
+	for k := range q {
+		if k != "source" && k != "n" && k != "date" && k != "brain" && k != "mode" {
+			jerrf(w, 400, "validation_failed")
+			return
+		}
+	}
+	if q.Get("source") == "no-such-source" {
+		jerrd(w, 404, "not_found", "source not found", nil)
+		return
+	}
+	if q.Get("source") == "ambiguous-source" {
+		jerrf(w, 400, "ambiguous_source")
+		return
+	}
+	if q.Get("brain") != "ruyi" || n < 1 || n > 10 || (q.Get("mode") != "due_first" && q.Get("mode") != "wrong_only") || q.Get("source") != practiceSrc {
 		jerrf(w, 400, "validation_failed")
 		return
 	}
@@ -323,6 +363,18 @@ func (f *fakeBrain) handlePick(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"items": all})
 }
 
+// fakeAliases: an old qref that the brain resolves to its canonical one.
+var fakeAliases = map[string]string{"example.set:math:2-old": "example.set:math:2"}
+
+func fakeCanon(q string) string {
+	if c, ok := fakeAliases[q]; ok {
+		return c
+	}
+	return q
+}
+
+var gradeCIDRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,160}$`)
+
 func canonJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 
 // handleGrade is the contract grade endpoint (see internal/brain/grade.go).
@@ -343,12 +395,13 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.gradeReqs = append(f.gradeReqs, body)
+	f.gradeQuery = append(f.gradeQuery, r.URL.RawQuery)
 	switch f.gradeMode {
 	case "off":
 		http.NotFound(w, r)
 		return
-	case "off-json":
-		jerrf(w, 404, "not_found")
+	case "off-json": // the brain's catch-all 404: not_found / "not found", no details
+		jerrd(w, 404, "not_found", "not found", nil)
 		return
 	case "501":
 		jerrf(w, 501, "not_implemented")
@@ -370,40 +423,96 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "429":
-		jerrf(w, 429, "rate_limited")
+		w.Header().Set("Retry-After", "3600")
+		jerrd(w, 429, "rate_limited", "daily grade limit reached", map[string]any{"qrefs": []string{"example.set:math:1"}})
 		return
 	case "rev":
-		jerrf(w, 409, "rev_mismatch")
+		jerrd(w, 409, "rev_mismatch", "rev mismatch", map[string]any{"qref": "example.set:math:2", "rev": 1, "current_rev": 2, "index": 0})
 		return
 	case "idem":
 		jerrf(w, 409, "idempotency_conflict")
 		return
 	case "unknown":
-		jerrf(w, 404, "unknown_qref")
+		jerrd(w, 404, "not_found", "question not found", map[string]any{"qrefs": []string{"example.set:math:1"}})
+		return
+	case "unknown-nodetails": // old code-based hint, but no details.qrefs: NOT the grade endpoint's "question not found"
+		jerrd(w, 404, "unknown_qref", "question not found", nil)
 		return
 	}
+	// the real brain is strict: unknown fields, a query string, bad values are 400
 	var req struct {
 		Brain string `json:"brain"`
 		CID   string `json:"client_attempt_id"`
 		Items []struct {
-			QRef   string `json:"qref"`
-			Answer any    `json:"answer"`
-			Rev    *int   `json:"rev"`
+			QRef        string          `json:"qref"`
+			Answer      any             `json:"answer"`
+			Rev         *int            `json:"rev"`
+			AttemptKind string          `json:"attempt_kind"`
+			AnsweredAt  string          `json:"answered_at"`
+			SessionRef  string          `json:"session_ref"`
+			Payload     json.RawMessage `json:"payload"`
 		} `json:"items"`
 	}
-	if json.Unmarshal(body, &req) != nil || req.Brain != "ruyi" || req.CID == "" || len(req.Items) == 0 || len(req.Items) > 50 {
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&req) != nil {
+		jerrf(w, 400, "invalid_json")
+		return
+	}
+	if r.URL.RawQuery != "" || req.Brain != "ruyi" || !gradeCIDRe.MatchString(req.CID) || len(req.Items) == 0 || len(req.Items) > 50 {
 		jerrf(w, 400, "validation_failed")
 		return
 	}
+	seenQ := map[string]bool{}
 	for _, it := range req.Items {
-		if it.Rev != nil && *it.Rev != f.curRev(it.QRef) {
+		n := 0
+		switch a := it.Answer.(type) {
+		case string:
+			n = len([]rune(a))
+		case []any:
+			if len(a) > 10 {
+				jerrf(w, 400, "validation_failed")
+				return
+			}
+			for _, x := range a {
+				xs, ok := x.(string)
+				if !ok || len([]rune(xs)) > 500 {
+					jerrf(w, 400, "validation_failed")
+					return
+				}
+			}
+		default:
+			jerrf(w, 400, "validation_failed")
+			return
+		}
+		bad := it.QRef == "" || it.QRef != strings.ToLower(it.QRef) || seenQ[fakeCanon(it.QRef)] || n > 500 ||
+			(it.Rev != nil && *it.Rev < 1) || (it.AttemptKind != "" && it.AttemptKind != "correction" && it.AttemptKind != "variant") ||
+			(it.SessionRef != "" && len([]rune(it.SessionRef)) > 200) || len(it.Payload) > 4096 ||
+			3+len(req.CID)+1+len(it.QRef) > 198
+		if it.AnsweredAt != "" {
+			t, err := time.Parse(time.RFC3339, it.AnsweredAt)
+			bad = bad || err != nil || t.After(time.Now().Add(time.Minute)) || t.Before(time.Now().Add(-7*24*time.Hour))
+		}
+		if bad {
+			jerrf(w, 400, "validation_failed")
+			return
+		}
+		seenQ[fakeCanon(it.QRef)] = true
+	}
+	for _, it := range req.Items {
+		if it.Rev != nil && *it.Rev != f.curRev(fakeCanon(it.QRef)) {
 			jerrf(w, 409, "rev_mismatch")
 			return
 		}
 	}
+	if strings.Contains(string(body), `"qref":"example.set:math:99"`) { // an unknown question, with the real 404 shape
+		jerrd(w, 404, "not_found", "question not found", map[string]any{"qrefs": []string{"example.set:math:99"}})
+		return
+	}
 	var items []map[string]any
+	newWrites := false
 	for _, it := range req.Items {
-		key := "ps:" + req.CID + ":" + it.QRef
+		key := "ps:" + req.CID + ":" + fakeCanon(it.QRef)
 		a := canonJSON(it.Answer)
 		if prev, ok := f.gradeSeen[key]; ok && prev != a {
 			jerrf(w, 409, "idempotency_conflict")
@@ -411,17 +520,18 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, it := range req.Items {
-		key := "ps:" + req.CID + ":" + it.QRef
+		key := "ps:" + req.CID + ":" + fakeCanon(it.QRef)
 		a := canonJSON(it.Answer)
+		ref := fakeCanon(it.QRef)
 		o := map[string]any{"qref": it.QRef, "status": "pending_key", "recorded": f.gradeMode != "norecord", "duplicate": false}
 		switch {
-		case strings.Contains(a, "~review~"):
+		case strings.Contains(a, "~review~"), strings.Contains(a, "厘米"): // a unit tail the brain cannot read -> needs_review, never wrong
 			o["status"] = "needs_review"
-		case it.QRef == "example.set:math:1":
+		case ref == "example.set:math:1":
 			o["status"], o["correct"] = "graded", a == `["1","2","3"]`
-		case it.QRef == "example.set:math:2":
+		case ref == "example.set:math:2":
 			o["status"], o["correct"] = "graded", a == `"B"`
-		case it.QRef == "example.set:math:4":
+		case ref == "example.set:math:4":
 			o["status"], o["recorded"] = "unsupported", false
 		}
 		if o["recorded"] == true {
@@ -434,12 +544,16 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 				o["attempt_id"] = f.gradeSeq
 				f.gradeSeen[key] = a
 				f.calls["grade_new_item"]++
+				newWrites = true
 			}
 		}
 		items = append(items, o)
 	}
 	items = append(items, map[string]any{"qref": "example.set:math:5", "status": "graded", "correct": true, "recorded": true, "attempt_id": 99, "duplicate": false}) // never asked
 	w.Header().Set("Content-Type", "application/json")
+	if newWrites { // 201 when something new was written, 200 for replays / nothing written
+		w.WriteHeader(201)
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"client_attempt_id": req.CID, "items": items})
 }
 

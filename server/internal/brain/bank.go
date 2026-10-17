@@ -80,14 +80,14 @@ func (c *Client) listLookup(ctx context.Context, source string, qrefs []string) 
 	}
 	have := make(map[string]Question, len(all))
 	for _, q := range all {
-		if _, dup := have[q.QRef]; !dup {
-			have[q.QRef] = q
+		if k := strings.ToLower(q.QRef); have[k].QRef == "" {
+			have[k] = q
 		}
 	}
 	found := map[string]Question{}
 	missing := []string{}
 	for _, r := range qrefs {
-		if q, ok := have[r]; ok {
+		if q, ok := have[strings.ToLower(r)]; ok {
 			found[r] = q
 		} else {
 			missing = append(missing, r)

@@ -148,9 +148,7 @@ type gradeReq struct {
 }
 
 const (
-	answeredAtPast   = 7 * 24 * time.Hour
-	answeredAtFuture = 5 * time.Minute
-	maxRev           = 1_000_000_000
+	maxRev = 1_000_000_000
 )
 
 // Page-facing messages for the brain's error replies.
@@ -161,11 +159,27 @@ const (
 	msgUnknownQref  = "有题目在大脑里找不到了，请刷新页面；还不行请告诉家长。"
 )
 
-// unknownQrefCodes are the brain error codes that mean "a qref of the batch does
-// not exist". Any other 404 from the grade URL is read as "endpoint not
-// deployed" and degrades to archive-only (the answers are kept, nothing is
-// claimed as recorded).
-var unknownQrefCodes = map[string]bool{"unknown_qref": true, "qref_not_found": true, "question_not_found": true}
+// answerFitsBrain: the brain accepts answer strings of at most brain.MaxAnswerLen
+// characters. A longer one is not sent (archived as "unsupported" by this site),
+// never truncated, never sent to be refused.
+//
+// (A 404 from the grade URL is told apart by its details, not by an error code:
+// details.qrefs = the brain's "question not found"; any other 404 = the route is
+// not deployed there yet and the submission degrades to archive-only.)
+func answerFitsBrain(ans any) bool {
+	ok := func(s string) bool { return utf8.RuneCountInString(s) <= brain.MaxAnswerLen }
+	switch a := ans.(type) {
+	case string:
+		return ok(a)
+	case []string:
+		for _, x := range a {
+			if !ok(x) {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 type qshape struct {
 	kind    string // single | multi | fill | free
@@ -331,7 +345,8 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 			writeErr(w, http.StatusBadRequest, "bad_answered_at", "作答时间格式不对")
 			return
 		}
-		if now := s.now(); !t.After(now.Add(answeredAtFuture)) && t.After(now.Add(-answeredAtPast)) {
+		// outside the brain's window (now-7d .. now+1min) the field is simply not sent
+		if brain.AnsweredAtSendable(t, s.now()) {
 			answeredAt = t.UTC()
 		}
 	}
@@ -376,7 +391,7 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		g := given{qref: a.QRef}
 		if !empty {
 			g.ans = ans
-			g.skip = sh.kind == "fill" && sh.blanks > brain.MaxBlanks
+			g.skip = sh.kind == "fill" && sh.blanks > brain.MaxBlanks || !answerFitsBrain(ans)
 		}
 		if a.Rev != nil {
 			if *a.Rev < 1 || *a.Rev > maxRev {
@@ -521,6 +536,9 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 			switch {
 			case be.Kind == brain.KindRateLimited:
 				s.Log.Warn("brain refused the batch: rate limited", "set", set.ID, "err", desc)
+				if be.RetryAfter > 0 { // passed on as the brain gave it (seconds)
+					w.Header().Set("Retry-After", fmt.Sprint(int(be.RetryAfter/time.Second)))
+				}
 				writeErr(w, http.StatusTooManyRequests, "daily_cap", msgDailyCap)
 				return
 			case be.Kind == brain.KindConflict && be.Code == "rev_mismatch":
@@ -531,11 +549,12 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 				s.Log.Warn("brain refused the batch: idempotency conflict (client bug path)", "set", set.ID, "err", desc)
 				writeIdemConflict(w)
 				return
-			case be.Kind == brain.KindNotFound && unknownQrefCodes[be.Code]:
+			case be.HasQrefs():
 				s.Log.Warn("brain refused the batch: unknown qref", "set", set.ID, "err", desc)
 				writeErr(w, http.StatusNotFound, "unknown_qref", msgUnknownQref)
 				return
 			case be.Kind == brain.KindNotReady || be.Kind == brain.KindNotFound:
+				// a 404 without details.qrefs is the catch-all of a brain that does not have the route yet
 				note = "not_ready"
 			}
 		}

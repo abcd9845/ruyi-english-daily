@@ -10,9 +10,22 @@ package brain
 //	  -> 200 {"items":[{"qref","number","origin":"review|wrong","reasons":[…]}]}
 //
 // Neither endpoint exists on the live brain until its contract change is
-// deployed. A 404/501/405 therefore means "not deployed here yet", not "no such
-// question": lookup falls back to reading the source list (P1–P3 behaviour),
-// pick-practice answers ErrUnsupported.
+// deployed. Telling "not deployed" from a real answer:
+//
+//   - lookup never answers 404 once deployed (an unknown qref goes into
+//     "missing"), so ANY 404/501/405 means "not deployed": fall back to reading
+//     the source list (P1–P3 behaviour). ProbeLookup asks for one obviously
+//     non-existent qref: 200 + that qref in "missing" = deployed.
+//   - pick-practice answers 404 not_found for an unknown source/brain too. The
+//     catch-all route 404 is {code:not_found, message:"not found"} without
+//     details (Error.IsRouteNotFound) = not deployed -> ErrUnsupported; any
+//     other 404 is a real "no such source/brain" and is returned as an error.
+//   - grade: a 404 with details.qrefs is the deployed endpoint's "question not
+//     found"; any other 404 = not deployed (see grade.go).
+//
+// qrefs are lower-case on the wire; the caller's original strings are kept for
+// matching replies (lookup/pick answer canonical qrefs, "missing" echoes the
+// request string; an alias resolves to its canonical item).
 
 import (
 	"bytes"
@@ -40,6 +53,11 @@ const (
 	lookupDownFor  = 30 * time.Second
 	maxPickBytes   = 1 << 20
 	maxPickReasons = 12
+
+	// MaxPickN is the contract's upper bound of n for pick-practice (1..10).
+	MaxPickN = 10
+	// probeQRef is an obviously non-existent qref used by ProbeLookup (read-only).
+	probeQRef = "math:zz-probe-nonexistent:1"
 )
 
 var (
@@ -48,13 +66,32 @@ var (
 )
 
 // NotReady reports whether err means "this brain does not have that endpoint
-// (yet)": 404 / 501 / 405 on a route that must exist after deployment.
+// (yet)": 501/405, or the catch-all route 404 (message "not found", no
+// details). A 404 that carries details or another message is an answer of a
+// deployed endpoint and is NOT "not ready".
 func NotReady(err error) bool {
 	var be *Error
 	if !errors.As(err, &be) {
 		return false
 	}
+	return be.Kind == KindNotReady || be.IsRouteNotFound()
+}
+
+// notDeployedAny is NotReady for endpoints that never answer 404 themselves
+// (lookup): every 404 / 501 / 405 means "not deployed".
+func notDeployedAny(err error) bool {
+	var be *Error
+	if !errors.As(err, &be) {
+		return false
+	}
 	return be.Kind == KindNotReady || be.Kind == KindNotFound
+}
+
+// RouteMissing is true if err is a 404 for something real (a source or brain
+// that does not exist, grade's unknown qref) rather than a missing route.
+func RouteMissing(err error) bool {
+	var be *Error
+	return errors.As(err, &be) && be.Kind == KindNotFound && !be.IsRouteNotFound()
 }
 
 func (c *Client) id() string {
@@ -99,12 +136,13 @@ func (c *Client) doJSON(ctx context.Context, method, rawURL string, body []byte,
 }
 
 // LookupByQrefs implements Bank with the batch lookup endpoint (≤100 qrefs per
-// call, chunked). Questions whose source differs from source are treated as
-// missing. If the endpoint is not deployed it falls back to reading the whole
-// source list, and remembers that for a short while to avoid a wasted request
-// each time.
+// call, chunked). The returned map is keyed by the caller's qref strings (an
+// alias maps to its canonical question); missing echoes the caller's strings.
+// Questions whose source differs from source are treated as missing. If the
+// endpoint is not deployed it falls back to reading the whole source list and
+// remembers that for a short while to avoid a wasted request each time.
 func (c *Client) LookupByQrefs(ctx context.Context, source string, qrefs []string) (map[string]Question, []string, error) {
-	want := make([]string, 0, len(qrefs))
+	want := make([]string, 0, len(qrefs)) // caller's strings, deduplicated
 	seen := map[string]bool{}
 	for _, r := range qrefs {
 		if r != "" && !seen[r] {
@@ -126,14 +164,24 @@ func (c *Client) LookupByQrefs(ctx context.Context, source string, qrefs []strin
 	if path == "" {
 		path = DefaultLookupPath
 	}
-	for i := 0; i < len(want); i += MaxLookupQrefs {
-		chunk := want[i:min(i+MaxLookupQrefs, len(want))]
+	// the strings that go on the wire: lower-cased, one per distinct value
+	var sent []string
+	byWire := map[string][]string{} // wire string -> caller strings
+	for _, r := range want {
+		w := strings.ToLower(r)
+		if _, ok := byWire[w]; !ok {
+			sent = append(sent, w)
+		}
+		byWire[w] = append(byWire[w], r)
+	}
+	for i := 0; i < len(sent); i += MaxLookupQrefs {
+		chunk := sent[i:min(i+MaxLookupQrefs, len(sent))]
 		body, _ := json.Marshal(map[string]any{"qrefs": chunk})
 		cctx, cancel := context.WithTimeout(ctx, lookupTimeout)
 		b, err := c.doJSON(cctx, http.MethodPost, c.endpoint(path, nil), body, MaxListBytes)
 		cancel()
 		if err != nil {
-			if NotReady(err) {
+			if notDeployedAny(err) {
 				c.mu.Lock()
 				c.lookupDownUntil = c.now().Add(lookupDownFor)
 				c.mu.Unlock()
@@ -142,25 +190,19 @@ func (c *Client) LookupByQrefs(ctx context.Context, source string, qrefs []strin
 			return nil, nil, err
 		}
 		var rep struct {
-			Items []Question `json:"items"`
+			Items   []Question `json:"items"`
+			Missing []string   `json:"missing"`
 		}
 		if json.Unmarshal(b, &rep) != nil {
 			return nil, nil, &Error{Kind: KindUnavailable, What: "malformed lookup reply"}
 		}
-		asked := map[string]bool{}
-		for _, r := range chunk {
-			asked[r] = true
-		}
-		for _, q := range rep.Items {
-			if !asked[q.QRef] || (q.Source != nil && *q.Source != source) {
-				continue // never trust qrefs we did not ask for; foreign source = missing
-			}
-			if _, dup := found[q.QRef]; !dup {
-				found[q.QRef] = normalizeQuestion(q)
+		for wire, q := range alignLookup(chunk, rep.Items, rep.Missing, source) {
+			for _, orig := range byWire[wire] {
+				found[orig] = q
 			}
 		}
 	}
-	// "missing" is whatever was asked and not returned: that also covers a
+	// "missing" is whatever was asked and not resolved: that also covers a
 	// brain-side missing list and a reply that simply omits a qref.
 	missing := []string{}
 	for _, r := range want {
@@ -171,12 +213,104 @@ func (c *Client) LookupByQrefs(ctx context.Context, source string, qrefs []strin
 	return found, missing, nil
 }
 
+// alignLookup pairs the wire strings of one chunk with the reply's items.
+// Items carry the CANONICAL qref; an exact (case-insensitive) match is
+// unambiguous. A string that is neither echoed in "missing" nor equal to an
+// item's qref is an alias; the reply lists items in request order and drops a
+// second string that resolves to an already returned question, so aliases are
+// paired by position only if that is unambiguous (as many leftover strings as
+// leftover items). Anything else stays missing rather than being guessed.
+func alignLookup(chunk []string, items []Question, missing []string, source string) map[string]Question {
+	out := map[string]Question{}
+	miss := map[string]bool{}
+	for _, m := range missing {
+		miss[strings.ToLower(m)] = true
+	}
+	used := make([]bool, len(items))
+	var rest []string
+	for _, w := range chunk {
+		if miss[w] {
+			continue
+		}
+		matched := false
+		for i, q := range items {
+			if !used[i] && strings.EqualFold(q.QRef, w) {
+				used[i] = true
+				matched = true
+				if q.Source == nil || *q.Source == source {
+					out[w] = normalizeQuestion(q)
+				}
+				break
+			}
+		}
+		if !matched {
+			rest = append(rest, w)
+		}
+	}
+	var left []Question
+	for i, q := range items {
+		if !used[i] && q.QRef != "" {
+			left = append(left, q)
+		}
+	}
+	if len(rest) > 0 && len(rest) == len(left) {
+		for i, w := range rest {
+			if left[i].Source == nil || *left[i].Source == source {
+				out[w] = normalizeQuestion(left[i])
+			}
+		}
+	}
+	return out
+}
+
+// ProbeLookup asks the lookup endpoint for one obviously non-existent qref
+// (read-only; nothing is written anywhere): 200 whose "missing" names it means
+// the endpoint is deployed; 404/501/405 means it is not. Any other outcome is
+// an error (inconclusive). The answer feeds the same short-lived cache that
+// LookupByQrefs uses, so a later lookup does not probe again.
+func (c *Client) ProbeLookup(ctx context.Context) (deployed bool, err error) {
+	path := c.lookupPath
+	if path == "" {
+		path = DefaultLookupPath
+	}
+	body, _ := json.Marshal(map[string]any{"qrefs": []string{probeQRef}})
+	cctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	b, err := c.doJSON(cctx, http.MethodPost, c.endpoint(path, nil), body, MaxListBytes)
+	if err != nil {
+		if notDeployedAny(err) {
+			c.mu.Lock()
+			c.lookupDownUntil = c.now().Add(lookupDownFor)
+			c.mu.Unlock()
+			return false, nil
+		}
+		return false, err
+	}
+	var rep struct {
+		Items   []Question `json:"items"`
+		Missing []string   `json:"missing"`
+	}
+	if json.Unmarshal(b, &rep) != nil || len(rep.Items) != 0 {
+		return false, &Error{Kind: KindUnavailable, What: "unexpected probe reply"}
+	}
+	for _, m := range rep.Missing {
+		if m == probeQRef {
+			c.mu.Lock()
+			c.lookupDownUntil = time.Time{}
+			c.mu.Unlock()
+			return true, nil
+		}
+	}
+	return false, &Error{Kind: KindUnavailable, What: "unexpected probe reply"}
+}
+
 // pick implements the brain-side modes of SelectForPractice.
 func (c *Client) pick(ctx context.Context, source string, n int, o SelectOpts) ([]Pick, error) {
 	path := c.pickPath
 	if path == "" {
 		path = DefaultPickPath
 	}
+	n = max(1, min(n, MaxPickN)) // contract: n is 1..10
 	q := url.Values{"source": {source}, "n": {strconv.Itoa(n)}, "mode": {o.Mode}, "brain": {c.id()}}
 	ctx, cancel := context.WithTimeout(ctx, pickTimeout)
 	defer cancel()

@@ -392,18 +392,31 @@ func main() {
 		switches["grade"] = "fail"
 	}
 	var swmu sync.Mutex
+	// cerr answers like the real brain's contract endpoints: {"code","message","details"?}.
+	cerr := func(w http.ResponseWriter, status int, code, msg string, details map[string]any, hdr map[string]string) {
+		w.Header().Set("Content-Type", "application/json")
+		for k, v := range hdr {
+			w.Header().Set(k, v)
+		}
+		w.WriteHeader(status)
+		m := map[string]any{"code": code, "message": msg}
+		if details != nil {
+			m["details"] = details
+		}
+		_ = json.NewEncoder(w).Encode(m)
+	}
 	// blocked answers true (and has written the reply) if the endpoint is switched off/failing.
 	blocked := func(name string, w http.ResponseWriter, r *http.Request) bool {
 		swmu.Lock()
 		v := switches[name]
 		swmu.Unlock()
 		switch v {
-		case "off":
-			http.NotFound(w, r)
+		case "off": // the catch-all 404 of a route the brain does not have: not_found / "not found", no details
+			cerr(w, 404, "not_found", "not found", nil, nil)
 		case "501":
-			apiErr(w, 501, "not_implemented")
+			cerr(w, 501, "not_implemented", "not implemented", nil, nil)
 		case "fail":
-			apiErr(w, 500, "internal")
+			cerr(w, 500, "internal", "internal error", nil, nil)
 		default:
 			return false
 		}
@@ -428,6 +441,16 @@ func main() {
 	for _, q := range qs {
 		known[q.QRef] = q
 	}
+	// aliases: an old qref that resolves to its canonical one (lookup/pick answer the canonical qref,
+	// "missing" echoes the request string, grade echoes the string it was sent).
+	aliases := map[string]string{"example.set:math:2-old": "example.set:math:2"}
+	canonOf := func(q string) string {
+		if c, ok := aliases[q]; ok {
+			return c
+		}
+		return q
+	}
+	qrefOK := func(q string) bool { return q != "" && len(q) <= 300 && q == strings.ToLower(q) }
 	var gmu sync.Mutex // guards revs, keys, writes, caps, attempt ids
 	revs := map[string]int{}
 	curRev := func(q string) int {
@@ -444,22 +467,33 @@ func main() {
 		_, _ = w.Write([]byte(strconv.Itoa(revs[q]) + "\n"))
 	})
 
-	// POST /v1/questions/lookup: no answers, with rev / media / figure_status; missing[] for unknown qrefs.
+	// POST /v1/bank/questions/lookup: no answers, with rev / media / figure_status; unknown qrefs go into
+	// missing[] (lookup never answers 404 once deployed). No query string, lower-case qrefs only.
 	mux.HandleFunc("POST /v1/bank/questions/lookup", func(w http.ResponseWriter, r *http.Request) {
 		bump("lookup")
 		if blocked("lookup", w, r) {
 			return
 		}
 		if !bearer(r) {
-			apiErr(w, 401, "unauthorized")
+			cerr(w, 401, "unauthorized", "unauthorized", nil, nil)
 			return
 		}
 		var req struct {
 			QRefs []string `json:"qrefs"`
 		}
-		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil || len(req.QRefs) == 0 || len(req.QRefs) > 100 {
-			apiErr(w, 400, "validation_failed")
+		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+		dec.DisallowUnknownFields()
+		if r.URL.RawQuery != "" || dec.Decode(&req) != nil || len(req.QRefs) == 0 || len(req.QRefs) > 100 {
+			bump("lookup_400")
+			cerr(w, 400, "invalid_json", "invalid request", nil, nil)
 			return
+		}
+		for _, q := range req.QRefs {
+			if !qrefOK(q) {
+				bump("lookup_400")
+				cerr(w, 400, "validation_failed", "invalid qref", nil, nil)
+				return
+			}
 		}
 		type lq struct {
 			question
@@ -467,15 +501,26 @@ func main() {
 		}
 		items := []lq{}
 		missing := []string{}
+		returned := map[string]bool{}
+		seenStr := map[string]bool{}
 		gmu.Lock()
 		for _, ref := range req.QRefs {
-			q, ok := known[ref]
+			if seenStr[ref] {
+				continue // duplicate strings count once
+			}
+			seenStr[ref] = true
+			c := canonOf(ref)
+			q, ok := known[c]
 			if !ok {
 				missing = append(missing, ref)
 				continue
 			}
+			if returned[c] {
+				continue // two strings of one question: only the first position is returned
+			}
+			returned[c] = true
 			q.Answer, q.Explanation, q.Solution = "", "", "" // lookup never carries answers
-			items = append(items, lq{q, curRev(ref)})
+			items = append(items, lq{q, curRev(c)})
 		}
 		gmu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -489,14 +534,38 @@ func main() {
 			return
 		}
 		if !bearer(r) {
-			apiErr(w, 401, "unauthorized")
+			cerr(w, 401, "unauthorized", "unauthorized", nil, nil)
 			return
 		}
 		qv := r.URL.Query()
+		for k := range qv { // the only query parameters of this endpoint
+			if k != "source" && k != "n" && k != "date" && k != "brain" && k != "mode" {
+				bump("pick_400")
+				cerr(w, 400, "validation_failed", "unknown query parameter", nil, nil)
+				return
+			}
+		}
 		mode, src := qv.Get("mode"), qv.Get("source")
 		n, nerr := strconv.Atoi(qv.Get("n"))
-		if qv.Get("brain") != "ruyi" || (mode != "due_first" && mode != "wrong_only") || nerr != nil || n < 1 || n > 50 {
-			apiErr(w, 400, "validation_failed")
+		if (mode != "" && mode != "due_first" && mode != "wrong_only") || nerr != nil || n < 1 || n > 10 {
+			bump("pick_400")
+			cerr(w, 400, "validation_failed", "invalid query", nil, nil)
+			return
+		}
+		if mode == "" {
+			mode = "due_first"
+		}
+		if qv.Get("brain") != "ruyi" { // an unknown brain / source is a real 404 with its own message
+			cerr(w, 404, "not_found", "brain not found", nil, nil)
+			return
+		}
+		if src == "ambiguous-source" {
+			bump("pick_400")
+			cerr(w, 400, "ambiguous_source", "ambiguous source", nil, nil)
+			return
+		}
+		if src != practiceSource && src != source {
+			cerr(w, 404, "not_found", "source not found", nil, nil)
 			return
 		}
 		type pick struct {
@@ -512,20 +581,20 @@ func main() {
 		switch src {
 		case practiceSource:
 			if mode == "wrong_only" {
-				all = []pick{mk("example.set:math:1", "wrong", "unresolved_wrong"),
-					mk("example.set:math:3", "wrong", "unresolved_wrong", "deferred:pending_key"),
-					mk("example.set:math:4", "wrong", "unresolved_wrong", "deferred:unsupported_qtype")}
+				all = []pick{mk("example.set:math:1", "wrong", "wrong_count:3"),
+					mk("example.set:math:3", "wrong", "wrong_count:2", "deferred:pending_key"),
+					mk("example.set:math:4", "wrong", "wrong_count:1", "deferred:unsupported_qtype")}
 			} else {
-				all = []pick{mk("example.set:math:2", "review", "due_review"),
-					mk("example.set:math:1", "wrong", "unresolved_wrong"),
-					mk("example.set:math:5", "review", "due_review")}
+				all = []pick{mk("example.set:math:2", "review", "due_on:2026-10-17", "wrong_count:2"),
+					mk("example.set:math:1", "wrong", "wrong_count:3"),
+					mk("example.set:math:5", "review", "due_on:2026-10-16", "wrong_count:1")}
 			}
 		case source:
 			ids := []int{3, 17, 5, 9, 12, 21}
-			origin, reason := "wrong", "unresolved_wrong"
+			origin, reason := "wrong", "wrong_count:2"
 			if mode == "due_first" {
 				ids = []int{2, 3, 6, 17, 8}
-				origin, reason = "review", "due_review"
+				origin, reason = "review", "due_on:2026-10-17"
 			}
 			for _, i := range ids {
 				ref := fmt.Sprintf("math:%s:q%02d", source, i)
@@ -553,11 +622,12 @@ func main() {
 	}
 	var lastGrade []byte
 	type stored struct {
-		answer    string // canonical JSON of the answer
-		status    string
-		correct   *bool
-		attemptID int64
-		recorded  bool
+		answer     string // canonical JSON of the answer
+		status     string
+		correct    *bool
+		attemptID  int64
+		recorded   bool
+		answeredAt time.Time
 	}
 	idem := map[string]stored{}  // ps:<client_attempt_id>:<qref>
 	dayCount := map[string]int{} // <day>|<qref> -> writes
@@ -574,6 +644,13 @@ func main() {
 		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&v)
 		gmu.Lock()
 		keys[r.URL.Query().Get("qref")] = v
+		gmu.Unlock()
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	gradeUnknown := map[string]bool{}
+	mux.HandleFunc("POST /_mock/grade-unknown", func(w http.ResponseWriter, r *http.Request) {
+		gmu.Lock()
+		gradeUnknown[r.URL.Query().Get("qref")] = r.URL.Query().Get("v") != "off"
 		gmu.Unlock()
 		_, _ = w.Write([]byte("ok\n"))
 	})
@@ -602,7 +679,7 @@ func main() {
 			if bearer(r) {
 				bump("grade_with_bank_read_token")
 			}
-			apiErr(w, 403, "forbidden")
+			cerr(w, 403, "forbidden", "forbidden", nil, nil)
 			return
 		}
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
@@ -610,44 +687,91 @@ func main() {
 			Brain string `json:"brain"`
 			CID   string `json:"client_attempt_id"`
 			Items []struct {
-				QRef        string `json:"qref"`
-				Answer      any    `json:"answer"`
-				Rev         *int   `json:"rev"`
-				AttemptKind string `json:"attempt_kind"`
-				AnsweredAt  string `json:"answered_at"`
-				SessionRef  string `json:"session_ref"`
+				QRef        string          `json:"qref"`
+				Answer      any             `json:"answer"`
+				Rev         *int            `json:"rev"`
+				AttemptKind string          `json:"attempt_kind"`
+				AnsweredAt  *string         `json:"answered_at"`
+				SessionRef  *string         `json:"session_ref"`
+				Payload     json.RawMessage `json:"payload"`
 			} `json:"items"`
 		}
+		// Strict, like the real brain: unknown body fields, any query other than ?brain= and
+		// every out-of-contract value is a 400 and nothing is written.
 		dec := json.NewDecoder(bytes.NewReader(body))
-		bad := func() { apiErr(w, 400, "validation_failed") }
-		if dec.Decode(&req) != nil || req.Brain != "ruyi" || !mockCIDRe.MatchString(req.CID) || len(req.Items) == 0 || len(req.Items) > 50 {
-			bad()
+		dec.DisallowUnknownFields()
+		for k := range r.URL.Query() {
+			if k != "brain" {
+				bump("grade_400")
+				cerr(w, 400, "validation_failed", "unknown query parameter", nil, nil)
+				return
+			}
+		}
+		if err := dec.Decode(&req); err != nil || dec.More() {
+			bump("grade_400")
+			cerr(w, 400, "invalid_json", "invalid json", nil, nil)
+			return
+		}
+		bad := func(msg string) { cerr(w, 400, "validation_failed", msg, nil, nil); bump("grade_400") }
+		if req.Brain != "ruyi" || !mockCIDRe.MatchString(req.CID) || len(req.Items) == 0 || len(req.Items) > 50 {
+			bad("invalid request")
 			return
 		}
 		seen := map[string]bool{}
 		canon := make([]string, len(req.Items))
+		cq := make([]string, len(req.Items))            // canonical qref
+		answeredAt := make([]time.Time, len(req.Items)) // zero when not sent
 		for i, it := range req.Items {
-			if it.QRef == "" || seen[it.QRef] || it.Answer == nil || (it.AttemptKind != "" && it.AttemptKind != "correction" && it.AttemptKind != "variant") {
-				bad()
+			if !qrefOK(it.QRef) || it.Answer == nil || (it.AttemptKind != "" && it.AttemptKind != "correction" && it.AttemptKind != "variant") {
+				bad("invalid item")
 				return
 			}
-			seen[it.QRef] = true
+			cq[i] = canonOf(it.QRef)
+			if seen[cq[i]] || len("ps:"+req.CID+":"+cq[i]) > 198 {
+				bad("duplicate qref or key too long")
+				return
+			}
+			seen[cq[i]] = true
 			switch a := it.Answer.(type) {
 			case string:
+				if len([]rune(a)) > 500 {
+					bad("answer too long")
+					return
+				}
 			case []any:
 				if len(a) > 10 {
-					bad()
+					bad("too many answers")
 					return
+				}
+				for _, e := range a {
+					if es, ok := e.(string); !ok || len([]rune(es)) > 500 {
+						bad("invalid answer")
+						return
+					}
 				}
 			default:
-				bad()
+				bad("invalid answer")
 				return
 			}
-			if it.AnsweredAt != "" {
-				if _, err := time.Parse(time.RFC3339, it.AnsweredAt); err != nil {
-					bad()
+			if it.Rev != nil && *it.Rev < 1 {
+				bad("invalid rev")
+				return
+			}
+			if it.SessionRef != nil && (len(*it.SessionRef) < 1 || len(*it.SessionRef) > 200) {
+				bad("invalid session_ref")
+				return
+			}
+			if len(it.Payload) > 4096 {
+				bad("payload too large")
+				return
+			}
+			if it.AnsweredAt != nil {
+				t, err := time.Parse(time.RFC3339, *it.AnsweredAt)
+				if err != nil || t.Before(now().Add(-7*24*time.Hour)) || t.After(now().Add(time.Minute)) {
+					bad("invalid answered_at")
 					return
 				}
+				answeredAt[i] = t
 			}
 			c, _ := json.Marshal(it.Answer)
 			canon[i] = string(c)
@@ -655,46 +779,61 @@ func main() {
 		gmu.Lock()
 		defer gmu.Unlock()
 		lastGrade = body
-		// 1. any unknown qref: 404 for the whole batch, nothing written
+		// 1. any unknown qref: 404 for the whole batch (details.qrefs lists them), nothing written
+		var unknown []string
 		for _, it := range req.Items {
-			if _, ok := known[it.QRef]; !ok {
-				apiErr(w, 404, "unknown_qref")
+			if _, ok := known[canonOf(it.QRef)]; !ok || gradeUnknown[canonOf(it.QRef)] {
+				unknown = append(unknown, it.QRef)
+			}
+		}
+		if len(unknown) > 0 {
+			cerr(w, 404, "not_found", "question not found", map[string]any{"qrefs": unknown}, nil)
+			return
+		}
+		// 2. rev must be the current one (details never carry an item index)
+		for i, it := range req.Items {
+			if it.Rev != nil && *it.Rev != curRev(cq[i]) {
+				cerr(w, 409, "rev_mismatch", "rev mismatch", map[string]any{"qref": cq[i], "rev": *it.Rev, "current_rev": curRev(cq[i])}, nil)
 				return
 			}
 		}
-		// 2. rev must be the current one
-		for _, it := range req.Items {
-			if it.Rev != nil && *it.Rev != curRev(it.QRef) {
-				apiErr(w, 409, "rev_mismatch")
-				return
-			}
-		}
-		// 3. idempotency: same id+qref with another answer/result is a conflict
+		// 3. idempotency: same id+canonical qref with another answer/result/answered_at is a conflict.
+		// attempt_kind, session_ref and payload do not take part; an absent answered_at is a replay.
 		type plan struct {
 			status string
 			corr   *bool
 			prev   *stored
 		}
 		plans := make([]plan, len(req.Items))
-		for i, it := range req.Items {
-			st, c := decide(it.QRef, it.Answer, canon[i])
+		for i := range req.Items {
+			st, c := decide(cq[i], req.Items[i].Answer, canon[i])
 			plans[i] = plan{status: st, corr: c}
-			if prev, ok := idem["ps:"+req.CID+":"+it.QRef]; ok {
+			if prev, ok := idem["ps:"+req.CID+":"+cq[i]]; ok {
 				p := prev
 				plans[i].prev = &p
-				if prev.answer != canon[i] || prev.status != st || !sameCorrect(prev.correct, c) {
-					apiErr(w, 409, "idempotency_conflict")
+				atDiffers := !answeredAt[i].IsZero() && !prev.answeredAt.IsZero() && !answeredAt[i].Equal(prev.answeredAt)
+				if prev.answer != canon[i] || prev.status != st || !sameCorrect(prev.correct, c) || atDiffers {
+					cerr(w, 409, "idempotency_conflict", "idempotency conflict", nil, nil)
 					return
 				}
 			}
 		}
-		// 4. daily cap: a question is written at most 3 times a day (new writes only)
-		day := now().UTC().Format("2006-01-02")
+		// 4. daily cap: 3 writes per brain per question per Shanghai day (new writes only; unsupported
+		// writes nothing and does not count; pending_key and needs_review count). The whole batch is refused.
+		sh := time.FixedZone("CST", 8*3600)
+		nowSh := now().In(sh)
+		day := nowSh.Format("2006-01-02")
+		var capped []string
 		for i, it := range req.Items {
-			if plans[i].prev == nil && plans[i].status != "unsupported" && dayCount[day+"|"+it.QRef] >= 3 {
-				apiErr(w, 429, "rate_limited")
-				return
+			if plans[i].prev == nil && plans[i].status != "unsupported" && dayCount[day+"|"+cq[i]] >= 3 {
+				capped = append(capped, it.QRef)
 			}
+		}
+		if len(capped) > 0 {
+			next := time.Date(nowSh.Year(), nowSh.Month(), nowSh.Day()+1, 0, 0, 0, 0, sh)
+			cerr(w, 429, "rate_limited", "daily grade limit reached", map[string]any{"qrefs": capped},
+				map[string]string{"Retry-After": strconv.Itoa(int(next.Sub(nowSh).Seconds()) + 1)})
+			return
 		}
 		// 5. write
 		type outItem struct {
@@ -706,26 +845,31 @@ func main() {
 			Duplicate bool   `json:"duplicate"`
 		}
 		out := make([]outItem, len(req.Items))
+		wrote := false
 		for i, it := range req.Items {
 			p := plans[i]
-			o := outItem{QRef: it.QRef, Status: p.status, Correct: p.corr}
+			o := outItem{QRef: it.QRef, Status: p.status, Correct: p.corr} // echoes the string it was sent
 			switch {
 			case p.prev != nil:
 				o.AttemptID, o.Recorded, o.Duplicate = p.prev.attemptID, p.prev.recorded, true
 				bump("grade_dup_item")
 			case p.status == "unsupported":
-				idem["ps:"+req.CID+":"+it.QRef] = stored{answer: canon[i], status: p.status}
+				idem["ps:"+req.CID+":"+cq[i]] = stored{answer: canon[i], status: p.status, answeredAt: answeredAt[i]}
 			default:
 				attemptSeq++
 				o.AttemptID, o.Recorded = attemptSeq, true
-				dayCount[day+"|"+it.QRef]++
-				idem["ps:"+req.CID+":"+it.QRef] = stored{canon[i], p.status, p.corr, attemptSeq, true}
+				dayCount[day+"|"+cq[i]]++
+				idem["ps:"+req.CID+":"+cq[i]] = stored{canon[i], p.status, p.corr, attemptSeq, true, answeredAt[i]}
 				bump("grade_new_item")
+				wrote = true
 			}
 			out[i] = o
 		}
 		bump("grade_new")
 		w.Header().Set("Content-Type", "application/json")
+		if wrote {
+			w.WriteHeader(201)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"client_attempt_id": req.CID, "items": out})
 	})
 	mux.HandleFunc("GET /_mock/last-grade", func(w http.ResponseWriter, r *http.Request) {

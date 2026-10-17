@@ -685,6 +685,113 @@ for pair in "bearer token:$TOKEN" "grade token:$GTOKEN" "family code:$CODE" "ans
 done
 for p in "$PID_R" "$PID_RK"; do kill "$p" 2>/dev/null; done
 
+section "S. Corrections against the brain developers' contract check — mock brain only"
+cat > "$WORK/sets-s.json" <<JSON
+{"sets":[
+ {"id":"alias-2","title":"别名套","source":"$PSRC","qrefs":["example.set:math:2-old","Example.Set:Math:1"]},
+ {"id":"free-1","title":"自由作答","source":"$PSRC","qrefs":["example.set:math:4"]},
+ {"id":"one-s","title":"单题套","source":"$PSRC","qrefs":["example.set:math:2"]}
+]}
+JSON
+SM=18260; SS=18261; SB="http://127.0.0.1:$SS"; SMB="http://127.0.0.1:$SM"
+start_mock mockS "$SM" "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "$SMB/_mock/stats"
+SENV=("RUYI_SETS_FILE=$WORK/sets-s.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_NTFY_RETRY_DELAY=300ms" "RUYI_ATTEMPTS_DIR=$WORK/att-S" "RUYI_GRADE_MAX_PER_HOUR=100" "RUYI_AUTO_SOURCES=$PSRC,ghost.source" "RUYI_AUTO_TTL=60s")
+start_site S "$SS" "$SMB" "${SENV[@]}"; wait_http "$SB/healthz"
+post_login s1 "$SB" "$CODE" -c "$WORK/jarS"
+ssw() { curl -s -X POST "$SMB/_mock/switch?name=$1&v=$2" >/dev/null; }
+sbody() { printf '{"client_attempt_id":"%s"%s,"answers":%s}' "$1" "${3:-}" "$2"; }
+scid() { printf '%08d-bbbb-4bbb-8bbb-bbbbbbbbbbbb' "$1"; }
+sleep 0.5
+grep -q 'lookup is deployed' "$WORK/S.log" && ok "S0 startup probe (one read-only lookup of a non-existent qref): 'lookup is deployed' logged, startup unaffected" || bad "S0 probe line missing in the site log"
+expect "S0b the probe wrote nothing (no grade call, no 400s)" "$(mstat grade "$SM") $(mstat lookup_400 "$SM")" "0 0"
+# --- 1. 404s are told apart by structure, never by a code string
+G0=$(mstat grade "$SM")
+curl -s -X POST "$SMB/_mock/grade-unknown?qref=example.set:math:2" >/dev/null
+gpost s2 "$SB" one-s "$(sbody "$(scid 1)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarS"
+expect "S1 grade 404 carrying details.qrefs (question not found) -> the site's unknown-question 404, nothing recorded" "$CODE_HTTP $(jq -r .error "$WORK/resp/s2.b") $(mstat grade_new_item "$SM")" "404 unknown_qref 0"
+curl -s -X POST "$SMB/_mock/grade-unknown?qref=example.set:math:2&v=off" >/dev/null
+ssw grade off
+gpost s3 "$SB" one-s "$(sbody "$(scid 2)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarS"
+expect "S1b catch-all 404 (not_found / 'not found', no details) = route not deployed -> archive_only / not_ready, 200" "$CODE_HTTP $(jq -c '[.mode,.brain_note]' "$WORK/resp/s3.b")" '200 ["archive_only","not_ready"]'
+ssw grade on
+get s5 "$SB/api/practice/new?source=ghost.source&n=3&mode=wrong_only" -b "$WORK/jarS"
+expect "S1d pick 404 'source not found' for a nonexistent source: an explicit error, NOT 'not deployed'" "$CODE_HTTP $(jq -r '[.error,(.message|contains("大脑接口未就绪"))]|@json' "$WORK/resp/s5.b")" '404 ["pick_source_not_found",false]'
+ssw pick off
+get s6 "$SB/api/practice/new?source=$PSRC&n=3&mode=wrong_only" -b "$WORK/jarS"
+expect "S1e pick catch-all 404 = not deployed -> 501 大脑接口未就绪 (distinct from S1d)" "$CODE_HTTP $(jq -r '[.error,(.message|contains("大脑接口未就绪"))]|@json' "$WORK/resp/s6.b")" '501 ["wrong_only_unavailable",true]'
+ssw pick on
+# --- 2. 429
+nextday "$SM"
+for i in 11 12 13; do gpost sc$i "$SB" one-s "$(sbody "$(scid $i)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarS"; done
+L1=$(wc -l < "$WORK/att-S/attempts.jsonl" | tr -d ' ')
+gpost s7 "$SB" one-s "$(sbody "$(scid 14)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarS"
+expect "S2 4th write the same Shanghai day -> 429 daily_cap, one unified message, Retry-After passed through (seconds), nothing archived" "$CODE_HTTP $(jq -r .error "$WORK/resp/s7.b") $(grep -i '^retry-after:' "$WORK/resp/s7.h" | tr -d '\r' | awk '{print ($2>0 && $2<=86401)?"ok":"bad"}') $(( $(wc -l < "$WORK/att-S/attempts.jsonl" | tr -d ' ') - L1 ))" "429 daily_cap ok 0"
+# --- 3./4. answered_at: only sent when valid
+nextday "$SM"
+gpost s8 "$SB" one-s "$(sbody "$(scid 21)" '[{"qref":"example.set:math:2","answer":"B"}]' ',"answered_at":"2020-01-01T00:00:00Z"')" -b "$WORK/jarS"
+expect "S3 answered_at older than 7 days is left out (never sent): 200 graded, no field on the wire, no 400" "$CODE_HTTP $(jq -r .mode "$WORK/resp/s8.b") $(curl -s "$SMB/_mock/last-grade" | jq -c '.items[0]|has("answered_at")') $(mstat grade_400 "$SM")" "200 graded false 0"
+FUT=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+gpost s9 "$SB" one-s "$(sbody "$(scid 22)" '[{"qref":"example.set:math:2","answer":"B"}]' ",\"answered_at\":\"$FUT\"")" -b "$WORK/jarS"
+expect "S3b answered_at in the future (> now+1min) is left out, not sent" "$CODE_HTTP $(curl -s "$SMB/_mock/last-grade" | jq -c '.items[0]|has("answered_at")') $(mstat grade_400 "$SM")" "200 false 0"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+nextday "$SM"
+gpost s10 "$SB" one-s "$(sbody "$(scid 23)" '[{"qref":"example.set:math:2","answer":"B"}]' ",\"answered_at\":\"$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)\"")" -b "$WORK/jarS"
+expect "S3c a valid answered_at is forwarded as RFC 3339" "$CODE_HTTP $(curl -s "$SMB/_mock/last-grade" | jq -r '.items[0].answered_at|test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z$")')" "200 true"
+# the brain's own rule (mock mirrors it): same key + other answered_at -> 409; absent -> replay; 201 new / 200 replay
+gdirect() { curl -s -D "$WORK/resp/gd.h" -o "$WORK/resp/gd.b" -w '%{http_code}' -H "Authorization: Bearer $GTOKEN" -H 'Content-Type: application/json' -d "$1" "$SMB/v1/bank/grade${2:-}"; }
+nextday "$SM"
+T1=$(date -u -d '-2 hour' +%Y-%m-%dT%H:%M:%SZ); T2=$(date -u -d '-3 hour' +%Y-%m-%dT%H:%M:%SZ)
+gb() { printf '{"brain":"ruyi","client_attempt_id":"%s","items":[{"qref":"example.set:math:2","answer":"B"%s}]}' "$1" "$2"; }
+expect "S4 brain: new write -> 201" "$(gdirect "$(gb dd-1 ",\"answered_at\":\"$T1\"")")" 201
+expect "S4b brain: replay without answered_at -> 200 duplicate" "$(gdirect "$(gb dd-1 "")") $(jq -c '.items[0].duplicate' "$WORK/resp/gd.b")" "200 true"
+expect "S4c brain: same key + a different answered_at -> 409 idempotency_conflict" "$(gdirect "$(gb dd-1 ",\"answered_at\":\"$T2\"")") $(jq -r .code "$WORK/resp/gd.b")" "409 idempotency_conflict"
+expect "S4d brain: attempt_kind / session_ref / payload do not take part in the comparison (replay, 200)" "$(gdirect "$(gb dd-1 ",\"attempt_kind\":\"variant\",\"session_ref\":\"zz\",\"payload\":{\"a\":1}")")" 200
+# --- strict 400s: the real contract rejects these; the site must never send them
+expect "S5 grade: unknown body field -> 400 invalid_json (mock mirrors the brain)" "$(gdirect '{"brain":"ruyi","client_attempt_id":"x1","items":[{"qref":"example.set:math:2","answer":"B"}],"extra":1}') $(jq -r .code "$WORK/resp/gd.b")" "400 invalid_json"
+expect "S5b grade: any query other than ?brain= -> 400; upper-case qref -> 400; answered_at out of range -> 400" "$(gdirect "$(gb x2 "")" '?foo=1') $(gdirect '{"brain":"ruyi","client_attempt_id":"x3","items":[{"qref":"Example.Set:Math:2","answer":"B"}]}') $(gdirect "$(gb x4 ',"answered_at":"2020-01-01T00:00:00Z"')")" "400 400 400"
+B400=$(mstat grade_400 "$SM")
+gpost s11 "$SB" free-1 "$(sbody "$(scid 31)" "[{\"qref\":\"example.set:math:4\",\"answer\":\"$(printf 'x%.0s' $(seq 1 600))\"}]")" -b "$WORK/jarS"
+expect "S5c an answer of 600 characters (> 500) is never sent: archived, 200, brain not called with it" "$CODE_HTTP $(jq -c '[.mode,.recorded_count,.brain_note,.archived]' "$WORK/resp/s11.b") $(( $(mstat grade_400 "$SM") - B400 ))" '200 ["archive_only",0,"not_sent",true] 0'
+nextday "$SM"
+gpost s12 "$SB" one-s "$(sbody "$(scid 32)" '[{"qref":"example.set:math:2","answer":"B","rev":0}]')" -b "$WORK/jarS"
+expect "S5d a rev below 1 never reaches the brain: the site answers 400 bad_rev itself" "$CODE_HTTP $(jq -r .error "$WORK/resp/s12.b") $(mstat grade_400 "$SM")" "400 bad_rev 4"
+# --- 5. rev_mismatch: details qref/rev/current_rev, the item is located by qref, never by index
+curl -s -X POST "$SMB/_mock/bump-rev?qref=example.set:math:2" >/dev/null
+gpost s13 "$SB" one-s "$(sbody "$(scid 33)" '[{"qref":"example.set:math:2","answer":"B","rev":1}]')" -b "$WORK/jarS"
+expect "S6 rev_mismatch 409 (details qref/rev/current_rev, no index) -> 题目已更新，请刷新" "$CODE_HTTP $(jq -r '[.error,(.message|contains("题目已更新，请刷新"))]|@json' "$WORK/resp/s13.b")" '409 ["rev_mismatch",true]'
+# --- 6. aliases and upper/lower case
+nextday "$SM"
+get s14 "$SB/api/practice/alias-2" -b "$WORK/jarS"
+expect "S7 set page keeps the set's own strings (alias and mixed case); lookup answered canonical qrefs" "$CODE_HTTP $(jq -c '[.items[]|.qref]' "$WORK/resp/s14.b") $(jq -c '[.missing_qrefs // []]' "$WORK/resp/s14.b")" '200 ["example.set:math:2-old","Example.Set:Math:1"] [[]]'
+gpost s15 "$SB" alias-2 "$(sbody "$(scid 41)" '[{"qref":"example.set:math:2-old","answer":"B"},{"qref":"Example.Set:Math:1","answer":["1","2","3"]}]')" -b "$WORK/jarS"
+expect "S7b grade with an alias and a mixed-case qref: lower-cased on the wire, echoes matched back to the page's strings, both graded + recorded" "$CODE_HTTP $(jq -c '[.mode,.recorded_count,[.results[]|[.qref,.correct]]]' "$WORK/resp/s15.b")" '200 ["graded",2,[["example.set:math:2-old",true],["Example.Set:Math:1",true]]]'
+expect "S7c on the wire: lower-case only" "$(curl -s "$SMB/_mock/last-grade" | jq -c '[.items[].qref]')" '["example.set:math:2-old","example.set:math:1"]'
+# the same attempt again through the canonical qref is the same key -> a replay at the brain (200, duplicate), not a second write
+W0=$(mstat grade_new_item "$SM")
+gpost s16 "$SB" one-s "$(sbody "$(scid 41)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarS"
+expect "S7d alias and canonical qref share one idempotency key (no second write)" "$(( $(mstat grade_new_item "$SM") - W0 ))" 0
+# --- picks: n limit, reasons vocabulary
+get s17 "$SB/api/practice/new?source=$PSRC&n=20&mode=due_first" -b "$WORK/jarS"
+expect "S8 n above 10 is lowered to 10 before asking the brain (no 400 at the brain), page gets a note" "$CODE_HTTP $(mstat pick_400 "$SM") $(jq -r '(.note // "")|contains("最多 10 题")' "$WORK/resp/s17.b")" "200 0 true"
+ssw lookup off
+get s4 "$SB/api/practice/one-s" -b "$WORK/jarS"
+expect "S1c lookup 404 (catch-all) = not deployed -> fallback to the list, set page still 200" "$CODE_HTTP $(jq -c '[(.items|length)]' "$WORK/resp/s4.b")" "200 [1]"
+ssw lookup on
+# --- startup probe against a brain that has no lookup yet
+start_mock mockS2 18262 "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "http://127.0.0.1:18262/_mock/stats"
+curl -s -X POST "http://127.0.0.1:18262/_mock/switch?name=lookup&v=off" >/dev/null
+start_site S2 18263 "http://127.0.0.1:18262" "${SENV[@]}" RUYI_ATTEMPTS_DIR="$WORK/att-S2"; wait_http "http://127.0.0.1:18263/healthz"; sleep 0.5
+grep -q 'not deployed yet' "$WORK/S2.log" && ok "S9 probe against a brain without lookup: a warning, startup continues" || bad "S9 probe warning missing"
+expect "S9b ... and the site is healthy" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18263/healthz)" 200
+# --- the whole run: nothing the brain would reject as 400 was ever sent by the site
+expect "S10 the site never produced a 400-class request to the brain in this section (grade_400 only from the 4 direct mock probes S5/S5b)" "$(mstat grade_400 "$SM") $(mstat pick_400 "$SM") $(mstat lookup_400 "$SM")" "4 0 0"
+expect "S10b the R section never produced one either" "$(mstat grade_400 "$RM") $(mstat pick_400 "$RM") $(mstat lookup_400 "$RM")" "0 0 0"
+cat "$WORK/S.log" "$WORK/S2.log" > "$WORK/slogs"
+for pair in "bearer token:$TOKEN" "grade token:$GTOKEN" "family code:$CODE"; do
+  grep -qF -- "${pair#*:}" "$WORK/slogs" && bad "S11 ${pair%%:*} appears in the S site logs" || ok "S11 ${pair%%:*} not in the S site logs"
+done
+for p in "$PID_S" "$PID_S2"; do kill "$p" 2>/dev/null; done
+
 if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/dev/null; then
   section "L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow"
   start_site BR 18199 "http://127.0.0.1:$PORT_MOCK"; wait_http "http://127.0.0.1:18199/healthz"

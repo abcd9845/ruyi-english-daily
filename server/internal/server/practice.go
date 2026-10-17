@@ -65,7 +65,7 @@ func (s *Server) practice(w http.ResponseWriter, r *http.Request, id string) {
 			continue
 		}
 		it := practiceItem{
-			Ordinal: len(items) + 1, QRef: q.QRef, QType: q.QType, StemMD: q.Stem,
+			Ordinal: len(items) + 1, QRef: ref, QType: q.QType, StemMD: q.Stem,
 			Blanks: practice.CountBlanks(q.Stem), FigureStatus: q.Figure(), Media: []mediaOut{}, Rev: q.RevInt(),
 		}
 		if m, ok := meta[ref]; ok {
@@ -175,7 +175,23 @@ func (s *Server) autoNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	picks, err := s.Bank.SelectForPractice(r.Context(), source, n, opts)
+	askN, capped := n, false
+	if opts.Mode != brain.ModeRandom && n > brain.MaxPickN { // the brain's pick-practice takes n = 1..10
+		askN, capped = brain.MaxPickN, true
+	}
+	picks, err := s.Bank.SelectForPractice(r.Context(), source, askN, opts)
+	var be *brain.Error
+	switch {
+	case errors.As(err, &be) && be.Kind == brain.KindNotFound && !errors.Is(err, brain.ErrUnsupported):
+		// a deployed pick-practice that does not know this source (or brain): say so, it is not "not ready"
+		s.Log.Warn("pick-practice: source or brain not found at the brain", "mode", opts.Mode)
+		writeErr(w, http.StatusNotFound, "pick_source_not_found", "大脑里找不到这个题库（或练习脑），请通知家长检查配置")
+		return
+	case errors.As(err, &be) && be.Kind == brain.KindRejected && be.Code == "ambiguous_source":
+		s.Log.Warn("pick-practice: source name is ambiguous at the brain", "mode", opts.Mode)
+		writeErr(w, http.StatusBadRequest, "pick_source_ambiguous", "这个题库名在大脑里对应多个题库，请改用精确的题库 key")
+		return
+	}
 	if errors.Is(err, brain.ErrUnsupported) {
 		code := "wrong_only_unavailable"
 		if opts.Mode == brain.ModeDueFirst {
@@ -230,7 +246,9 @@ func (s *Server) autoNew(w http.ResponseWriter, r *http.Request) {
 		out["deferred"] = deferred
 	}
 	var notes []string
-	if len(refs) < n {
+	if capped {
+		notes = append(notes, "大脑选题一次最多 "+strconv.Itoa(brain.MaxPickN)+" 题")
+	} else if len(refs) < n {
 		notes = append(notes, "题库里只有 "+strconv.Itoa(len(refs))+" 题可选，已全部选入")
 	}
 	if deferred > 0 {

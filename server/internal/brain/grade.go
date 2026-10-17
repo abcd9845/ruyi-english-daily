@@ -2,33 +2,45 @@ package brain
 
 // Grade adapter. THE WHOLE WIRE CONTRACT OF THE GRADING CALL LIVES IN THIS FILE.
 //
-// Contract (brain "practice-site automatic plan", POST /v1/bank/grade):
+// Contract (brain "练习站自动方案接口", POST /v1/bank/grade). The brain is strict:
+// an unknown body field, a bad value or a query it does not know is a 400, so
+// everything below is checked HERE before sending and nothing else is ever sent.
 //
 //	POST {base}{gradePath}                 Authorization: Bearer <grade token>
-//	{"brain":"ruyi","client_attempt_id":"<1..160 of [A-Za-z0-9._:-]>",
-//	 "items":[{"qref","answer"(string | [string…≤10 blanks]),"rev"?,
-//	           "attempt_kind"?:"correction|variant","answered_at"?:RFC3339,
-//	           "session_ref"?,"payload"?}, …≤50, qrefs unique]}
-//	-> 200 {"client_attempt_id":<echo>,
-//	        "items":[{"qref","status":"graded|pending_key|needs_review|unsupported",
-//	                  "correct"?:bool (graded only),"attempt_id":<int>,
-//	                  "recorded":bool,"duplicate":bool}, …]}
+//	{"brain":"ruyi","client_attempt_id":"^[A-Za-z0-9._:-]{1,160}$",
+//	 "items":[{"qref"(lower-case),"answer"(string ≤500 chars | [string…≤10, each ≤500]),
+//	           "rev"?(int ≥1),"attempt_kind"?:"correction|variant",
+//	           "answered_at"?:RFC3339 within [now-7d, now+1min],
+//	           "session_ref"?(1..200 chars),"payload"?(JSON, ≤4096 bytes)}, …1..50,
+//	          qrefs unique]}                  no query string, no other field
+//	-> 201 (something new was written) | 200 (all replays / nothing written)
+//	   {"client_attempt_id":<echo>,
+//	    "items":[{"qref"(= the string we sent),"status":"graded|pending_key|needs_review|unsupported",
+//	              "correct"?:bool (graded only),"attempt_id":<int>,"recorded":bool,"duplicate":bool}, …]}
 //	   unsupported => recorded:false, nothing written, no attempt_id.
 //	   pending_key / needs_review => the answer is recorded, no right/wrong.
-//	-> 404 an unknown qref anywhere in the batch (nothing written)
-//	-> 409 rev_mismatch (item rev is not current) | idempotency_conflict (same
-//	       client_attempt_id + qref seen with a different answer/result)
-//	-> 429 rate_limited (same question > 3 writes a day per brain; whole batch refused)
+//	-> 404 not_found, message "question not found", details.qrefs: an unknown qref
+//	       anywhere in the batch (nothing written). Any 404 WITHOUT details.qrefs
+//	       is the catch-all of a brain that does not have the route yet.
+//	-> 409 rev_mismatch (details qref/rev/current_rev) | idempotency_conflict
+//	       (same key, other answer / grading result / answered_at)
+//	-> 429 rate_limited "daily grade limit reached" + Retry-After, details.qrefs
+//	       (same question >3 writes per Shanghai day per brain; unsupported does not
+//	       count, pending_key/needs_review do; the whole batch is refused)
+//	-> 400 invalid_json etc.: never expected from this client; degrades to archive-only.
 //
-// Idempotency key on the brain side: ps:<client_attempt_id>:<qref>. The same id
-// with the same answer replies 200 + duplicate:true with the same attempt_id.
-// Network retries therefore reuse the id (Grade retries once itself); a user
-// re-submitting with changed answers must use a NEW id (the page does that).
+// Idempotency key on the brain side: ps:<client_attempt_id>:<canonical qref>
+// (≤198 chars in total). The same id with the same answer replies with
+// duplicate:true and the same attempt_id; attempt_kind / session_ref / payload do
+// not take part in the comparison, answered_at does when it is sent again with
+// another value. Network retries therefore reuse the id (Grade retries once
+// itself); a user re-submitting with changed answers must use a NEW id.
 //
 // The token: the grade token is a separate env value (RUYI_BRAIN_GRADE_TOKEN),
-// never equal to the read token, server-side only. Its scope is whatever the
-// brain issued for the practice site ("bank:read + single-brain write" today,
-// maybe a narrower bank:grade later); this code never inspects or names a scope.
+// never equal to the read token, server-side only. Its scope is what the brain
+// issued for the practice site (bank:read + write to the single brain "ruyi"
+// today; a narrower bank:grade may come later); this code never inspects or
+// names a scope.
 
 import (
 	"bytes"
@@ -40,6 +52,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // DefaultGradePath is the contract endpoint path (override with RUYI_BRAIN_GRADE_PATH).
@@ -56,7 +69,25 @@ const (
 	AttemptVariant = "variant"
 	maxSessionRef  = 200
 	maxQRefLen     = 300
+	MaxAnswerLen   = 500  // characters per answer string / blank
+	MaxPayload     = 4096 // bytes of the encoded payload
+	maxKeyLen      = 198  // "ps:" + id + ":" + canonical qref
+
+	// answered_at must lie in [now-7d, now+1min] at the brain. Keep a margin on
+	// both sides (clock skew, time in flight): 30 s into the future, and one
+	// minute short of the 7 days.
+	answeredAtMaxAge = 7*24*time.Hour - time.Minute
+	answeredAtAhead  = 30 * time.Second
 )
+
+// AnsweredAtSendable reports whether t may be sent as answered_at at time now.
+// Outside the window the field is simply left out (the brain stamps its own time).
+func AnsweredAtSendable(t, now time.Time) bool {
+	return !t.IsZero() && !t.After(now.Add(answeredAtAhead)) && t.After(now.Add(-answeredAtMaxAge))
+}
+
+// WireQRef is the form of a qref that goes on the wire (qrefs are lower-case).
+func WireQRef(q string) string { return strings.ToLower(q) }
 
 var clientIDRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,160}$`)
 
@@ -128,17 +159,30 @@ func ValidateGradeRequest(r GradeRequest) error {
 	if len(r.Items) == 0 || len(r.Items) > MaxGradeItems {
 		return bad("items must be 1..50")
 	}
+	okText := func(s string) bool { return utf8.ValidString(s) && utf8.RuneCountInString(s) <= MaxAnswerLen }
 	seen := map[string]bool{}
 	for _, it := range r.Items {
-		if it.QRef == "" || len(it.QRef) > maxQRefLen || seen[it.QRef] {
+		w := WireQRef(it.QRef)
+		if w == "" || len(w) > maxQRefLen || seen[w] {
 			return bad("bad or duplicate qref")
 		}
-		seen[it.QRef] = true
+		if len("ps:")+len(r.ClientAttemptID)+1+len(w) > maxKeyLen {
+			return bad("idempotency key too long")
+		}
+		seen[w] = true
 		switch a := it.Answer.(type) {
 		case string:
+			if !okText(a) {
+				return bad("answer too long")
+			}
 		case []string:
 			if len(a) > MaxBlanks {
 				return bad("too many blanks")
+			}
+			for _, x := range a {
+				if !okText(x) {
+					return bad("answer too long")
+				}
 			}
 		default:
 			return bad("bad answer type")
@@ -148,28 +192,43 @@ func ValidateGradeRequest(r GradeRequest) error {
 		default:
 			return bad("bad attempt_kind")
 		}
-		if it.Rev < 0 || len(it.SessionRef) > maxSessionRef {
-			return bad("bad rev or session_ref")
+		if it.Rev < 0 {
+			return bad("bad rev")
 		}
 	}
 	return nil
 }
 
-func encodeGradeRequest(r GradeRequest, brainID string) ([]byte, error) {
+// encodeGradeRequest builds the one and only body shape the brain accepts.
+// Required parts were checked by ValidateGradeRequest; optional ones that do not
+// meet the contract (rev < 1, answered_at outside its window, session_ref not
+// 1..200 characters, payload over 4096 bytes) are left out rather than sent.
+func encodeGradeRequest(r GradeRequest, brainID string, now time.Time) ([]byte, error) {
 	type item struct {
-		QRef        string         `json:"qref"`
-		Answer      any            `json:"answer"`
-		Rev         int            `json:"rev,omitempty"`
-		AttemptKind string         `json:"attempt_kind,omitempty"`
-		AnsweredAt  string         `json:"answered_at,omitempty"`
-		SessionRef  string         `json:"session_ref,omitempty"`
-		Payload     map[string]any `json:"payload,omitempty"`
+		QRef        string          `json:"qref"`
+		Answer      any             `json:"answer"`
+		Rev         int             `json:"rev,omitempty"`
+		AttemptKind string          `json:"attempt_kind,omitempty"`
+		AnsweredAt  string          `json:"answered_at,omitempty"`
+		SessionRef  string          `json:"session_ref,omitempty"`
+		Payload     json.RawMessage `json:"payload,omitempty"`
 	}
 	items := make([]item, 0, len(r.Items))
 	for _, it := range r.Items {
-		o := item{QRef: it.QRef, Answer: it.Answer, Rev: it.Rev, AttemptKind: it.AttemptKind, SessionRef: it.SessionRef, Payload: it.Payload}
-		if !it.AnsweredAt.IsZero() {
+		o := item{QRef: WireQRef(it.QRef), Answer: it.Answer, AttemptKind: it.AttemptKind}
+		if it.Rev >= 1 {
+			o.Rev = it.Rev
+		}
+		if n := utf8.RuneCountInString(it.SessionRef); n >= 1 && n <= maxSessionRef && utf8.ValidString(it.SessionRef) {
+			o.SessionRef = it.SessionRef
+		}
+		if AnsweredAtSendable(it.AnsweredAt, now) {
 			o.AnsweredAt = it.AnsweredAt.UTC().Format(time.RFC3339)
+		}
+		if len(it.Payload) > 0 {
+			if pb, err := json.Marshal(it.Payload); err == nil && len(pb) <= MaxPayload {
+				o.Payload = pb
+			}
 		}
 		items = append(items, o)
 	}
@@ -195,18 +254,20 @@ func decodeGradeResponse(b []byte, req GradeRequest) (*GradeResponse, error) {
 	if v.ClientAttemptID != req.ClientAttemptID {
 		return nil, &Error{Kind: KindUnavailable, What: "grade reply lacks brain confirmation"}
 	}
-	asked := map[string]bool{}
+	// the brain echoes the string we sent (lower-case); results carry the caller's own qref
+	orig := map[string]string{}
 	for _, it := range req.Items {
-		asked[it.QRef] = true
+		orig[WireQRef(it.QRef)] = it.QRef
 	}
 	out := &GradeResponse{}
 	seen := map[string]bool{}
 	for _, it := range v.Items {
-		if !asked[it.QRef] || seen[it.QRef] {
+		o, ok := orig[it.QRef]
+		if !ok || seen[o] {
 			continue // never trust qrefs we did not send
 		}
-		seen[it.QRef] = true
-		r := GradeResult{QRef: it.QRef, Status: it.Status}
+		seen[o] = true
+		r := GradeResult{QRef: o, Status: it.Status}
 		var aid int64
 		if json.Unmarshal(it.AttemptID, &aid) != nil || aid < 1 {
 			aid = 0
@@ -253,7 +314,7 @@ func (c *Client) Grade(ctx context.Context, req GradeRequest) (*GradeResponse, e
 	if err := ValidateGradeRequest(req); err != nil {
 		return nil, err
 	}
-	body, err := encodeGradeRequest(req, c.id())
+	body, err := encodeGradeRequest(req, c.id(), c.now())
 	if err != nil {
 		return nil, &Error{Kind: KindBadRequest, What: "bad grade request"}
 	}
@@ -310,7 +371,7 @@ func (c *Client) gradeOnce(ctx context.Context, body []byte, req GradeRequest) (
 	if err != nil {
 		return nil, classifyTransport(err)
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated { // 201 = new write, 200 = replays only
 		return nil, upstreamErr(resp)
 	}
 	b, rerr := io.ReadAll(io.LimitReader(resp.Body, maxGradeBytes+1))

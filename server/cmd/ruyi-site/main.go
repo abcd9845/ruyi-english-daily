@@ -56,6 +56,24 @@ func run() error {
 		log.Warn("brain TLS verification is DISABLED (loopback address only)")
 	}
 
+	if cfg.Sets != nil {
+		// One read-only probe of the brain's lookup endpoint (an obviously
+		// non-existent qref; nothing is written). Informational only: it never
+		// blocks or fails startup, and later requests degrade on their own.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			switch ok, perr := bc.ProbeLookup(ctx); {
+			case perr != nil:
+				log.Info("brain contract probe inconclusive (will degrade per request if needed)")
+			case ok:
+				log.Info("brain contract endpoints: lookup is deployed")
+			default:
+				log.Warn("brain contract endpoints not deployed yet (lookup 404/501): grading, picks and revisions degrade until the brain deploys them")
+			}
+		}()
+	}
+
 	emb, err := embedded.New(ruyisite.Pages(), ruyisite.KaTeX())
 	if err != nil {
 		return errors.New("embedded files unreadable")

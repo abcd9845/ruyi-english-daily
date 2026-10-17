@@ -70,6 +70,7 @@ const (
 	KindRateLimited // 429
 	KindConflict    // 409 (Code says which: rev_mismatch, idempotency_conflict, …)
 	KindBadRequest  // refused locally before sending (contract limits)
+	KindRejected    // the brain answered 400 (a request it did not accept)
 )
 
 // Error is a safe, classified error.
@@ -78,7 +79,38 @@ type Error struct {
 	Status int    // upstream HTTP status, 0 if none
 	Code   string // upstream error code (e.g. ticket_expired), only [a-z_] chars
 	What   string // short fixed description
+	// Parsed from the brain's error body {"code","message","details"} (all sanitized):
+	Message    string        // short upstream message, e.g. "not found", "question not found"
+	Qrefs      []string      // details.qrefs (grade 404 / 429): the offending qrefs
+	Qref       string        // details.qref (409 rev_mismatch)
+	Rev        int           // details.rev
+	CurrentRev int           // details.current_rev
+	RetryAfter time.Duration // Retry-After header (429), capped; 0 = absent
+	// details.index is deliberately NOT parsed: it must not be used to locate an item.
 }
+
+// genericNotFoundMsg is the message of the brain's catch-all 404 (route not deployed).
+const genericNotFoundMsg = "not found"
+
+// IsRouteNotFound: a 404 that is the catch-all for a route the brain does not
+// have: code not_found (or no code), message "not found" (or none), no details.
+// A deployed endpoint's own 404 carries another message and/or details
+// (grade: details.qrefs + "question not found"; pick: a source/brain message).
+func (e *Error) IsRouteNotFound() bool {
+	if e == nil || e.Kind != KindNotFound {
+		return false
+	}
+	if len(e.Qrefs) > 0 || e.Qref != "" {
+		return false
+	}
+	if e.Code != "" && e.Code != "not_found" {
+		return false
+	}
+	return e.Message == "" || strings.EqualFold(e.Message, genericNotFoundMsg)
+}
+
+// HasQrefs: a 404 that names qrefs, i.e. the grade endpoint's "question not found".
+func (e *Error) HasQrefs() bool { return e != nil && e.Kind == KindNotFound && len(e.Qrefs) > 0 }
 
 func (e *Error) Error() string {
 	s := e.What
@@ -275,32 +307,78 @@ func (c *Client) do(ctx context.Context, method, rawURL string, bearer bool, bod
 	return resp, nil
 }
 
-var codeRe = regexp.MustCompile(`^[a-z_]{1,40}$`)
+var (
+	codeRe = regexp.MustCompile(`^[a-z_]{1,40}$`)
+	msgRe  = regexp.MustCompile(`^[A-Za-z0-9 .,_:'\-]{1,100}$`)
+)
 
-// upstreamErr maps a non-2xx reply to an Error. It reads at most 2 KiB of the
-// body, only to extract {"error":{"code":…}} or {"code":…}.
+const maxErrQrefs = 100
+
+// upstreamErr maps a non-2xx reply to an Error. It reads at most 4 KiB of the
+// body, only to extract the sanitized {"code","message","details"} (also
+// accepted under a nested "error" object) and the Retry-After header.
 func upstreamErr(resp *http.Response) *Error {
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-	code := ""
-	var v struct {
-		Code  string `json:"code"`
-		Error any    `json:"error"`
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	type body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Details struct {
+			QRefs      []string        `json:"qrefs"`
+			QRef       string          `json:"qref"`
+			Rev        json.RawMessage `json:"rev"`
+			CurrentRev json.RawMessage `json:"current_rev"`
+		} `json:"details"`
 	}
+	var v struct {
+		body
+		Error json.RawMessage `json:"error"`
+	}
+	var in body
 	if json.Unmarshal(b, &v) == nil {
-		code = v.Code
-		if m, ok := v.Error.(map[string]any); ok {
-			if s, ok := m["code"].(string); ok {
-				code = s
+		in = v.body
+		if len(v.Error) > 0 {
+			var nested body
+			var str string
+			if json.Unmarshal(v.Error, &nested) == nil && (nested.Code != "" || nested.Message != "") {
+				in = nested
+			} else if json.Unmarshal(v.Error, &str) == nil && in.Code == "" {
+				in.Code = str
 			}
-		} else if s, ok := v.Error.(string); ok && code == "" {
-			code = s
 		}
 	}
+	code := in.Code
 	if !codeRe.MatchString(code) {
 		code = ""
 	}
 	e := &Error{Status: resp.StatusCode, Code: code, What: "brain error"}
+	if msgRe.MatchString(in.Message) {
+		e.Message = in.Message
+	}
+	for _, q := range in.Details.QRefs {
+		if len(e.Qrefs) >= maxErrQrefs {
+			break
+		}
+		if q != "" && len(q) <= maxQRefLen {
+			e.Qrefs = append(e.Qrefs, q)
+		}
+	}
+	if q := in.Details.QRef; q != "" && len(q) <= maxQRefLen {
+		e.Qref = q
+	}
+	atoi := func(raw json.RawMessage) int {
+		var n int
+		if json.Unmarshal(raw, &n) == nil && n > 0 && n < 1<<31 {
+			return n
+		}
+		return 0
+	}
+	e.Rev, e.CurrentRev = atoi(in.Details.Rev), atoi(in.Details.CurrentRev)
+	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
+		if n, err := strconv.Atoi(ra); err == nil && n >= 0 {
+			e.RetryAfter = time.Duration(min(n, 86400)) * time.Second
+		}
+	}
 	switch {
 	case resp.StatusCode == 404:
 		e.Kind = KindNotFound
@@ -317,6 +395,9 @@ func upstreamErr(resp *http.Response) *Error {
 	case resp.StatusCode == 409:
 		e.Kind = KindConflict
 		e.What = "conflict"
+	case resp.StatusCode == 400:
+		e.Kind = KindRejected
+		e.What = "request rejected"
 	default:
 		e.Kind = KindUnavailable
 	}

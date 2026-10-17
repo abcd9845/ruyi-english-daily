@@ -128,7 +128,7 @@ Go 单测另覆盖：判分线上契约编解码与"必须有大脑确认"（见
 | 409 `rev_mismatch`：文案「题目已更新，请刷新」，页面重新取题（带新 `rev`）、答案保留、换新 id | R5–R5c；浏览器 L7 | 通过 |
 | 404 未知 qref：整批不写、不调判分口；套页面里缺的题只进 `missing_qrefs`，不崩 | R6、R6b；单测 | 通过 |
 | `attempt_kind=correction` 透传 | R8 | 通过 |
-| `recorded:false` 绝不显示「已提交到大脑」：`unsupported` →「已提交（仅留档，未记入大脑）」+「不自动判分」；归档模式 / 接口未部署 →「已提交（暂未判分）」 | 浏览器 L7、L8、L6；R10 | 通过 |
+| `recorded:false` 绝不显示「已提交到大脑」：逐题判断：全部 `recorded:false` →「已提交（仅留档，未记入大脑）」；部分记录 →「已提交到大脑（N / M 题）」并标出未记录的题（「不自动判分」+ 附注）；归档模式 / 接口未部署 →「已提交（暂未判分）」 | 浏览器 L7、L8、L6；R10 | 通过 |
 | 令牌只在服务端：两个令牌都不在任何响应体/响应头、practice 页面、归档文件、ntfy 内容、日志里（grep 标记串）；判分只用判分令牌（mock 计数 `grade_with_bank_read_token`=0）；启动校验 判分令牌 ≠ 读令牌，报错不含值 | R2c、R11–R12b、R17、R18、Q4d、Q5d、Q7、Q15、Q16 | 通过 |
 | 404/501 优雅降级（不 500）：lookup 未部署 → 退回整卷列表（无 `rev`），判分照常；选题未部署 → 501「大脑接口未就绪」，随机套不受影响；判分未部署（501 或 404）→ `archive_only` + `brain_note:"not_ready"`；判分 500 → `archive_only`/`unavailable` | R13–R15d；单测 `TestLookupFallsBackToTheListWhenNotDeployed` 等 | 通过 |
 | 选题 `mode=due_first|wrong_only`：`origin`/`reasons`；`deferred:*` 默认保留并标「参考答案待核，不自动判」，`RUYI_PICK_SKIP_DEFERRED=1` 跳过；非法 `mode` → 400；`/api/practice/new` 默认仍关 | R14d、R16–R16c、Q10；浏览器 L7（错题标签、待核标记） | 通过 |
@@ -136,7 +136,22 @@ Go 单测另覆盖：判分线上契约编解码与"必须有大脑确认"（见
 | 配置：`RUYI_BRAIN_LOOKUP_PATH` / `RUYI_BRAIN_PICK_PATH` / `RUYI_PICK_SKIP_DEFERRED` 非法值 → 退出且只报变量名 | R17b；单测 `TestGradeEnvRejects` | 通过 |
 | v1 旧归档仍可重放（`brain_attempt_id` 旧格式），不调大脑 | 单测 `TestContractV1ArchiveStillReplays` | 通过 |
 
-自检：`go vet ./...` 干净；`gofmt -l` 无输出；`go test ./... -count=1` 全过（116 个顶层测试）；`CGO_ENABLED=1 go test -race ./...` 全过；`test/acceptance.sh`（`SHOTS=<目录>`，含无头 Chrome）**374 通过 / 0 失败**；`test/browser.js` 沿用（L1/L2/L3 全过）。
+自检：`go vet ./...` 干净；`gofmt -l` 无输出；`go test ./... -count=1` 全过（135 个顶层测试）；`CGO_ENABLED=1 go test -race ./...` 全过；`test/acceptance.sh`（`SHOTS=<目录>`，含无头 Chrome）**406 通过 / 0 失败**；`test/browser.js` 沿用（L1/L2/L3 全过）。
+
+## 契约核对修正（S 节；依据大脑开发的核对与 `练习站自动方案接口.md`）
+
+| 修正点 | 用例 | 结果 |
+|---|---|---|
+| 404 靠结构区分：grade 的 `details.qrefs` 404 =「未知题」；兜底 `not_found`/"not found" = 未部署 → 降级；lookup 任何 404/501/405 = 未部署（退回列表）；选题 "source not found" 是明确错误，与「未就绪」不同 | S1–S1e；单测 `TestErrorBodyIsParsedAndSanitized`、`TestLookupAnyNotFoundMeansNotDeployed`、`TestPickSourceNotFoundIsNotNotDeployed` | 通过 |
+| 429 `rate_limited`/"daily grade limit reached"/`details.qrefs`/`Retry-After`（上海日、3 次、整批拒绝）；`Retry-After` 透传 | S2；R4 系列 | 通过 |
+| `answered_at`：窗口外不发；同键换 `answered_at` → 409；不带 → 重放；201/200 | S3–S4d；单测 `TestAnsweredAtWindow`、`TestGradeAcceptsCreatedAndOK` | 通过 |
+| 严格 400 全在站点发送前自校验（未知字段、小写 qref、cid 正则、1..50、答案 ≤10×≤500 字、`attempt_kind`、`session_ref`、`payload`、query 白名单）；整次运行 mock 记录到的 400 只来自 S5/S5b 的 4 次直连探测 | S5–S5d、S10、S10b；单测 `TestGradeBodyIsStrictAndLowerCase`、`TestValidateAgainstTheDocumentLimits` | 通过 |
+| `rev_mismatch` 只用 `details.qref/rev/current_rev` 定位，不看 `details.index` | S6；单测 | 通过 |
+| 别名与大小写：lookup/选题回规范 qref，grade 回显发送的串；按发送串匹配；别名与规范 qref 同一幂等键 | S7–S7d；单测 `TestLookupAliasesAndCase` | 通过 |
+| 选题 `n` ≤10（站点超过先降到 10）、reasons 词表、`origin` 只有 review\|wrong | S8；单测 `TestPickNeverAsksForMoreThanTenAndSendsOnlyKnownQuery` | 通过 |
+| 启动时一次只读 lookup 探测（只写日志、不影响启动） | S0、S0b、S9、S9b；单测 `TestProbeLookup` | 通过 |
+| `needs_review`（单位尾巴看不清）显示「待核对」 | R1（四态同批）；`contract_doc_test.go` | 通过 |
+| 令牌：仍是 bank:read + 单脑写令牌，只在服务端；日志/响应零泄漏 | S11、R11、R18 | 通过 |
 
 ## 构建产物
 
@@ -157,6 +172,7 @@ f468e823f60e5cbf751a6a0ef1df9ffd374e0f01f244088453e060d6895119e6  dist/ruyi-site
 ## 完整运行日志（脚本输出，无秘密）
 
 ```text
+
 == A. Static allowlist / hardening ==
 PASS  A1 /healthz 200 (=200)
 PASS  A2 / serves index.html (=200)
@@ -219,7 +235,7 @@ PASS  C6 brain not contacted by any unauthenticated request (=0)
 PASS  C7 wrong code -> 401 (=401)
 PASS  C8 wrong code: no Set-Cookie header
 PASS  C9 right code -> 200 (=200)
-     Set-Cookie (value elided): ruyi_sess=<value>; Path=/; Expires=Mon, 16 Nov 2026 11:20:18 GMT; Max-Age=2592000; HttpOnly; SameSite=Lax
+     Set-Cookie (value elided): ruyi_sess=<value>; Path=/; Expires=Mon, 16 Nov 2026 11:56:48 GMT; Max-Age=2592000; HttpOnly; SameSite=Lax
 PASS  C10 cookie name ruyi_sess
 PASS  C11 HttpOnly
 PASS  C12 SameSite=Lax
@@ -276,7 +292,7 @@ PASS  E7 Authorization never sent on ticketed image GET (=0)
 == F. Criterion 2 — no token / ticket / secrets in anything the browser can see ==
 PASS  F1 bearer token not in any response/header/Set-Cookie/page source (31 captures)
 PASS  F2 no 'Bearer'/'Authorization' strings in responses or page source
-grep: /tmp/tmp.metSppIGtQ/all-fresh/_api_media_math-intake.zz-yuekao-numberline-4y_19657038d590051de9672997cd2d38902c52a55392e28d7bc9410950d854e95a.raw: binary file matches
+grep: /tmp/tmp.i3tBX3kIbY/all-fresh/_api_media_math-intake.zz-yuekao-numberline-4y_19657038d590051de9672997cd2d38902c52a55392e28d7bc9410950d854e95a.raw: binary file matches
 PASS  F3 no ticket-shaped string (v1.<exp>.<mac>) in page/JSON/headers/bodies (our own session cookie in Set-Cookie excluded: it is the HMAC cookie, not a brain ticket)
 PASS  F4 session secret not in any response
 PASS  F5 family code not in page source or JSON
@@ -335,9 +351,9 @@ PASS  K4b the request itself was logged (path only)
 PASS  K6 inconsistent figure_status=ok/no media produced a warn log (qref only)
 PASS  K5 failure events are logged (sanity: logs are not empty)
      sample log lines (verbatim):
-       time=2026-10-17T19:20:17.999+08:00 level=WARN msg="login failed" ip=127.0.0.1
-       time=2026-10-17T19:20:18.698+08:00 level=WARN msg="brain request failed" op=media-lookup err="media not in source"
-       time=2026-10-17T19:20:17.521+08:00 level=DEBUG msg=request method=GET path=/healthz status=200 ms=0 ip=127.0.0.1
+       time=2026-10-17T19:56:48.304+08:00 level=WARN msg="login failed" ip=127.0.0.1
+       time=2026-10-17T19:56:49.095+08:00 level=WARN msg="brain request failed" op=media-lookup err="media not in source"
+       time=2026-10-17T19:56:47.803+08:00 level=DEBUG msg=request method=GET path=/healthz status=200 ms=0 ip=127.0.0.1
 
 == P. P0 practice page (Issue #10) — sets file, /api/practice, embedded page + KaTeX ==
 PASS  P1 no RUYI_SETS_FILE: /api/practice/demo-1 -> 404 (even logged in) (=404)
@@ -572,6 +588,40 @@ PASS  R18 family code not in the R site logs
 PASS  R18 answer text not in the R site logs
 PASS  R18 answer text 2 not in the R site logs
 
+== S. Corrections against the brain developers' contract check — mock brain only ==
+PASS  S0 startup probe (one read-only lookup of a non-existent qref): 'lookup is deployed' logged, startup unaffected
+PASS  S0b the probe wrote nothing (no grade call, no 400s) (=0 0)
+PASS  S1 grade 404 carrying details.qrefs (question not found) -> the site's unknown-question 404, nothing recorded (=404 unknown_qref 0)
+PASS  S1b catch-all 404 (not_found / 'not found', no details) = route not deployed -> archive_only / not_ready, 200 (=200 ["archive_only","not_ready"])
+PASS  S1d pick 404 'source not found' for a nonexistent source: an explicit error, NOT 'not deployed' (=404 ["pick_source_not_found",false])
+PASS  S1e pick catch-all 404 = not deployed -> 501 大脑接口未就绪 (distinct from S1d) (=501 ["wrong_only_unavailable",true])
+PASS  S2 4th write the same Shanghai day -> 429 daily_cap, one unified message, Retry-After passed through (seconds), nothing archived (=429 daily_cap ok 0)
+PASS  S3 answered_at older than 7 days is left out (never sent): 200 graded, no field on the wire, no 400 (=200 graded false 0)
+PASS  S3b answered_at in the future (> now+1min) is left out, not sent (=200 false 0)
+PASS  S3c a valid answered_at is forwarded as RFC 3339 (=200 true)
+PASS  S4 brain: new write -> 201 (=201)
+PASS  S4b brain: replay without answered_at -> 200 duplicate (=200 true)
+PASS  S4c brain: same key + a different answered_at -> 409 idempotency_conflict (=409 idempotency_conflict)
+PASS  S4d brain: attempt_kind / session_ref / payload do not take part in the comparison (replay, 200) (=200)
+PASS  S5 grade: unknown body field -> 400 invalid_json (mock mirrors the brain) (=400 invalid_json)
+PASS  S5b grade: any query other than ?brain= -> 400; upper-case qref -> 400; answered_at out of range -> 400 (=400 400 400)
+PASS  S5c an answer of 600 characters (> 500) is never sent: archived, 200, brain not called with it (=200 ["archive_only",0,"not_sent",true] 0)
+PASS  S5d a rev below 1 never reaches the brain: the site answers 400 bad_rev itself (=400 bad_rev 4)
+PASS  S6 rev_mismatch 409 (details qref/rev/current_rev, no index) -> 题目已更新，请刷新 (=409 ["rev_mismatch",true])
+PASS  S7 set page keeps the set's own strings (alias and mixed case); lookup answered canonical qrefs (=200 ["example.set:math:2-old","Example.Set:Math:1"] [[]])
+PASS  S7b grade with an alias and a mixed-case qref: lower-cased on the wire, echoes matched back to the page's strings, both graded + recorded (=200 ["graded",2,[["example.set:math:2-old",true],["Example.Set:Math:1",true]]])
+PASS  S7c on the wire: lower-case only (=["example.set:math:2-old","example.set:math:1"])
+PASS  S7d alias and canonical qref share one idempotency key (no second write) (=0)
+PASS  S8 n above 10 is lowered to 10 before asking the brain (no 400 at the brain), page gets a note (=200 0 true)
+PASS  S1c lookup 404 (catch-all) = not deployed -> fallback to the list, set page still 200 (=200 [1])
+PASS  S9 probe against a brain without lookup: a warning, startup continues
+PASS  S9b ... and the site is healthy (=200)
+PASS  S10 the site never produced a 400-class request to the brain in this section (grade_400 only from the 4 direct mock probes S5/S5b) (=4 0 0)
+PASS  S10b the R section never produced one either (=0 0 0)
+PASS  S11 bearer token not in the S site logs
+PASS  S11 grade token not in the S site logs
+PASS  S11 family code not in the S site logs
+
 == L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow ==
 PASS gate shown when not logged in
 PASS wrong code shows message
@@ -650,7 +700,7 @@ PASS [graded] demo set loads for the submit flow
 PASS [graded] submitting nothing shows a hint and sends no request
 PASS [graded] while submitting the button is disabled (提交中…) and a double click sends one request — {"dis":true,"text":"提交中…","n":1,"clear":true}
 PASS [graded] result card appears
-PASS [graded] request carries client_attempt_id (uuid), answered_at (fixed per id), and only qref/answer(/rev) rows; multi-key answers are arrays/strings by type — {"client_attempt_id":"ae4db039-81a3-4f30-bb3f-2fbc06815f6f","answered_at":"2026-10-17T11:20:45.506Z","answers":[{"qref":"example.set:math:1","answer":["5/4","","-3"],"rev":1},{"qref":"example.set:math:2","answer":"B","rev":1},{"qref":"example.set:math:3","answer":["","y=1"],"rev":1}]}
+PASS [graded] request carries client_attempt_id (uuid), answered_at (fixed per id), and only qref/answer(/rev) rows; multi-key answers are arrays/strings by type — {"client_attempt_id":"b3909f9b-db80-43bd-a511-9d6bb0d1dc89","answered_at":"2026-10-17T11:57:17.479Z","answers":[{"qref":"example.set:math:1","answer":["5/4","","-3"],"rev":1},{"qref":"example.set:math:2","answer":"B","rev":1},{"qref":"example.set:math:3","answer":["","y=1"],"rev":1}]}
 PASS [graded] graded mode: 「已提交到大脑」 with the brain-confirmed summary — 已提交到大脑 / 共 3 题 · 答对 1 · 答错 1 · 待核对 1 · 未作答 0
 PASS [graded] graded mode: per-question badges (wrong, right, pending) and no answer key anywhere — ["✗ 不对|vd wrong","✓ 答对了|vd ok","待核对|vd pend"]
 PASS [graded] inputs locked after submitting, 再做一次 offered, submit button hidden
@@ -659,9 +709,9 @@ PASS [graded] after reload the result is shown again without a new request
 PASS [graded] 「再做一次」 clears answers, result and attempt id; form is editable again — {"ls":null,"vals":"","locked":false,"submit":"block","result":"none","vd":0,"btnOk":true}
 PASS [graded] offline submit: message, button usable again, answers kept
 PASS [graded] retry succeeds
-PASS [graded] the retry reused the same client_attempt_id (idempotent) — ["641c4be6-9361-4363-b97b-f7c762cbe447","641c4be6-9361-4363-b97b-f7c762cbe447"]
-PASS [graded] the retry reused the same answered_at (the brain compares it on a replay) — ["2026-10-17T11:20:47.961Z","2026-10-17T11:20:47.961Z"]
-PASS [graded] edited answers after a failed attempt use a fresh client_attempt_id — ["698f43b9-0c21-43ba-aa94-dadda80883bf","c6122a5c-1ed7-4988-a288-929b758459e0"]
+PASS [graded] the retry reused the same client_attempt_id (idempotent) — ["a17456ce-1b56-487a-92f5-5d27b659e064","a17456ce-1b56-487a-92f5-5d27b659e064"]
+PASS [graded] the retry reused the same answered_at (the brain compares it on a replay) — ["2026-10-17T11:57:19.944Z","2026-10-17T11:57:19.944Z"]
+PASS [graded] edited answers after a failed attempt use a fresh client_attempt_id — ["ba349f9a-9414-4cb6-9ddc-f56baccd319e","d2757bbb-88fa-457d-a224-6fe68fd9e1e5"]
 PASS config order wins (3 then 1) and the missing qref only yields a notice
 PASS free-form question gets a wide answer area (textarea)
 PASS textarea answer saved as a string under ruyi-practice-free-3-v1 — {"example.set:math:4":"1/2+1/3=5/6\n过程：通分"}
@@ -677,7 +727,7 @@ PASS [archive] demo set loads for the submit flow
 PASS [archive] submitting nothing shows a hint and sends no request
 PASS [archive] while submitting the button is disabled (提交中…) and a double click sends one request — {"dis":true,"text":"提交中…","n":1,"clear":true}
 PASS [archive] result card appears
-PASS [archive] request carries client_attempt_id (uuid), answered_at (fixed per id), and only qref/answer(/rev) rows; multi-key answers are arrays/strings by type — {"client_attempt_id":"8c76e7fb-bc75-4e2c-9faf-98799a787a34","answered_at":"2026-10-17T11:21:08.543Z","answers":[{"qref":"example.set:math:1","answer":["5/4","","-3"],"rev":1},{"qref":"example.set:math:2","answer":"B","rev":1},{"qref":"example.set:math:3","answer":["","y=1"],"rev":1}]}
+PASS [archive] request carries client_attempt_id (uuid), answered_at (fixed per id), and only qref/answer(/rev) rows; multi-key answers are arrays/strings by type — {"client_attempt_id":"9d2917d3-5d83-43e5-8808-baef8631f893","answered_at":"2026-10-17T11:57:40.501Z","answers":[{"qref":"example.set:math:1","answer":["5/4","","-3"],"rev":1},{"qref":"example.set:math:2","answer":"B","rev":1},{"qref":"example.set:math:3","answer":["","y=1"],"rev":1}]}
 PASS [archive] archive-only: heading says 已提交（暂未判分） — 已提交（暂未判分） / 共 3 题 · 已作答 3 · 未作答 0
 PASS [archive] archive-only: every question is 待核对 — no ✓/✗ verdict at all — ["待核对|vd pend","待核对|vd pend","待核对|vd pend"]
 PASS [archive] archive-only: page never says 已记入大脑 / 已提交到大脑 / mentions 大脑 — text scanned: 596 chars
@@ -687,9 +737,9 @@ PASS [archive] after reload the result is shown again without a new request
 PASS [archive] 「再做一次」 clears answers, result and attempt id; form is editable again — {"ls":null,"vals":"","locked":false,"submit":"block","result":"none","vd":0,"btnOk":true}
 PASS [archive] offline submit: message, button usable again, answers kept
 PASS [archive] retry succeeds
-PASS [archive] the retry reused the same client_attempt_id (idempotent) — ["5152dbf0-1d2d-41db-8abf-19eaa2a4250b","5152dbf0-1d2d-41db-8abf-19eaa2a4250b"]
-PASS [archive] the retry reused the same answered_at (the brain compares it on a replay) — ["2026-10-17T11:21:10.998Z","2026-10-17T11:21:10.998Z"]
-PASS [archive] edited answers after a failed attempt use a fresh client_attempt_id — ["3fa058af-4d5f-485a-8c63-8aa21364d58f","61c88c29-0aba-4a01-9a0f-aebe47060a58"]
+PASS [archive] the retry reused the same client_attempt_id (idempotent) — ["1e5e0c37-6264-48b4-9e2f-7951ee639076","1e5e0c37-6264-48b4-9e2f-7951ee639076"]
+PASS [archive] the retry reused the same answered_at (the brain compares it on a replay) — ["2026-10-17T11:57:42.968Z","2026-10-17T11:57:42.968Z"]
+PASS [archive] edited answers after a failed attempt use a fresh client_attempt_id — ["efe44121-9674-4f93-8c75-444a47bc96c2","0383ae99-92b1-45ae-80d4-bcb6f808c0df"]
 
 17/17 browser checks passed
 PASS  L6 degraded (archive-only) submit flow: the page never claims the brain recorded it (all passed)
@@ -699,14 +749,14 @@ PASS [contract] graded: 已提交到大脑 (all three recorded:true)
 PASS [contract] stale rev: message 题目已更新，请刷新 and the page re-fetched the questions
 PASS [contract] after the refresh the answers are still there and nothing was marked submitted — {"q1":"5/4||-3","q2":1,"shown":false}
 PASS [contract] resubmitting after the refresh succeeds with the new rev and a NEW client_attempt_id
-PASS [contract] ... q2 now carries rev 2; ids differ between the refused and the accepted request — [["8883b245",[1,1,1]],["20b648fe",[1,2,1]]]
+PASS [contract] ... q2 now carries rev 2; ids differ between the refused and the accepted request — [["58fb7b0e",[1,1,1]],["c2445d4a",[1,2,1]]]
 PASS [contract] idempotency_conflict: automatic single resubmit succeeds
-PASS [contract] ... the second request used a new client_attempt_id (same answers) — ["abb0d09b","b2d06fb3"]
+PASS [contract] ... the second request used a new client_attempt_id (same answers) — ["e5b4c3d1","41d6fc23"]
 PASS [contract] a repeating idempotency_conflict stops after one automatic retry and shows a message — requests=2
 PASS [contract] 429: 「今天这题提交次数到上限」, answers stay, no result card — 今天这题提交次数到上限了（同一题每天最多记 3 次），明天再试。答案还在。
 PASS [contract] free-form set loads
 PASS [contract] unsupported (recorded:false): heading 已提交（仅留档，未记入大脑）, badge 不自动判分, never 已提交到大脑 — 已提交（仅留档，未记入大脑） / 不自动判分
-PASS [contract] /api/practice/new?mode=wrong_only creates a set from the brain pick — {"count":3,"deferred":2,"expires_at":"2026-10-17T11:22:21Z","mode":"wrong_only","note":"2 题参考答案待核，不自动判","requested":3,"set_id":"auto-5u9dcqob","title":"错题订正（3 题）","truncated":false,"url":"/m/practice/?set=auto-5u9dcqob"}
+PASS [contract] /api/practice/new?mode=wrong_only creates a set from the brain pick — {"count":3,"deferred":2,"expires_at":"2026-10-17T11:58:53Z","mode":"wrong_only","note":"2 题参考答案待核，不自动判","requested":3,"set_id":"auto-7jqfuwkw","title":"错题订正（3 题）","truncated":false,"url":"/m/practice/?set=auto-7jqfuwkw"}
 PASS [contract] picked set loads
 PASS [contract] 错题 tags and 参考答案待核，不自动判 on the two deferred questions — {"tags":"错题,错题,错题","pend":"q2:参考答案待核，不自动判,q3:参考答案待核，不自动判","title":"错题订正（3 题）"}
 
@@ -719,7 +769,7 @@ PASS [not-ready] heading 已提交（暂未判分）, 大脑接口还没准备�
 2/2 browser checks passed
 PASS  L8 grade endpoint not deployed: the page says 暂未判分 / 大脑接口还没准备好, never 已提交到大脑 (all passed)
 
-TOTAL: 374 passed, 0 failed
+TOTAL: 406 passed, 0 failed
 ```
 
 ## 未覆盖 / 需要后续验证
@@ -728,7 +778,7 @@ TOTAL: 374 passed, 0 failed
 - 真实 15 分钟票据到期；真实 4 MiB 级大图与慢网。
 - iOS Safari / 微信内置浏览器（本次只有桌面 Chrome 的手机视口模拟）。
 - ECS 上的 systemd 219 单元（只按 219 文档核对过指令名，没在 219 上跑过）；`ReadWritePaths=/var/lib/ruyi-site` 与目录属主 700 的组合需要在目标机上实测（见 `DEPLOY-P3.md`）。
-- **三个接口都只对 mock 测过，要等大脑 #35 部署后对真实接口再跑一遍 Q/R 段**：确认练习站令牌的 scope 名（本站不写死）、`rev` 的来源与类型、未知 qref 的 404 错误码（现在认 `unknown_qref`/`qref_not_found`/`question_not_found`，其它 404 视为接口未部署）、`reasons` 词表是否完整（现在只认 `deferred:<code>`，其余原样展示为原因）、429 是否区分日上限与分钟限速（现在一律当「今天这题提交次数到上限」）、别名 qref（回显规范 qref 还是请求 qref）、`session_ref` 的格式限制、`answered_at` 不同是否算冲突（现在假定算，所以页面把它和 id 一起固定）。
-- 权威契约文档（#35）本环境读不到；实现依据是任务给出的契约要点、issue #35 正文和 auto-plan-assessment.md。
+- **三个接口都只对 mock 测过，要等大脑 #35 部署后对真实接口再跑一遍 Q/R/S 段**：确认练习站令牌的 scope 名（本站不写死）、真实 404/429/409 的错误体与大脑开发给出的结构一致（mock 已按该结构实现，见 S 节）、`reasons` 词表。
+- 契约依据：`/workspace/shared/练习站自动方案接口.md` 与大脑开发的核对答复（文档没有描述错误体的结构，错误体以大脑开发的答复为准）。
 - 选题（`due_first` / `wrong_only`）未部署时是 501「大脑接口未就绪」。
 - ntfy 的真实投递（ECS 到 `ntfy.sh` 的出网）只用本地桩验证过。

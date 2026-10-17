@@ -248,15 +248,17 @@ func (s *Server) classifyEnqErr(cur []brain.EnqueueItem, err error) (map[string]
 		return func(string) enqRes { return enqRes{Enq: enq, Reason: why, RetryAfterS: retry} }
 	}
 	switch {
+	case reason == brain.ReasonSessionTotalMismatch:
+		// 400 or 422 (the contract text and the brain's answer differ): the error code decides.
+		// The total of a cid is sticky, so this means damaged local state: no retry, not a transient failure.
+		s.Log.Warn("queue enqueue: the brain refused a changed session_total (site bug path)", "status", statusOfErr(be))
+		return nil, whole(enqNotQueued, brain.ReasonSessionTotalMismatch)
 	case errors.Is(err, brain.ErrGradeDisabled):
 		return nil, whole(enqNotQueued, "not_configured")
 	case brain.NotReady(err):
 		s.Log.Warn("queue enqueue: the brain has no pending-answers endpoint (yet)")
 		return nil, whole(enqNotQueued, brain.ReasonNotReady)
 	case be != nil && be.Kind == brain.KindBadRequest:
-		if reason == brain.ReasonSessionTotalMismatch {
-			s.Log.Warn("queue enqueue: the brain refused a changed session_total (site bug path)")
-		}
 		return nil, whole(enqNotQueued, "invalid")
 	case be != nil && be.Kind == brain.KindAuth:
 		s.Log.Warn("queue enqueue: the brain rejected the write token", "err", desc)
@@ -280,6 +282,13 @@ func (s *Server) classifyEnqErr(cur []brain.EnqueueItem, err error) (map[string]
 	}
 	s.Log.Warn("queue enqueue failed; will retry", "err", desc)
 	return nil, whole(enqFailed, nz(reason, "unavailable"))
+}
+
+func statusOfErr(be *brain.Error) int {
+	if be == nil {
+		return 0
+	}
+	return be.Status
 }
 
 func nz(a, b string) string {

@@ -139,7 +139,7 @@ async function submitFlow(base, graded, tag) {
   } else {
     check(tag + 'archive-only: heading says 已提交（暂未判分）', res.h === '已提交（暂未判分）' && res.sum === '共 3 题 · 已作答 3 · 未作答 0', res.h + ' / ' + res.sum);
     check(tag + 'archive-only: every question is 待核对 — no ✓/✗ verdict at all', res.vd.every(v => v && v.startsWith('待核对（不入大脑）|vd pend')) && !/[✓✗]/.test(res.page), JSON.stringify(res.vd));
-    check(tag + 'archive-only: page never says 已记入大脑 / 已提交到大脑; every badge and the card say 不入大脑', !res.page.includes('已记入大脑') && !res.page.includes('已提交到大脑') && res.vd.every(v => v.startsWith('待核对（不入大脑）|')) && res.page.includes('暂不入大脑'), 'text scanned: ' + res.page.length + ' chars ' + JSON.stringify(res.vd));
+    check(tag + 'archive-only: page never says 已记入大脑 / 已提交到大脑; every badge and the card say 不入大脑', !res.page.includes('已记入大脑') && !res.page.includes('已提交到大脑') && res.vd.every(v => v.startsWith('待核对（不入大脑）|')) && res.page.includes('答案先存档') && !res.page.includes('家长会'), 'text scanned: ' + res.page.length + ' chars ' + JSON.stringify(res.vd));
   }
   check(tag + 'inputs locked after submitting, 再做一次 offered, submit button hidden', res.locked && res.again && res.submitHidden);
   const ls = await ev(`JSON.parse(localStorage.getItem('ruyi-practice-demo-1-v1'))`);
@@ -346,9 +346,9 @@ async function contractFlow(base) {
   // 3. daily cap (429): message, answers kept, not marked submitted
   await hookFetchReply(429, {error: 'daily_cap', message: '今天这题的次数已用完，已留档，未记入大脑。（每题每天只能提交 3 次，明天再提交才会记入大脑。）'});
   await ev(`document.getElementById('btnSubmit').click(); 1`);
-  await waitFor(`document.getElementById('submitMsg').textContent.includes('次数已用完')`);
+  await waitFor(`document.getElementById('submitMsg').textContent.includes('交满 3 次')`);
   const cap = await resultInfo();
-  check('[contract] 429 daily_cap: 「今天这题的次数已用完，已留档，未记入大脑」, answers stay, no result card', cap.msg.includes('今天这题的次数已用完，已留档，未记入大脑') && !cap.shown && (await ev(`document.querySelectorAll('#q1 input.blank')[0].value`)) === '5/4', cap.msg);
+  check('[contract] 429 daily_cap: the new wording (交满 3 次 … 没有 AI 初评 …), no 家长会核对/不入大脑, answers stay, no result card', cap.msg === '今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。' && !/家长会|不入大脑|未记入大脑/.test(cap.msg) && !cap.shown && (await ev(`document.querySelectorAll('#q1 input.blank')[0].value`)) === '5/4', cap.msg);
   await ev(`localStorage.clear(); 1`);
 
   // 4. recorded:false (unsupported): the page must NOT say it was submitted to the brain
@@ -359,9 +359,32 @@ async function contractFlow(base) {
   await ev(`document.getElementById('btnSubmit').click(); 1`);
   await waitFor(resultShown);
   const un = await resultInfo();
-  check('[contract] unsupported (recorded:false): heading 已提交（仅留档，未记入大脑）, badge 不自动判分, never 已提交到大脑',
-    un.h === '已提交（仅留档，未记入大脑）' && un.vd.join() === '不自动判分（不入大脑）' && !un.page.includes('已提交到大脑') && !un.page.includes('已记入大脑'), un.h + ' / ' + un.vd.join());
+  check('[contract] unsupported (recorded:false): heading 已提交（答案先存档）, badge 不自动判分, no 家长会/未记入大脑, never 已提交到大脑',
+    un.h === '已提交（答案先存档）' && !/家长会|未记入大脑/.test(un.page) && un.vd.join() === '不自动判分（不入大脑）' && !un.page.includes('已提交到大脑') && !un.page.includes('已记入大脑'), un.h + ' / ' + un.vd.join());
   await shot('practice-result-unsupported.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
+  await ev(`localStorage.clear(); 1`);
+
+  // the queue refused the answer for daily_cap: the first-screen card speaks the new wording only
+  check('[contract] free-form set loads again', await loginAndLoad(base + '/m/practice/?set=free-3', 1));
+  if (await ev(resultShown)) { await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300); } // a restored earlier result would be mistaken for the new one
+  await ev(`(() => { const t = document.querySelector('#q1 textarea.ans'); t.value = '1/2+1/3=5/6'; t.dispatchEvent(new Event('input', {bubbles: true})); return 1; })()`);
+  await sleep(400);
+  await ev(`(() => { // answer the grade call with a daily_cap-refused queue object, echoing the page's own attempt id
+    if (!window.__origFetch) window.__origFetch = window.fetch;
+    const of = window.__origFetch;
+    window.fetch = (u, o) => {
+      if (!String(u).includes('/grade')) return of(u, o);
+      const cid = JSON.parse(o.body).client_attempt_id;
+      return Promise.resolve(new Response(JSON.stringify({client_attempt_id: cid, set_id: 'free-3', mode: 'graded', brain_recorded: false, recorded_count: 0, archived: true,
+        results: [{qref: 'example.set:math:4', status: 'unsupported', recorded: false}], summary: {total: 1, unanswered: 0, unsupported: 1, graded: 0, correct: 0, pending: 0, recorded: 0},
+        queue: {enqueue: 'failed', items: [{qref: 'example.set:math:4', enq: 'not_queued', reason: 'daily_cap'}]}}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+    };
+    return 1; })()`);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  await waitFor(resultShown);
+  const dc = await resultInfo();
+  check('[contract] daily_cap (queue): heading 已提交（答案先存档）, row 「今天已交满 3 次，先存档」, paragraph says 没有 AI 初评; no 家长会 / 不入大脑 / 未记入大脑 anywhere',
+    dc.h === '已提交（答案先存档）' && dc.vd.join() === '今天已交满 3 次，先存档' && dc.page.includes('没有 AI 初评') && !/家长会|不入大脑|未记入大脑/.test(dc.page), dc.h + ' / ' + dc.vd.join());
   await ev(`localStorage.clear(); 1`);
 
   // 5. a brain-picked set: origin tags and 「参考答案待核，不自动判」
@@ -407,7 +430,7 @@ async function dailyLimitFlow(base) {
     check(`[limit] submission ${i + 1}: graded, 已提交到大脑`, await waitFor(resultShown) && (await resultInfo()).h === '已提交到大脑');
     const cf = await ev(`window.__confirms`);
     check(`[limit] submission ${i + 1}: confirm says "本次提交后…约还剩${wantLeft[i]}次"`, cf.length === 1 && cf[0].includes('约还剩' + wantLeft[i] + '次') && !cf[0].includes('，还剩'), JSON.stringify(cf));
-    const want = wantLeft[i] === '0' ? '今天这题的次数已用完（再提交只会留档，不入大脑）' : '今天约还剩 ' + wantLeft[i] + ' 次';
+    const want = wantLeft[i] === '0' ? '今天这题已交满 3 次，再交只存档、没有 AI 初评；明天再交一次才会排队。' : '今天约还剩 ' + wantLeft[i] + ' 次';
     check(`[limit] after submission ${i + 1} the labels read: ${want}`, await waitFor(`[...document.querySelectorAll('#qs .quota')].length===3 && [...document.querySelectorAll('#qs .quota')].every(q => q.textContent === ${JSON.stringify(want)})`), JSON.stringify(await lefts()));
     await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300);
     await fillDemo(); await sleep(400);
@@ -417,7 +440,7 @@ async function dailyLimitFlow(base) {
   // 4. the 4th: the confirm warns that it will not be recorded; accepting gives 429 daily_cap
   await hookFetch(0, false); await hookConfirm('true');
   await ev(`document.getElementById('btnSubmit').click(); 1`);
-  check('[limit] 4th: 「已留档，未记入大脑」 message from the 429, no result card, answers kept', await waitFor(`document.getElementById('submitMsg').textContent.includes('今天这题的次数已用完，已留档，未记入大脑')`));
+  check('[limit] 4th: the new daily_cap wording (交满 3 次 … 先存档 … 没有 AI 初评) from the 429, no result card, answers kept', await waitFor(`document.getElementById('submitMsg').textContent.includes('今天这题已经交满 3 次，这次答案先存档，没有 AI 初评')`));
   const c4 = await ev(`({c: window.__confirms, shown: ${resultShown}, q1: [...document.querySelectorAll('#q1 input.blank')].map(e => e.value).join('|'), caps: document.querySelectorAll('#qs .vd.cap').length, dis: document.getElementById('btnSubmit').disabled, ids: window.__bodies.map(b => JSON.parse(b).client_attempt_id), ls: JSON.parse(localStorage.getItem('ruyi-practice-demo-1-v1') || 'null')})`);
   check('[limit] 4th: the confirm warned 「已经用完 … 不会记入大脑」', c4.c.length === 1 && c4.c[0].includes('今天的 3 次已经用完') && c4.c[0].includes('不会记入大脑') && c4.c[0].includes('约还剩0次'), JSON.stringify(c4.c));
   check('[limit] 4th: not marked submitted, answers kept, capped questions marked, button usable', !c4.shown && c4.q1 === '5/4||-3' && c4.caps === 3 && !c4.dis, JSON.stringify([c4.shown, c4.q1, c4.caps]));
@@ -452,7 +475,7 @@ async function dailyLimitFlow(base) {
   const un = await resultInfo();
   const cf1 = await ev(`window.__confirms`);
   check('[limit] single question: confirm reads 「每题每天只能提交3次，本次提交后约还剩2次。」', cf1.length === 1 && cf1[0].startsWith('每题每天只能提交3次，本次提交后约还剩2次。（按本站提交记录估算）'), JSON.stringify(cf1));
-  check('[limit] unsupported: badge 「不自动判分（不入大脑）」, card says 不入大脑, never 已提交到大脑', un.vd.join() === '不自动判分（不入大脑）' && un.page.includes('（不入大脑）') && !un.page.includes('已提交到大脑'), un.vd.join() + ' / ' + un.h);
+  check('[limit] unsupported: badge 「不自动判分（不入大脑）」, card says 不入大脑, never 已提交到大脑', un.vd.join() === '不自动判分（不入大脑）' && un.page.includes('（不入大脑）') && !/家长会/.test(un.page) && !un.page.includes('已提交到大脑'), un.vd.join() + ' / ' + un.h);
   await shot('practice-limit-unsupported.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
   return finish();
 }
@@ -468,7 +491,7 @@ async function notReadyFlow(base) {
   await waitFor(`getComputedStyle(document.getElementById('resultCard')).display==='block'`);
   const r = await resultInfo();
   check('[not-ready] heading 已提交（暂未判分）, 大脑接口还没准备好, every badge 待核对（不入大脑）, no verdict',
-    r.h === '已提交（暂未判分）' && r.page.includes('大脑接口还没准备好') && r.vd.every(v => v === '待核对（不入大脑）') && !/[✓✗]/.test(r.page) && !r.page.includes('已提交到大脑') && !r.page.includes('已记入大脑'), r.h + ' / ' + r.vd.join());
+    r.h === '已提交（暂未判分）' && r.page.includes('大脑接口还没准备好') && r.vd.every(v => v === '待核对（不入大脑）') && !/家长会/.test(r.page) && !/[✓✗]/.test(r.page) && !r.page.includes('已提交到大脑') && !r.page.includes('已记入大脑'), r.h + ' / ' + r.vd.join());
   await shot('practice-result-notready.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
   return finish();
 }

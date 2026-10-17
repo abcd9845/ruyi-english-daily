@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -54,10 +55,13 @@ func queueClient(t *testing.T, notify string) (*Client, *mockqueue.Mock, *qenv) 
 	return c, m, env
 }
 
+// one fixed answered_at for the whole test binary: the same key replayed must carry the same value
+var fixedAnswered = time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+
 func req(cid string, total int, qs ...string) EnqueueRequest {
 	r := EnqueueRequest{ClientAttemptID: cid, SessionRef: cid, SessionTotal: total}
 	for _, q := range qs {
-		r.Items = append(r.Items, EnqueueItem{QRef: q, Answer: "a", Rev: 1, AnsweredAt: time.Now().Add(-time.Minute)})
+		r.Items = append(r.Items, EnqueueItem{QRef: q, Answer: "a", Rev: 1, AnsweredAt: fixedAnswered})
 	}
 	return r
 }
@@ -240,5 +244,80 @@ func TestWrongNotifyTokenIsAnAuthErrorNotAFallback(t *testing.T) {
 	}
 	if m.Counter("write_token_on_events_endpoint") != 0 {
 		t.Errorf("fallback to the write token")
+	}
+}
+
+// ack wire format: the body is exactly {"up_to_id": <JSON integer>}; the brain refuses anything else with 400.
+func TestAckBodyIsAJSONIntegerAndTheBrainRefusesOtherShapes(t *testing.T) {
+	var got []byte
+	rec := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"acked_up_to":9007199254740993}`))
+	}))
+	defer rec.Close()
+	u, _ := url.Parse(rec.URL)
+	c, err := New(Config{BaseURL: u, Token: "r-token", GradeToken: "w-token", NotifyToken: "n-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{7, 9007199254740993} { // beyond 2^53: still an integer on the wire, no float
+		if err := c.AckEvents(context.Background(), n); err != nil {
+			t.Fatal(err)
+		}
+		want := `{"up_to_id":` + strconv.FormatInt(n, 10) + `}`
+		if string(got) != want {
+			t.Fatalf("body %q, want %q", got, want)
+		}
+	}
+
+	// the mock (the brain's rule) refuses a string, a float, ids[], null, a missing field: 400 validation_failed
+	cl, m, _ := queueClient(t, "n-token")
+	_ = cl
+	mux := http.NewServeMux()
+	m.Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	post := func(body string) (int, string) {
+		rq, _ := http.NewRequest(http.MethodPost, srv.URL+queueAckPath, strings.NewReader(body))
+		rq.Header.Set("Authorization", "Bearer n-token")
+		rq.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(rq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b := make([]byte, 512)
+		k, _ := resp.Body.Read(b)
+		return resp.StatusCode, string(b[:k])
+	}
+	for _, body := range []string{`{"up_to_id":"7"}`, `{"up_to_id":7.0}`, `{"up_to_id":null}`, `{}`, `{"ids":[1,2]}`, `{"up_to_id":[7]}`, `{"up_to_id":7,"ids":[7]}`} {
+		if st, b := post(body); st != 400 || !strings.Contains(b, "validation_failed") {
+			t.Errorf("%s -> %d %s, want 400 validation_failed", body, st, b)
+		}
+	}
+	if st, b := post(`{"up_to_id":0}`); st != 422 {
+		t.Errorf("a non-positive integer is a business answer: %d %s", st, b)
+	}
+}
+
+// replaying the same key with another answered_at (or answer) is a 409 idempotency_conflict.
+func TestEnqueueReplayWithAnotherAnsweredAtIs409(t *testing.T) {
+	c, _, _ := queueClient(t, "n-token")
+	r := req("cid-aa-1", 1, "ex:1")
+	if _, err := c.Enqueue(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Enqueue(context.Background(), r); err != nil { // the same replay is fine
+		t.Fatalf("identical replay: %v", err)
+	}
+	r2 := r
+	r2.Items = []EnqueueItem{r.Items[0]}
+	r2.Items[0].AnsweredAt = r.Items[0].AnsweredAt.Add(-time.Minute)
+	_, err := c.Enqueue(context.Background(), r2)
+	var be *Error
+	if !errors.As(err, &be) || be.Kind != KindConflict {
+		t.Fatalf("a changed answered_at must be refused as a conflict: %v", err)
 	}
 }

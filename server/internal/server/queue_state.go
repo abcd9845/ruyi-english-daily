@@ -241,6 +241,10 @@ type sessState struct {
 	DoneSeen bool `json:"done_seen,omitempty"`
 }
 
+// notifyMarker is created the first time the poller starts in a state dir: a missing
+// notify.json next to it is a real loss (WARN), without it the poller is just being switched on.
+const notifyMarker = ".notify-started"
+
 type notifyState struct {
 	dir string
 	log *slog.Logger
@@ -255,6 +259,9 @@ type notifyState struct {
 	// recovered: notify.json was missing or damaged while submissions are known
 	// (a fresh start with nothing to recover from is not "recovered").
 	recovered bool
+	// firstOpen: no notify.json, nothing ever sent and no start marker = the poller is switched on for the first
+	// time on an existing queue. Same one-off reconcile, but nothing is wrong (INFO, not WARN).
+	firstOpen bool
 }
 
 // loadNotify reads notify.json and sent.jsonl. A damaged notify.json is renamed
@@ -280,8 +287,10 @@ func loadNotify(dir string, log *slog.Logger, now time.Time) *notifyState {
 		// no state file: a brand-new install (nothing sent, no submissions yet) is NOT a loss;
 		// a missing file next to a non-empty sent log or links log is.
 		st.recovered = len(st.sent) > 0
+		_, merr := os.Stat(filepath.Join(dir, notifyMarker))
+		st.firstOpen = len(st.sent) == 0 && errors.Is(merr, os.ErrNotExist) // the poller never ran here before
 		if fi, err := os.Stat(filepath.Join(dir, linksFile)); err == nil && fi.Size() > 0 {
-			st.recovered = true // submissions are known (links.jsonl) but the notify state is gone
+			st.recovered = true // submissions are known (links.jsonl) but the notify state is gone (first switch-on, or lost)
 		}
 	case err != nil:
 		st.recovered = true

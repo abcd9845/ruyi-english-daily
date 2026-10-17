@@ -215,15 +215,16 @@ const (
 )
 
 var notQueuedText = map[string]string{
-	brain.ReasonDailyCap:         "今天这题的次数已用完",
-	brain.ReasonKindNotEnabled:   "这类题暂时还不能排队",
-	brain.ReasonImagesNotEnabled: "带图作答暂时还不能排队",
-	brain.ReasonAnswerRequired:   "没有作答内容",
-	brain.ReasonNotReady:         "排队功能还没开通",
-	brain.ReasonQuestionNotFound: "题目在大脑里找不到了",
-	brain.ReasonRevMismatch:      "题目已更新",
-	"retry_exhausted":            "多次排队都没成功",
-	"archive_unavailable":        "存档里找不到这次作答",
+	brain.ReasonDailyCap:             "今天这题的次数已用完",
+	brain.ReasonKindNotEnabled:       "这类题暂时还不能排队",
+	brain.ReasonImagesNotEnabled:     "带图作答暂时还不能排队",
+	brain.ReasonAnswerRequired:       "没有作答内容",
+	brain.ReasonNotReady:             "排队功能还没开通",
+	brain.ReasonQuestionNotFound:     "题目在大脑里找不到了",
+	brain.ReasonRevMismatch:          "题目已更新",
+	"retry_exhausted":                "多次排队都没成功",
+	brain.ReasonSessionTotalMismatch: "排队信息对不上",
+	"archive_unavailable":            "存档里找不到这次作答",
 }
 
 func hoursOf(kind string, deadline, submitted time.Time, caps *brain.Capabilities) int {
@@ -257,7 +258,7 @@ func (s *Server) itemView(li linkItem, p *brain.Pending, submitted time.Time, ca
 			if why == "" {
 				why = "暂时不能排队"
 			}
-			o.Label = "未排队：" + why + "，答案已存档，家长会核对（不入大脑）"
+			o.Label = "未排队：" + why + "，答案已存档，没有 AI 初评"
 		}
 		return o
 	case enqFailed:
@@ -278,7 +279,8 @@ func (s *Server) itemView(li linkItem, p *brain.Pending, submitted time.Time, ca
 		o.NeedsManual = p.NeedsManual
 		o.CompareOutcome = p.CompareOutcome
 		o.ReviewVerdict = p.ReviewVerdict
-		if p.HasResult && (p.ProposedAnswer != "" || p.Rationale != "") {
+		// text only from compared on: a bot-proposed (state proposed) answer is not yet an AI first pass
+		if p.HasResult && (p.ProposedAnswer != "" || p.Rationale != "") && (state == brain.StateCompared || state == brain.StateJudged || state == brain.StateReviewed) {
 			o.Result = &qResultOut{ProposedAnswer: p.ProposedAnswer, Rationale: p.Rationale}
 		}
 	}

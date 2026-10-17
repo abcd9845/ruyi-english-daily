@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -81,6 +83,9 @@ func (s *Server) EnableNotify() error {
 	}
 	if p.st.recovered {
 		p.markRecovered()
+	}
+	if err := os.WriteFile(filepath.Join(s.QueueDir, notifyMarker), []byte("1\n"), 0o600); err != nil {
+		s.Log.Debug("queue notify start marker not written", "err", err.Error())
 	}
 	s.poll = p
 	return nil
@@ -200,6 +205,10 @@ func (p *poller) markRecovered() {
 		if ss.State == sessOpen || ss.State == sessSending {
 			ss.Reconcile = true
 		}
+	}
+	if p.st.firstOpen {
+		p.s.Log.Info("queue notify state not found (first start of the poller): reading recent submissions from the brain once")
+		return
 	}
 	p.s.Log.Warn("queue notify state was missing or damaged: reconciling recent submissions with the brain")
 }

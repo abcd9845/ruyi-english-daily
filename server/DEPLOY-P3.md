@@ -210,8 +210,8 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
 1. 建目录：`install -d -m 0700 -o ruyi-site -g ruyi-site /var/lib/ruyi-site/queue`；确认单元的 `ReadWritePaths` 含 `/var/lib/ruyi-site`（`systemctl daemon-reload`）。
 2. 换二进制（`ruyi-site-queue-s1-linux-amd64`），**不改环境变量先重启一次**：行为应与 #22 一致（`GET /api/practice/attempts/<cid>/queue` 仍是 400）。
 3. 在 env 文件里加 `RUYI_QUEUE_ENABLED=1`（先不开提醒）→ 重启 → 家长自己交一份含「待核对」题的练习，看状态页：待解答 → …。
-4. 再加 `RUYI_QUEUE_NOTIFY_ENABLED=1` 和 `RUYI_BRAIN_NOTIFY_TOKEN` → 重启。日志里应有 `queue capabilities`；notify 令牌被拒只会出现 `queue notify token rejected … no fallback`，站点其余功能不受影响。
-5. **回滚**：**只改一个开关**——把 `RUYI_QUEUE_ENABLED` 改 `0` 重启（行为回到 #22；`queue/` 目录可留可删）。**其余 `RUYI_QUEUE_*` / `RUYI_BRAIN_NOTIFY_TOKEN` / `RUYI_BRAIN_PENDING_PATH` 可以原样留在 env 文件里，不用删**：队列关闭时它们全被忽略（包括 `RUYI_QUEUE_NOTIFY_ENABLED=1`，提醒轮询也不会起），值有问题也只在启动日志里打一条 `configuration warning`，不会拒绝启动（测试 `TestQueueOffIgnoresTheOtherQueueVariables`）。`RUYI_QUEUE_ENABLED` 自己写错（不是 0/1）仍会拒绝启动。也可以直接换回 #22 的二进制。归档里 S1 写的 `v:3` 行带多出来的 `queue` 字段，#22 的读取器忽略未知字段（测试 `TestQueueArchiveV3LinesAreReadableByThePreviousBuild`），不需要改归档。
+4. 再加 `RUYI_QUEUE_NOTIFY_ENABLED=1`（第一次开 poller 时 `notify.json` 还不存在，日志是一条 INFO「first start of the poller」，不是 WARN；之后目录里有 `.notify-started`，此后 `notify.json` 丢失才是 WARN「missing or damaged」） 和 `RUYI_BRAIN_NOTIFY_TOKEN` → 重启。日志里应有 `queue capabilities`；notify 令牌被拒只会出现 `queue notify token rejected … no fallback`，站点其余功能不受影响。
+5. **回滚**：**只改一个开关**——把 `RUYI_QUEUE_ENABLED` 改 `0` 重启（行为回到 #22；`queue/` 目录可留可删）。**其余 `RUYI_QUEUE_*` / `RUYI_BRAIN_NOTIFY_TOKEN` / `RUYI_BRAIN_PENDING_PATH` 可以原样留在 env 文件里，不用删**：队列关闭时它们全被忽略（包括 `RUYI_QUEUE_NOTIFY_ENABLED=1`，提醒轮询也不会起），值有问题也只在启动日志里打一条 `configuration warning`，不会拒绝启动（测试 `TestQueueOffIgnoresTheOtherQueueVariables`）。`RUYI_QUEUE_ENABLED` 自己写错（不是 0/1）仍会拒绝启动。也可以直接换回 #22 的二进制。**注意**：只关队列不会还原 grade 请求里的 `session_ref`（仍是 `client_attempt_id`，大脑侧不依赖它）；**只有换回 #22 二进制才还原成套 id**。归档里 S1 写的 `v:3` 行带多出来的 `queue` 字段，#22 的读取器忽略未知字段（测试 `TestQueueArchiveV3LinesAreReadableByThePreviousBuild`），不需要改归档。
 
 ### 9.3 本地状态与丢失时的对账
 

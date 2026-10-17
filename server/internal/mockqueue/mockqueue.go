@@ -32,6 +32,12 @@ type Env interface {
 	Now() time.Time
 }
 
+// SeenEnv is optional: an Env that also remembers what the grade call stored under a key,
+// so an enqueue replay of a grade-recorded answer is compared on answer + answered_at too.
+type SeenEnv interface {
+	Seen(key string) (canonAnswer string, answeredAt time.Time, ok bool)
+}
+
 // Config configures a Mock.
 type Config struct {
 	Brain       string
@@ -58,7 +64,10 @@ type item struct {
 	Review      string // none|confirmed|overridden
 	AttemptID   int64
 	SessionRef  string
-	Answer      string // canonical JSON, only to compare replays
+	Answer      string    // canonical JSON, only to compare replays
+	AnsweredAt  time.Time // the idempotency key also fixes answered_at, rev and attempt_kind
+	Rev         int
+	AttKind     string
 }
 
 type event struct {
@@ -92,6 +101,7 @@ type Mock struct {
 	reqs     [][]byte // every enqueue body (secrets never in it; the answers are synthetic)
 
 	judged       bool
+	mismatch422  bool   // session_total_mismatch as the contract's 422 instead of a 400
 	enqueueMode  string // "" | "500" | "slow" | "off" | "auth" | "queue_full"
 	batchOff     bool
 	detailOff    bool
@@ -268,6 +278,10 @@ func (m *Mock) enqueueInner(w http.ResponseWriter, r *http.Request) {
 	case "off":
 		jerr(w, 404, "not_found", "not found", nil, nil, nil)
 		return
+	case "400":
+		m.bump("enqueue_400")
+		jerr(w, 400, "validation_failed", "invalid request", map[string]any{"field": "items"}, nil, nil)
+		return
 	case "auth":
 		jerr(w, 403, "forbidden", "forbidden", nil, nil, nil)
 		return
@@ -371,21 +385,42 @@ func (m *Mock) enqueueInner(w http.ResponseWriter, r *http.Request) {
 		canon[i] = string(c)
 	}
 	if sref != "" && req.SessionTotal != nil {
-		// a session_ref has ONE session_total: a request with another value is a 400 for the
-		// whole request (not a per-item 422) and nothing is written
+		// a session_ref has ONE session_total. Default: a 400 for the whole request and nothing is
+		// written. With Set("mismatch_status","422") the contract's wording instead: a batch-level
+		// 422 whose every item carries reason session_total_mismatch (not a permanent reason).
 		if s := m.sessions[sref]; s != nil && s.Total != 0 && s.Total != *req.SessionTotal {
-			m.Stats["enqueue_400"]++
 			m.Stats["enqueue_total_mismatch"]++
-			jerr(w, 400, "session_total_mismatch", "session_total differs from the one already registered for this session_ref",
-				map[string]any{"field": "session_total", "registered": s.Total}, nil, nil)
-			return
+			if m.mismatch422 {
+				for i := range vs {
+					vs[i].reasons = append(vs[i].reasons, "session_total_mismatch")
+				}
+			} else {
+				m.Stats["enqueue_400"]++
+				jerr(w, 400, "session_total_mismatch", "session_total differs from the one already registered for this session_ref",
+					map[string]any{"field": "session_total", "registered": s.Total}, nil, nil)
+				return
+			}
 		}
 	}
-	// idempotency conflict: same key, different answer
+	// idempotency conflict: the key ps:<cid>:<qref> fixes answer, rev, attempt_kind AND answered_at
+	// (a replay that differs in any of them is a 409; a changed answered_at is the classic site bug)
 	for i := range req.Items {
 		key := "ps:" + req.CID + ":" + vs[i].qref
-		if prev := m.byKey[key]; prev != nil && prev.Answer != canon[i] {
-			jerr(w, 409, "idempotency_conflict", "idempotency conflict", nil, nil, nil)
+		rev := 0
+		if req.Items[i].Rev != nil {
+			rev = *req.Items[i].Rev
+		}
+		conflict := false
+		if prev := m.byKey[key]; prev != nil {
+			conflict = prev.Answer != canon[i] || !prev.AnsweredAt.Equal(answered[i]) || prev.Rev != rev || prev.AttKind != req.Items[i].AttemptKind
+		} else if se, ok := m.cfg.Env.(SeenEnv); ok {
+			if c, at, has := se.Seen(key); has {
+				conflict = (c != "" && c != canon[i]) || !at.Equal(answered[i])
+			}
+		}
+		if conflict {
+			m.Stats["enqueue_conflict"]++
+			jerr(w, 409, "idempotency_conflict", "idempotency conflict (answer, rev, attempt_kind or answered_at differs)", nil, nil, nil)
 			return
 		}
 	}
@@ -539,7 +574,10 @@ func (m *Mock) enqueueInner(w http.ResponseWriter, r *http.Request) {
 			kind = "absolute"
 		}
 		ni := &item{ID: m.seq, Key: key, CID: req.CID, QRef: q, Kind: kind, State: "queued", Created: now, Deadline: deadlineFor(kind, now),
-			AttemptID: aid, SessionRef: sref, Answer: canon[i], Review: "none"}
+			AttemptID: aid, SessionRef: sref, Answer: canon[i], Review: "none", AnsweredAt: answered[i], AttKind: req.Items[i].AttemptKind}
+		if req.Items[i].Rev != nil {
+			ni.Rev = *req.Items[i].Rev
+		}
 		m.items[ni.ID] = ni
 		m.byKey[key] = ni
 		wrote = true
@@ -753,17 +791,24 @@ func (m *Mock) handleAck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+	// up_to_id must be a JSON integer: not a string, not a float, not ids[] (parameter errors are 400)
 	var req struct {
-		UpTo json.Number `json:"up_to_id"`
+		UpTo json.RawMessage `json:"up_to_id"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	dec.UseNumber()
-	if err := dec.Decode(&req); err != nil {
-		jerr(w, 400, "invalid_json", "invalid json", nil, nil, nil)
+	if err := dec.Decode(&req); err != nil || dec.More() {
+		m.bump("ack_400")
+		jerr(w, 400, "validation_failed", "invalid body", nil, nil, nil)
 		return
 	}
-	up, err := req.UpTo.Int64()
+	raw := strings.TrimSpace(string(req.UpTo))
+	up, err := strconv.ParseInt(raw, 10, 64) // a quoted string, a float, null or a missing field never parse
+	if err != nil {
+		m.bump("ack_400")
+		jerr(w, 400, "validation_failed", "up_to_id must be an integer", map[string]any{"field": "up_to_id"}, nil, nil)
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.ackFail > 0 {
@@ -772,7 +817,7 @@ func (m *Mock) handleAck(w http.ResponseWriter, r *http.Request) {
 		jerr(w, 500, "internal", "boom", nil, nil, nil)
 		return
 	}
-	if err != nil || up <= 0 {
+	if up <= 0 {
 		jerr(w, 422, "invalid_ack", "invalid up_to_id", nil, nil, nil)
 		return
 	}
@@ -922,6 +967,8 @@ func (m *Mock) Set(k, v string) {
 		m.cfgMu.Unlock()
 	case "enqueue_mode":
 		m.enqueueMode = v
+	case "mismatch_status":
+		m.mismatch422 = v == "422"
 	case "batch_off":
 		m.batchOff = b
 	case "detail_off":

@@ -72,10 +72,11 @@ type fakeBrain struct {
 	// "idem" (409 idempotency_conflict) | "unknown" (404 unknown_qref)
 	gradeMode   string
 	gradeReqs   [][]byte
-	gradeAuths  []string          // Authorization header of every grade call
-	gradeSeen   map[string]string // ps:<cid>:<qref> -> canonical answer
-	gradeIDs    map[string]int64  // ps:<cid>:<qref> -> attempt id
-	gradeDayCnt map[string]int    // qref -> writes today
+	gradeAuths  []string             // Authorization header of every grade call
+	gradeSeen   map[string]string    // ps:<cid>:<qref> -> canonical answer
+	gradeIDs    map[string]int64     // ps:<cid>:<qref> -> attempt id
+	gradeAt     map[string]time.Time // ps:<cid>:<qref> -> answered_at the key was created with (zero = none)
+	gradeDayCnt map[string]int       // qref -> writes today
 	gradeSeq    int64
 	gradeQuery  []string // raw query of every grade call (must stay empty)
 	gradeBank   int      // grade calls that used the bank:read token (must stay 0)
@@ -107,7 +108,7 @@ func (f *fakeBrain) wantBrain() string {
 }
 
 func newFakeBrain(t *testing.T) *fakeBrain {
-	f := &fakeBrain{token: rnd(t, "tok-"), gradeToken: rnd(t, "gtok-"), calls: map[string]int{}, gradeSeen: map[string]string{}, gradeIDs: map[string]int64{}, gradeDayCnt: map[string]int{}, revs: map[string]int{}}
+	f := &fakeBrain{token: rnd(t, "tok-"), gradeToken: rnd(t, "gtok-"), calls: map[string]int{}, gradeSeen: map[string]string{}, gradeIDs: map[string]int64{}, gradeAt: map[string]time.Time{}, gradeDayCnt: map[string]int{}, revs: map[string]int{}}
 	mux := http.NewServeMux()
 	jerr := func(w http.ResponseWriter, code int, c string) { jerrf(w, code, c) }
 	mux.HandleFunc("GET /v1/bank/questions", func(w http.ResponseWriter, r *http.Request) {
@@ -223,9 +224,16 @@ func (e fakeQueueEnv) DayCount(q string) int {
 	defer e.f.mu.Unlock()
 	return e.f.gradeDayCnt[q]
 }
-func (e fakeQueueEnv) Write(key, q, canon string, _ time.Time) int64 {
+func (e fakeQueueEnv) Seen(key string) (string, time.Time, bool) {
 	e.f.mu.Lock()
 	defer e.f.mu.Unlock()
+	_, ok := e.f.gradeIDs[key]
+	return "", e.f.gradeAt[key], ok
+}
+func (e fakeQueueEnv) Write(key, q, canon string, at time.Time) int64 {
+	e.f.mu.Lock()
+	defer e.f.mu.Unlock()
+	e.f.gradeAt[key] = at
 	e.f.gradeSeq++
 	e.f.gradeIDs[key] = e.f.gradeSeq
 	e.f.gradeSeen[key] = canon
@@ -626,6 +634,11 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 				f.gradeIDs[key] = f.gradeSeq
 				o["attempt_id"] = f.gradeSeq
 				f.gradeSeen[key] = a
+				if it.AnsweredAt != "" {
+					if t, err := time.Parse(time.RFC3339, it.AnsweredAt); err == nil {
+						f.gradeAt[key] = t
+					}
+				}
 				if f.gradeMode != "cap3" {
 					f.gradeDayCnt[ref]++ // the real brain counts every new write; cap3 does its own counting above
 				}

@@ -186,8 +186,33 @@ func TestPollerLocalStateLossIsReconciledFromTheBrain(t *testing.T) {
 	if d, _ := notices(n); d != 1 {
 		t.Fatalf("after a lost notify.json: %d notices (reconcile must send exactly one)", d)
 	}
-	if !strings.Contains(e2.logs.String(), "reconciling") {
-		t.Errorf("the loss was not logged")
+	if l := e2.logs.String(); !strings.Contains(l, "reconciling") || !strings.Contains(l, "level=WARN msg=\"queue notify state was missing or damaged") {
+		t.Errorf("the loss must be a WARN")
+	}
+}
+
+// P3-8: switching the poller on for the first time (no notify.json yet, nothing ever sent, no
+// start marker) is not a loss: INFO, not the WARN meant for a lost state file.
+func TestPollerFirstSwitchOnLogsInfoNotWarn(t *testing.T) {
+	e, n, ck := queueEnv(t, opts{}) // queue on, poller off
+	submitTri(t, e, ck, cid1)
+	e2 := newEnv(t, opts{reuse: e, sets: queueSets, grade: true, ntfyURL: n.url(), queue: true, queueNotify: true})
+	pollOnce(t, e2)
+	l := e2.logs.String()
+	if strings.Contains(l, "missing or damaged") || strings.Contains(l, "level=WARN msg=\"queue notify state") {
+		t.Errorf("first switch-on must not WARN:\n%s", l)
+	}
+	if !strings.Contains(l, "level=INFO msg=\"queue notify state not found (first start of the poller)") {
+		t.Errorf("expected the INFO line:\n%s", l)
+	}
+	// a restart later with notify.json removed IS a loss again (the start marker is there)
+	e2.app.CloseQueue()
+	if err := os.Remove(filepath.Join(e.qDir, "notify.json")); err != nil {
+		t.Fatal(err)
+	}
+	e3 := newEnv(t, opts{reuse: e, sets: queueSets, grade: true, ntfyURL: n.url(), queue: true, queueNotify: true})
+	if !strings.Contains(e3.logs.String(), "level=WARN msg=\"queue notify state was missing or damaged") {
+		t.Errorf("after the poller ran once, a missing notify.json is a WARN")
 	}
 }
 

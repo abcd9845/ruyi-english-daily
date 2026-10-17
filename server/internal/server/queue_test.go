@@ -287,7 +287,7 @@ func TestQueueNoBlindTryWhenKindNotEnabled(t *testing.T) {
 		t.Errorf("enqueue calls %d (only the queueable item may be sent)", got)
 	}
 	v := e.qview(t, ck, cid1)
-	if v.item(q3).UI != "not_queued" || !strings.Contains(v.item(q3).Label, "不入大脑") {
+	if v.item(q3).UI != "not_queued" || !strings.Contains(v.item(q3).Label, "没有 AI 初评") || strings.Contains(v.item(q3).Label, "家长会核对") {
 		t.Errorf("%+v", v.item(q3))
 	}
 }
@@ -710,5 +710,43 @@ func TestQueueDailyCapWordingAndParentLine(t *testing.T) {
 	e, _, _ := queueEnv(t, opts{})
 	if l := e.app.TNotQueuedLabel("daily_cap"); l != "今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。" || strings.Contains(l, "家长会核对") || strings.Contains(l, "不入大脑") {
 		t.Errorf("%q", l)
+	}
+}
+
+// P3-7: the contract text says 422, the brain's answer is 400: both are decided by error.code
+// (session_total_mismatch) -> not queued, no retry, never a transient failure.
+func TestQueueSessionTotalMismatch400And422AreNotQueuedAndNeverRetried(t *testing.T) {
+	for _, status := range []string{"", "422"} {
+		now := time.Now()
+		clock := &now
+		e, _, ck := queueEnv(t, opts{now: func() time.Time { return *clock }})
+		e.brain.q.Set("mismatch_status", status)
+		e.brain.q.Set("enqueue_mode", "lost") // written with total 3, reply lost
+		e.qgrade(t, ck, "tri-3", triAnswers(cid1))
+		e.app.TSetSessionTotal(cid1, 9) // damaged local state: the retry now carries another total
+		e.brain.q.Set("enqueue_mode", "")
+		calls := e.brain.q.Counter("enqueue_calls")
+		triesBefore := e.app.TLink(cid1).Items[0].Tries // the lost reply was one failed try; the mismatch adds none
+		if postEnqueue(t, e, ck, cid1) != 200 {
+			t.Fatalf("status %q: post", status)
+		}
+		if e.brain.q.Counter("enqueue_total_mismatch") != 1 || e.brain.q.Counter("enqueue_calls") != calls+1 {
+			t.Fatalf("status %q: the brain must have refused it once (mismatch %d, calls %d->%d)", status, e.brain.q.Counter("enqueue_total_mismatch"), calls, e.brain.q.Counter("enqueue_calls"))
+		}
+		for _, it := range e.app.TLink(cid1).Items {
+			if it.Enq != "not_queued" || it.Reason != "session_total_mismatch" || it.Tries != triesBefore || !it.NextTry.IsZero() {
+				t.Errorf("status %q: %+v", status, it)
+			}
+		}
+		*clock = clock.Add(3 * time.Hour)
+		e.app.SweepOnce(context.Background())
+		postEnqueue(t, e, ck, cid1)
+		if got := e.brain.q.Counter("enqueue_calls"); got != calls+1 {
+			t.Errorf("status %q: retried (calls %d -> %d)", status, calls, got)
+		}
+		v := e.qview(t, ck, cid1)
+		if v.item(q3).UI != "not_queued" || v.Summary.Retrying != 0 {
+			t.Errorf("status %q: %+v", status, v.item(q3))
+		}
 	}
 }

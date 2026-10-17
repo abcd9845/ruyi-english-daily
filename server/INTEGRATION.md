@@ -114,3 +114,7 @@ merge 之后的提交（都不改功能）：
 - **老大脑 404**：入队端点不存在返回 404（不是 422）→ 「大脑未升级」：未排队（`not_ready`），不重试、不计失败次数。新大脑 422 才按逐项 `queueable_reason` 剔除重发。
 - **入队重试**：按时间窗口（指数退避封顶 5 分钟，到题的处理时限 24h/48h 为止）而非次数；页面 POST 不占自动重试。`retry_exhausted` 进家长提醒。
 - **归档 `queue` 行是提交时快照**；`daily_remaining` 在补发窗口内可能与大脑差 1（见 README）。
+- **`session_total_mismatch` 的状态码（P3-7，待大脑确认）**：契约文字写 422（批级，逐项 `queueable_reason=null`），大脑实际/mock 为整请求 400。站点**以 `error.code` 为准**，两种状态码一样处理：标「未排队」（`session_total_mismatch`），不重试、不计失败次数（正常不会发生：total 已存档并沿用，只在本地状态损坏时出现）。mock 默认 400，`Set("mismatch_status","422")` 切到契约形态；测试两种都覆盖。
+- **r3 页面文案**：首屏结果卡/段落/题目行/额度行不再出现「不入大脑」（徽章除外，仅用于没发到大脑的题）「家长会核对」「家长会看」「未记入大脑」；daily_cap 一律「今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。」。服务端 API 的 429 `message`（`msgDailyCap`）与家长提醒文本不变（队列关闭时与 #22 逐字节一致），页面对 daily_cap 429 不再直接显示该 message，而显示上面的新文案。
+- **r3 追加核对（大脑契约确认）**：①`answered_at` 是入队幂等键的一部分：grade 时发出的值存进 `links.jsonl`，补发/剔除重发/重启后沿用同一值（无值则一直不带），mock 对同一 `ps:<cid>:<qref>` 的 answered_at/rev/attempt_kind/answer 任一不同回 409 `idempotency_conflict`；②ack 体恰为 `{"up_to_id":<JSON 整数>}`（mock 对字符串/浮点/null/缺字段/`ids[]` 回 400 `validation_failed`）；③400 `validation_failed` 是站点 bug 路径：标「未排队」（`invalid`）、warn、不重试、不计失败次数，422 逐条原因才剔除重发，429 按 `Retry-After`（`daily_cap` 不重试）；④页面状态以 compared/judged 为首次初评：`proposed` 仍显示「AI 判卷中」且不展示任何拟答案正文；⑤单题/补做传 `session_ref=<cid>`、`session_total=实际入队数`（单题=1）。
+- **读/写令牌必须不同**：`config.go` 在设了 `RUYI_BRAIN_GRADE_TOKEN` 时拒绝它与 `RUYI_BRAIN_TOKEN` 同值（与队列开关无关）。一个同时带读写权限的令牌（如联调 id26）不能同时填这两个变量，需另签只读令牌（`bank:read`+`brain:<slug>:read`）。见 `loop/ruyi-practice/JOINT-S1-plan.md` §1。

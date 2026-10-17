@@ -15,6 +15,7 @@ type TItem struct {
 }
 type TLink struct {
 	SessionTotal int
+	AnsweredAt   time.Time
 	Items        []TItem
 }
 
@@ -23,7 +24,7 @@ func (s *Server) TLink(cid string) *TLink {
 	if l == nil {
 		return nil
 	}
-	t := &TLink{SessionTotal: l.SessionTotal}
+	t := &TLink{SessionTotal: l.SessionTotal, AnsweredAt: l.AnsweredAt}
 	for _, it := range l.Items {
 		t.Items = append(t.Items, TItem{it.QRef, it.Enq, it.Reason, it.ItemID, it.Tries, it.NextTry})
 	}
@@ -49,3 +50,17 @@ func TEnqBackoff(n int) time.Duration { return enqBackoff(n) }
 
 // TPollStep runs one poller step like the loop does and returns the wait before the next one.
 func (s *Server) TPollStep(ctx context.Context) time.Duration { return s.poll.step(ctx) }
+
+// TSetSessionTotal damages the stored session_total (state corruption) to provoke the brain's mismatch answer.
+func (s *Server) TSetSessionTotal(cid string, n int) {
+	l := s.q.links.get(cid).clone()
+	l.SessionTotal = n
+	_ = s.q.links.put(l, time.Now())
+}
+
+// TSetAnsweredAt damages the stored answered_at (state corruption) to provoke the brain's idempotency_conflict.
+func (s *Server) TSetAnsweredAt(cid string, at time.Time) {
+	l := s.q.links.get(cid).clone()
+	l.AnsweredAt = at
+	_ = s.q.links.put(l, time.Now())
+}

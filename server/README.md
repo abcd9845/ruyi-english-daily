@@ -145,6 +145,20 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 **自动出题（3.5）**：`GET /api/practice/new?source=&n=1..20[&order=random|seq][&seed=N]`（需登录；`RUYI_AUTO_SOURCES` 为空时整个入口 404）。
 返回 `{set_id:"auto-<8位>",url,title,requested,count,truncated,note?,expires_at}`；题不够 n 就全给并带 `note`；套存在内存里，`RUYI_AUTO_TTL` 后失效，其 qref 白名单同样约束判分与取图。新增 `mode=due_first|wrong_only|random`（缺省 = random，**默认关，仍需 `RUYI_AUTO_SOURCES`**）：`due_first`/`wrong_only` 走大脑 `pick-practice`，题文用 lookup 取；返回多 `mode`、`deferred`（带参考答案待核/不支持题型/缺图的题数）；每题带 `origin`（页面显示「复习」/「错题」）和 `ref_pending`（页面标「参考答案待核，不自动判」，是否保留由 `RUYI_PICK_SKIP_DEFERRED` 决定）。选题接口未部署 → 501「大脑接口未就绪」。旧参数 `wrong_only=1` / `due_first=1` 仍然接受（等价于对应 `mode`）；旧的"没有大脑接口就返回 501"的草稿路径已删除——有接口就用，没接口才 501。lookup 里没有的 qref 被丢弃，不崩。
 
+## 本地测试套（smoke-test）
+
+让家长自己验证「提交 → 归档 + ntfy」而不碰真题、不碰大脑。`sets.json` 里的"本地套"：
+
+```json
+{"id":"smoke-test","local":true,"title":"…","questions":[{"qref":"smoke:q1","qtype":"single_choice","stem":"【测试题，随便填】…","options":[{"key":"A","text":"1"},{"key":"B","text":"2"}],"answer":["B"]}]}
+```
+
+- 校验（加载失败即启动退出，报错只写位置不写内容）：`id` 必须以 `smoke-` / `test-` 开头；必须有 `questions`、不得写 `qrefs`；qref 必须以 `smoke:` 开头；`source` 固定为保留值 `local.smoke`（可不写，写了必须相等）；`qtype` 只支持 `single_choice`（`answer` 是 1 个选项 key）和 `fill_blank`（`answer` 每个空一条，忽略首尾空格和大小写）。真实套不得使用 `smoke-`/`test-` id 前缀、`smoke:` qref 前缀、`local.smoke` source、`questions`。`local.smoke` 出现在 `RUYI_AUTO_SOURCES` / `RUYI_ALLOWED_SOURCES` 启动即退出。
+- `GET /api/practice/{id}`：用内联题构造，**不调大脑**，响应多一个 `local:true`，**没有**答案字段。
+- `POST /api/practice/{id}/check`（需登录，仅本地套，真实套 404）：`{"answers":[{"qref":"smoke:q1","answer":"B"}]}` → `{set_id,test:true,results:[{qref,status:"graded|unanswered",correct}]}`。现有页面**没有**客观题「检查」（对错只在提交后由大脑判分后显示），所以本地套的「检查」是新增的最小实现：服务端用 `answer` 字段自判，不归档、不推送、不调大脑。
+- `POST /api/practice/{id}/grade`：**永不调 `Bank.Grade`**（即使配了判分令牌），也不调 lookup；固定 `mode:"archive_only"`、`brain_note:"test_set"`、`test:true`，逐题 `status:"graded"` + 服务端判的 `correct`、`recorded:false`；归档行带 `"test":true`；ntfy 标题（RFC 2047）和正文都以「【测试】」开头，正文 JSON 带 `"test":true`。每小时提交上限、idempotency、家庭码门禁、草稿 key `ruyi-practice-<set_id>-v1` 都沿用。
+- 部署 / 回滚 / 识别测试提交：见 `DEPLOY-P3.md` §8；示例 `deploy/sets.smoke.example.json`（完整文件）、`deploy/sets.smoke-entry.json`（要追加的条目）。
+
 ## 构建与测试
 
 ```bash

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +89,60 @@ func TestNtfyBaseURLTrailingSlash(t *testing.T) {
 		}
 		if c.NtfyBaseURL != "https://ntfy-me.com/" {
 			t.Errorf("%q -> %q", in, c.NtfyBaseURL)
+		}
+	}
+}
+
+// The source reserved for local test sets can never be a brain source:
+// not allowed for the old /api/sets page, not auto-pickable.
+func TestReservedLocalSourceRefused(t *testing.T) {
+	for _, name := range []string{"RUYI_AUTO_SOURCES", "RUYI_ALLOWED_SOURCES"} {
+		for _, v := range []string{"local.smoke", "src.one,local.smoke", "local.smoke, src.one"} {
+			m := valid(t)
+			m[name] = v
+			_, err := Load(env(m))
+			if err == nil {
+				t.Errorf("%s=%q must be refused", name, v)
+				continue
+			}
+			if !strings.Contains(err.Error(), name) || strings.Contains(err.Error(), "local.smoke") {
+				t.Errorf("%s: error must name the variable and not echo the value: %v", name, err)
+			}
+		}
+		m := valid(t)
+		m[name] = "src.one,local.smoked" // a different key is fine
+		if _, err := Load(env(m)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// A bad local set in RUYI_SETS_FILE stops the service at startup, naming only the variable and the position.
+func TestSetsFileLocalSetFailsAtLoad(t *testing.T) {
+	dir := t.TempDir()
+	good := `{"id":"smoke-test","local":true,"title":"T","questions":[{"qref":"smoke:q1","qtype":"single_choice","stem":"s","options":[{"key":"A","text":"1"},{"key":"B","text":"2"}],"answer":["B"]}]}`
+	try := func(body string) error {
+		p := filepath.Join(dir, "s.json")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := valid(t)
+		m["RUYI_SETS_FILE"] = p
+		_, err := Load(env(m))
+		return err
+	}
+	if err := try(`{"sets":[` + good + `]}`); err != nil {
+		t.Fatalf("good local set: %v", err)
+	}
+	for name, body := range map[string]string{
+		"wrong id":   strings.Replace(good, `"smoke-test"`, `"demo-9"`, 1),
+		"no qs":      `{"id":"smoke-test","local":true,"title":"T"}`,
+		"with qrefs": strings.Replace(good, `"local":true,`, `"local":true,"qrefs":["smoke:q1"],`, 1),
+		"bad qref":   strings.Replace(good, `smoke:q1`, `SECRET-QREF-MARK`, 1),
+	} {
+		err := try(`{"sets":[` + body + `]}`)
+		if err == nil || !strings.Contains(err.Error(), "RUYI_SETS_FILE") || strings.Contains(err.Error(), "SECRET-QREF-MARK") {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 }

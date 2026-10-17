@@ -1,7 +1,9 @@
 package sets_test
 
 import (
+	"encoding/json"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -153,5 +155,152 @@ func TestReservedIDs(t *testing.T) {
 		if err == nil || strings.Contains(err.Error(), id+`"`) && false {
 			t.Errorf("%s accepted", id)
 		}
+	}
+}
+
+// ---- local (smoke / test) sets ----------------------------------------------
+
+const localOK = `{"id":"smoke-test","local":true,"title":"T","questions":[{"qref":"smoke:q1","qtype":"single_choice","stem":"s","options":[{"key":"A","text":"1"},{"key":"B","text":"2"}],"answer":["B"]}]}`
+const realOK = `{"id":"demo-1","title":"R","source":"src.one","qrefs":["q:1"]}`
+
+func wrap(sets ...string) string { return `{"sets":[` + strings.Join(sets, ",") + `]}` }
+
+func TestLocalSetParses(t *testing.T) {
+	r, err := parse(wrap(realOK, localOK))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := r.Get("smoke-test")
+	if !ok || !s.Local || s.Source != sets.LocalSource || strings.Join(s.QRefs, ",") != "smoke:q1" || len(s.Questions) != 1 {
+		t.Fatalf("local set: %+v", s)
+	}
+	if q, ok := s.Question("smoke:q1"); !ok || q.Answer[0] != "B" {
+		t.Error("Question lookup")
+	}
+	if _, ok := s.Question("smoke:nope"); ok {
+		t.Error("unknown inline qref")
+	}
+	real, _ := r.Get("demo-1")
+	if _, ok := real.Question("q:1"); ok {
+		t.Error("a real set has no inline questions")
+	}
+	// local sets are invisible to the brain-source checks that gate media access
+	if r.HasSource(sets.LocalSource) || r.AllowsQRef(sets.LocalSource, "smoke:q1") || r.AllowsQRef("", "smoke:q1") {
+		t.Error("HasSource/AllowsQRef must exclude local sets")
+	}
+	if !r.HasSource("src.one") || !r.AllowsQRef("src.one", "q:1") {
+		t.Error("real sets unchanged")
+	}
+	// the source may be written, if it is the reserved value
+	if _, err := parse(wrap(strings.Replace(localOK, `"local":true,`, `"local":true,"source":"local.smoke",`, 1))); err != nil {
+		t.Errorf("reserved source written explicitly: %v", err)
+	}
+	// "test-" ids and fill_blank work too
+	fb := `{"id":"test-x","local":true,"title":"T","questions":[{"qref":"smoke:f","qtype":"fill_blank","stem":"a ____ b ____","answer":["1","2"]}]}`
+	if _, err := parse(wrap(fb)); err != nil {
+		t.Errorf("fill_blank: %v", err)
+	}
+}
+
+func TestLocalSetRejects(t *testing.T) {
+	rep := func(s, a, b string) string { return strings.Replace(s, a, b, 1) }
+	cases := map[string]string{
+		"local id not smoke-/test-":      wrap(rep(localOK, `"smoke-test"`, `"demo-9"`)),
+		"local id merely contains smoke": wrap(rep(localOK, `"smoke-test"`, `"my-smoke-test"`)),
+		"local with qrefs":               wrap(rep(localOK, `"local":true,`, `"local":true,"qrefs":["smoke:q1"],`)),
+		"local with real-looking qrefs":  wrap(rep(localOK, `"local":true,`, `"local":true,"qrefs":["q:1"],`)),
+		"local without questions":        wrap(`{"id":"smoke-test","local":true,"title":"T"}`),
+		"local empty questions":          wrap(`{"id":"smoke-test","local":true,"title":"T","questions":[]}`),
+		"qref without smoke: prefix":     wrap(rep(localOK, `"smoke:q1"`, `"q1"`)),
+		"qref with other prefix":         wrap(rep(localOK, `"smoke:q1"`, `"example.set:math:1"`)),
+		"qref uppercase prefix":          wrap(rep(localOK, `"smoke:q1"`, `"SMOKE:q1"`)),
+		"duplicate local qref":           wrap(rep(localOK, `"questions":[`, `"questions":[{"qref":"smoke:q1","qtype":"fill_blank","stem":"a ____","answer":["x"]},`)),
+		"local with a foreign source":    wrap(rep(localOK, `"local":true,`, `"local":true,"source":"src.one",`)),
+		"real set with questions":        wrap(rep(realOK, `"qrefs"`, `"questions":[{"qref":"smoke:q1","qtype":"fill_blank","stem":"a ____","answer":["x"]}],"qrefs"`)),
+		"real set, smoke- id":            wrap(rep(realOK, `"demo-1"`, `"smoke-1"`)),
+		"real set, test- id":             wrap(rep(realOK, `"demo-1"`, `"test-1"`)),
+		"real set, smoke: qref":          wrap(rep(realOK, `"q:1"`, `"smoke:q1"`)),
+		"real set, SMOKE: qref":          wrap(rep(realOK, `"q:1"`, `"Smoke:q1"`)),
+		"real set, reserved source":      wrap(rep(realOK, `"src.one"`, `"local.smoke"`)),
+		"local:false with questions":     wrap(rep(localOK, `"local":true`, `"local":false`)),
+		"bad qtype":                      wrap(rep(localOK, `"single_choice"`, `"multi_choice"`)),
+		"answer not an option":           wrap(rep(localOK, `["B"]`, `["Z"]`)),
+		"two answers for single_choice":  wrap(rep(localOK, `["B"]`, `["A","B"]`)),
+		"no answer":                      wrap(rep(localOK, `,"answer":["B"]`, ``)),
+		"one option":                     wrap(rep(localOK, `,{"key":"B","text":"2"}`, ``)),
+		"duplicate option key":           wrap(rep(localOK, `"key":"B"`, `"key":"A"`)),
+		"lowercase option key":           wrap(rep(localOK, `"key":"B"`, `"key":"b"`)),
+		"empty stem":                     wrap(rep(localOK, `"stem":"s"`, `"stem":" "`)),
+		"empty option text":              wrap(rep(localOK, `"text":"2"`, `"text":""`)),
+		"fill_blank without blanks":      wrap(`{"id":"smoke-x","local":true,"title":"T","questions":[{"qref":"smoke:f","qtype":"fill_blank","stem":"no blanks","answer":["1"]}]}`),
+		"fill_blank answer count":        wrap(`{"id":"smoke-x","local":true,"title":"T","questions":[{"qref":"smoke:f","qtype":"fill_blank","stem":"a ____","answer":["1","2"]}]}`),
+		"fill_blank with options":        wrap(`{"id":"smoke-x","local":true,"title":"T","questions":[{"qref":"smoke:f","qtype":"fill_blank","stem":"a ____","options":[{"key":"A","text":"x"},{"key":"B","text":"y"}],"answer":["1"]}]}`),
+		"unknown question field":         wrap(rep(localOK, `"qtype"`, `"explanation":"x","qtype"`)),
+		"questions with no title":        wrap(rep(localOK, `"title":"T"`, `"title":""`)),
+	}
+	for name, in := range cases {
+		if _, err := parse(in); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+	// a valid local set after the bad ones was fine on its own, so the failures above are the rules, not the fixture
+	if _, err := parse(wrap(localOK)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLocalErrorsDoNotEchoValues(t *testing.T) {
+	const marker = "REAL-QREF-MARKER"
+	for _, in := range []string{
+		wrap(strings.Replace(localOK, `"smoke:q1"`, `"`+marker+`"`, 1)),
+		wrap(strings.Replace(localOK, `"smoke-test"`, `"`+marker+`"`, 1)),
+		wrap(strings.Replace(realOK, `"q:1"`, `"smoke:`+marker+`"`, 1)),
+		wrap(strings.Replace(localOK, `["B"]`, `["`+marker+`"]`, 1)),
+		wrap(strings.Replace(localOK, `"local":true,`, `"local":true,"source":"`+marker+`",`, 1)),
+	} {
+		_, err := parse(in)
+		if err == nil {
+			t.Errorf("want error for %.60s", in)
+		} else if strings.Contains(err.Error(), marker) {
+			t.Errorf("error echoes a value: %v", err)
+		}
+	}
+}
+
+func TestSmokeExampleFilesParse(t *testing.T) {
+	b, err := os.ReadFile("../../deploy/sets.smoke.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := parse(string(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := r.Get("smoke-test")
+	if !ok || !s.Local || len(s.Questions) != 1 || !strings.Contains(s.Questions[0].Stem, "测试题，随便填") {
+		t.Fatalf("smoke-test: %+v", s)
+	}
+	// the standalone entry is the same object as in the full file
+	e, err := os.ReadFile("../../deploy/sets.smoke-entry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parse(`{"sets":[` + string(e) + `]}`); err != nil {
+		t.Fatalf("entry file: %v", err)
+	}
+	var a, c any
+	var full struct {
+		Sets []json.RawMessage `json:"sets"`
+	}
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(json.Unmarshal(b, &full))
+	must(json.Unmarshal(full.Sets[1], &a))
+	must(json.Unmarshal(e, &c))
+	if !reflect.DeepEqual(a, c) {
+		t.Error("sets.smoke-entry.json must equal the smoke-test entry of sets.smoke.example.json")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"regexp"
 	"sort"
@@ -21,6 +22,7 @@ import (
 	"github.com/abcd9845/ruyi-english-daily/server/internal/auth"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/brain"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/practice"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/sets"
 )
 
 const (
@@ -64,6 +66,9 @@ type gradeOut struct {
 	Archived      bool             `json:"archived"`
 	Notify        string           `json:"notify,omitempty"` // sent | retrying | off | unknown
 	Replayed      bool             `json:"replayed,omitempty"`
+	// Test is set for a local test set: archive_only, judged on the server,
+	// never recorded in the brain. Absent for real sets.
+	Test bool `json:"test,omitempty"`
 }
 
 // ---- idempotency by client_attempt_id --------------------------------------
@@ -351,10 +356,15 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
-	found, _, err := s.Bank.LookupByQrefs(r.Context(), set.Source, set.QRefs)
-	if err != nil {
-		s.brainErr(w, "grade-lookup", err)
-		return
+	// a local test set has its question inline: the brain is not asked for it
+	var found map[string]brain.Question
+	if !set.Local {
+		var err error
+		found, _, err = s.Bank.LookupByQrefs(r.Context(), set.Source, set.QRefs)
+		if err != nil {
+			s.brainErr(w, "grade-lookup", err)
+			return
+		}
 	}
 	inSet := map[string]bool{}
 	for _, q := range set.QRefs {
@@ -373,16 +383,23 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 			writeErr(w, http.StatusBadRequest, "qref_not_in_set", "有题目不属于这套练习")
 			return
 		}
-		q, ok := found[a.QRef]
-		if !ok {
-			writeErr(w, http.StatusNotFound, "unknown_qref", msgUnknownQref)
-			return
+		var sh qshape
+		var lq *sets.Question
+		if set.Local {
+			lq, _ = set.Question(a.QRef)
+			sh = shapeOfLocal(lq)
+		} else {
+			q, ok := found[a.QRef]
+			if !ok {
+				writeErr(w, http.StatusNotFound, "unknown_qref", msgUnknownQref)
+				return
+			}
+			sh = shapeOf(q)
 		}
 		if _, dup := answered[a.QRef]; dup {
 			writeErr(w, http.StatusBadRequest, "duplicate_qref", "同一题提交了两次")
 			return
 		}
-		sh := shapeOf(q)
 		ans, empty, ok := parseAnswer(sh, a.Answer)
 		if !ok {
 			writeErr(w, http.StatusBadRequest, "bad_answer_shape", "作答格式和题型不匹配")
@@ -391,7 +408,8 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		g := given{qref: a.QRef}
 		if !empty {
 			g.ans = ans
-			g.skip = sh.kind == "fill" && sh.blanks > brain.MaxBlanks || !answerFitsBrain(ans)
+			// (a local set never goes to the brain, so the brain's contract limits do not apply)
+			g.skip = !set.Local && (sh.kind == "fill" && sh.blanks > brain.MaxBlanks || !answerFitsBrain(ans))
 		}
 		if a.Rev != nil {
 			if *a.Rev < 1 || *a.Rev > maxRev {
@@ -508,13 +526,19 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 	verdict := map[string]gradeResult{}
 	var gresp *brain.GradeResponse
 	var gerr error
-	if nSend == 0 {
+	switch {
+	case set.Local:
+		// a local test set NEVER calls the brain, whatever is configured
+		note = noteTestSet
+	case nSend == 0:
 		gerr = errors.New("nothing to send") // every answer exceeds a contract limit: archive only
 		note = "not_sent"
-	} else {
+	default:
 		gresp, gerr = s.Bank.Grade(r.Context(), brain.GradeRequest{ClientAttemptID: cid, Items: items})
 	}
 	switch {
+	case set.Local:
+		// archive_only / test_set, decided above
 	case gerr == nil:
 		mode, note = modeGraded, ""
 		for _, g := range gresp.Results {
@@ -563,10 +587,10 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 
 	rec := &attempts.Record{
 		V: 2, ClientAttemptID: cid, SetID: set.ID, SetTitle: set.Title, Source: set.Source,
-		SubmittedAt: s.now().UTC(), Mode: mode, BrainNote: note, Sig: sig,
+		SubmittedAt: s.now().UTC(), Mode: mode, BrainNote: note, Sig: sig, Test: set.Local,
 		Client: attempts.Client{UA: clip(r.UserAgent(), 160), IP: clientIP(r)},
 	}
-	out := &gradeOut{ClientAttemptID: cid, SetID: set.ID, Mode: mode, BrainNote: note, Results: []gradeResult{}}
+	out := &gradeOut{ClientAttemptID: cid, SetID: set.ID, Mode: mode, BrainNote: note, Results: []gradeResult{}, Test: set.Local}
 	for _, q := range set.QRefs {
 		g, asked := answered[q]
 		var res gradeResult
@@ -575,6 +599,11 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 			res = gradeResult{QRef: q, Status: statusUnanswer}
 		case g.skip:
 			res = gradeResult{QRef: q, Status: brain.StatusUnsupport} // too many blanks for the contract
+		case set.Local:
+			// judged here, from the question's server-side answer; recorded stays false
+			lq, _ := set.Question(q)
+			c := judgeLocal(lq, g.ans)
+			res = gradeResult{QRef: q, Status: brain.StatusGraded, Correct: &c}
 		case mode == modeGraded:
 			if v, ok := verdict[q]; ok {
 				res = v
@@ -636,7 +665,7 @@ func writeIdemConflict(w http.ResponseWriter) {
 
 func outFromRecord(r *attempts.Record) *gradeOut {
 	out := &gradeOut{ClientAttemptID: r.ClientAttemptID, SetID: r.SetID, Mode: r.Mode, BrainNote: r.BrainNote,
-		Results: []gradeResult{}, Summary: r.Summary, Archived: r.Archived, Notify: r.Notify}
+		Results: []gradeResult{}, Summary: r.Summary, Archived: r.Archived, Notify: r.Notify, Test: r.Test}
 	for _, it := range r.Items {
 		rec := it.Recorded
 		if r.V < 2 && r.Mode == modeGraded && it.Status != statusUnanswer && it.Status != brain.StatusUnsupport {
@@ -682,10 +711,16 @@ func clip(s string, n int) string {
 
 // ---- parent notification (a heads-up, not an approval step) ---------------------
 
+// testTag starts the ntfy title and summary of a local test set's submission.
+const testTag = "【测试】"
+
 func summaryLine(r *attempts.Record) string {
 	answered := r.Summary.Total - r.Summary.Unanswered
 	wrong := r.Summary.Graded - r.Summary.Correct
 	var b strings.Builder
+	if r.Test {
+		return testSummaryLine(r, answered, wrong)
+	}
 	fmt.Fprintf(&b, "如意练习：%s %d 题，", r.SetTitle, answered)
 	if r.Mode == modeGraded {
 		fmt.Fprintf(&b, "对 %d，", r.Summary.Correct)
@@ -716,9 +751,39 @@ func summaryLine(r *attempts.Record) string {
 	return b.String()
 }
 
+// testSummaryLine: the summary of a local test set submission. It says plainly
+// that nothing went to the brain.
+func testSummaryLine(r *attempts.Record, answered, wrong int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s如意练习：%s %d 题，对 %d，", testTag, r.SetTitle, answered, r.Summary.Correct)
+	if wrong > 0 {
+		fmt.Fprintf(&b, "错 %d，", wrong)
+	}
+	if r.Summary.Unanswered > 0 {
+		fmt.Fprintf(&b, "未答 %d，", r.Summary.Unanswered)
+	}
+	b.WriteString("已提交（测试，仅留档，未记入大脑）。")
+	fmt.Fprintf(&b, "attempt %s。", r.ClientAttemptID[:8])
+	return b.String()
+}
+
+// ntfyTitle is the ntfy Title header. A test submission gets 【测试】 in front;
+// the value is RFC 2047 encoded because HTTP headers are ASCII (ntfy decodes it).
+// A real set's title stays the plain, unchanged "Ruyi practice".
+func ntfyTitle(r *attempts.Record) string {
+	if r.Test {
+		return mime.QEncoding.Encode("utf-8", testTag+"Ruyi practice")
+	}
+	return "Ruyi practice"
+}
+
 func ntfyBody(r *attempts.Record) string {
 	head := summaryLine(r)
-	full, _ := json.Marshal(map[string]any{"client_attempt_id": r.ClientAttemptID, "set_id": r.SetID, "mode": r.Mode, "items": r.Items})
+	fullM := map[string]any{"client_attempt_id": r.ClientAttemptID, "set_id": r.SetID, "mode": r.Mode, "items": r.Items}
+	if r.Test {
+		fullM["test"] = true
+	}
+	full, _ := json.Marshal(fullM)
 	if len(head)+2+len(full) <= ntfyMsgMax {
 		return head + "\n\n" + string(full)
 	}
@@ -731,7 +796,11 @@ func ntfyBody(r *attempts.Record) string {
 	for _, it := range r.Items {
 		sl = append(sl, slim{it.QRef, it.Answer, it.Correct})
 	}
-	small, _ := json.Marshal(map[string]any{"client_attempt_id": r.ClientAttemptID, "set_id": r.SetID, "mode": r.Mode, "items": sl})
+	smallM := map[string]any{"client_attempt_id": r.ClientAttemptID, "set_id": r.SetID, "mode": r.Mode, "items": sl}
+	if r.Test {
+		smallM["test"] = true
+	}
+	small, _ := json.Marshal(smallM)
 	if len(head)+2+len(small) <= ntfyMsgMax {
 		return head + "\n\n" + string(small)
 	}
@@ -744,20 +813,20 @@ func (s *Server) notify(r *attempts.Record) string {
 	if s.Topic == "" {
 		return "off"
 	}
-	body := ntfyBody(r)
-	if s.postNtfy(body) {
+	body, title := ntfyBody(r), ntfyTitle(r)
+	if s.postNtfy(title, body) {
 		return "sent"
 	}
 	go func() {
 		time.Sleep(s.NtfyRetryDelay)
-		if !s.postNtfy(body) {
+		if !s.postNtfy(title, body) {
 			s.Log.Warn("ntfy notification failed after retry", "attempt", r.ClientAttemptID[:8])
 		}
 	}()
 	return "retrying"
 }
 
-func (s *Server) postNtfy(body string) bool {
+func (s *Server) postNtfy(title, body string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.ntfyURL(), strings.NewReader(body))
@@ -765,7 +834,7 @@ func (s *Server) postNtfy(body string) bool {
 		return false
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
-	req.Header.Set("Title", "Ruyi practice")
+	req.Header.Set("Title", title)
 	req.Header.Set("Tags", "memo")
 	resp, err := s.ntfyClient.Do(req)
 	if err != nil {

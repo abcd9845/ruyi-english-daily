@@ -6,6 +6,7 @@
 // BROWSER_FLOW=archive: submit flow against a site WITHOUT grading (mode archive_only): the page must never say the brain recorded it.
 // BROWSER_FLOW=contract (needs MOCK_URL = the mock brain, for its /_mock/bump-rev hook): final-contract states: rev, recorded:false, errors, brain picks.
 // BROWSER_FLOW=notready: the brain's grade endpoint is not deployed (404): page must say archive-only, never recorded.
+// BROWSER_FLOW=smoke: the local test set ?set=smoke-test (needs a sets file with it): answer, 检查, submit; archive-only wording, never 已提交到大脑.
 // Against the mock brain's synthetic questions. Logs in through the real form, fills
 // answers, reloads, clears; writes mobile-viewport screenshots to <out-dir>.
 const { spawn } = require('child_process');
@@ -307,6 +308,63 @@ async function notReadyFlow(base) {
   return finish();
 }
 
+// The local test set: no brain involved. Answer, 「检查」 (server-judged), submit -> archive-only wording.
+async function smokeFlow(base) {
+  const SET = 'smoke-test', KEY = 'ruyi-practice-smoke-test-v1';
+  check('[smoke] smoke-test set loads after login (1 question)', await loginAndLoad(base + '/m/practice/?set=' + SET, 1));
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.reload', {}, sid); await waitFor(`document.querySelectorAll('#qs section.card').length===1`);
+  const dom = await ev(`(() => ({
+    banner: getComputedStyle(document.getElementById('testBanner')).display, check: getComputedStyle(document.getElementById('btnCheck')).display,
+    stem: document.querySelector('#q1 .stem').textContent, radios: document.querySelectorAll('#q1 input[type=radio]').length,
+    title: document.getElementById('title').textContent, page: document.body.innerText }))()`);
+  check('[smoke] test banner and 检查 button are shown; stem says 测试题，随便填; 3 options', dom.banner === 'block' && dom.check !== 'none' && dom.stem.includes('测试题，随便填') && dom.radios === 3, JSON.stringify({b: dom.banner, c: dom.check, r: dom.radios}));
+  check('[smoke] no answer key in the page text', !/正确答案|答案是|解析/.test(dom.page));
+  await shot('practice-smoke-1-load.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
+
+  const pick = i => ev(`(() => { const r = document.querySelectorAll('#q1 input[type=radio]')[${i}]; r.checked = true; r.dispatchEvent(new Event('change', {bubbles: true})); return 1; })()`);
+  const vd = () => ev(`(() => { const v = document.querySelector('#q1 .vd'); return v ? v.textContent + '|' + v.className : null; })()`);
+  // 检查 with nothing chosen: a hint, no request
+  await ev(`window.__checks = 0; const of = window.fetch; window.fetch = (u, o) => { if (String(u).includes('/check')) window.__checks++; return of(u, o); }; document.getElementById('btnCheck').click(); 1`);
+  await sleep(300);
+  check('[smoke] 检查 with no answer: hint, no request', (await ev(`document.getElementById('submitMsg').textContent`)).includes('还没有作答') && (await ev(`window.__checks`)) === 0);
+  await pick(0); await sleep(300);                                   // A: wrong
+  await ev(`document.getElementById('btnCheck').click(); 1`);
+  check('[smoke] 检查 on a wrong choice shows ✗ (judged by the server)', await waitFor(`!!document.querySelector('#q1 .vd.chk.wrong')`) && (await vd()).startsWith('✗'), await vd());
+  await pick(1); await sleep(300);                                   // B: right; the old verdict goes away on change
+  check('[smoke] changing the answer clears the stale verdict', (await vd()) === null);
+  await ev(`document.getElementById('btnCheck').click(); 1`);
+  check('[smoke] 检查 on the right choice shows ✓', await waitFor(`!!document.querySelector('#q1 .vd.chk.ok')`) && (await vd()).startsWith('✓ 答对了'), await vd());
+  check('[smoke] two check requests were sent, nothing submitted yet', (await ev(`window.__checks`)) === 2 && (await ev(`getComputedStyle(document.getElementById('resultCard')).display`)) === 'none');
+  await shot('practice-smoke-2-checked.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
+
+  await hookFetch(0, false);
+  await ev(`document.getElementById('btnSubmit').click(); 1`);
+  check('[smoke] result card appears after submit', await waitFor(`getComputedStyle(document.getElementById('resultCard')).display==='block'`));
+  await sleep(300);
+  const sent = JSON.parse(await ev(`window.__bodies[0]`));
+  check('[smoke] one submit request for the smoke:q1 answer B, no rev', Object.keys(sent).sort().join() === 'answered_at,answers,client_attempt_id' && JSON.stringify(sent.answers) === JSON.stringify([{qref: 'smoke:q1', answer: 'B'}]), JSON.stringify(sent));
+  const res = await ev(`(() => ({ h: document.querySelector('#resultCard h2').textContent, sum: document.querySelector('#resultCard .sum').textContent,
+    vd: document.querySelector('#q1 .vd') ? document.querySelector('#q1 .vd').textContent : null, chk: document.querySelectorAll('#q1 .vd.chk').length,
+    locked: [...document.querySelectorAll('#qs input')].every(e => e.disabled), again: !!document.getElementById('btnAgain'),
+    submitHidden: getComputedStyle(document.getElementById('submitCard')).display === 'none', page: document.body.innerText }))()`);
+  check('[smoke] heading 已提交（仅留档，未记入大脑）, test wording', res.h === '已提交（仅留档，未记入大脑）' && res.sum.includes('测试套') && res.page.includes('测试'), res.h + ' / ' + res.sum);
+  check('[smoke] never 已提交到大脑 / 已记入大脑 (a bare 「未记入大脑」 is the only mention)', !res.page.includes('已提交到大脑') && !res.page.replace(/未记入大脑/g, '').includes('已记入大脑'), 'page: ' + res.page.length + ' chars');
+  check('[smoke] the badge is the (测试) verdict from the server; the check badge was replaced', res.vd === '✓ 答对了（测试）' && res.chk === 0, String(res.vd));
+  check('[smoke] inputs locked, 再做一次 offered, submit card hidden', res.locked && res.again && res.submitHidden);
+  const ls = await ev(`JSON.parse(localStorage.getItem(${JSON.stringify(KEY)}))`);
+  check('[smoke] draft key ruyi-practice-smoke-test-v1 keeps the attempt id and the stored result (no family code)', ls && ls.set === SET && ls.cid === sent.client_attempt_id && ls.res && ls.res.test === true && ls.res.mode === 'archive_only' && !JSON.stringify(ls).includes(code));
+  await shot('practice-smoke-3-result.png', {x: 0, y: 0, width: 390, height: 844, scale: 1});
+  await send('Page.reload', {}, sid);
+  check('[smoke] after reload the result is restored without a new request', await waitFor(`document.querySelectorAll('#qs section.card').length===1 && getComputedStyle(document.getElementById('resultCard')).display==='block'`) &&
+    (await ev(`performance.getEntriesByType('resource').filter(r => r.name.includes('/grade')).length`)) === 0);
+  await ev(`document.getElementById('btnAgain').click(); 1`);
+  await sleep(300);
+  check('[smoke] 再做一次 gives a blank, editable form with the 检查 button again', await ev(`localStorage.getItem(${JSON.stringify(KEY)}) === null && document.querySelectorAll('#q1 input:checked').length === 0 && !document.querySelector('#q1 input').disabled && getComputedStyle(document.getElementById('btnCheck')).display !== 'none'`));
+  // the demo set of a real paper has neither banner nor 检查 (checked by the other flows' DOM too)
+  return finish();
+}
+
 (async () => {
   const { targetInfos } = await send('Target.getTargets');
   const page = targetInfos.find(t => t.type === 'page');
@@ -319,6 +377,7 @@ async function notReadyFlow(base) {
 
   if (flow === 'contract') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return contractFlow(base); }
   if (flow === 'notready') { return notReadyFlow(base); }
+  if (flow === 'smoke') { return smokeFlow(base); }
   if (flow === 'archive') {
     await nav(base + '/m/practice/?set=demo-1');
     await waitFor(`getComputedStyle(document.getElementById('gate')).display==='flex'`);

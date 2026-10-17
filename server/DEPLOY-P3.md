@@ -115,9 +115,74 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
 - 自动套存在内存里，**重启即失效**（页面会提示"临时练习已过期，请重新出一套"）；已提交的作答不受影响。
 - 站点内的重复提交去重依赖内存 + 归档文件；归档目录写不了时，重启后同一个 id 会再次被当作新提交（大脑侧幂等键仍会兜底）。
 - 限速的"同 IP"取 TCP 对端地址，不信任 `X-Forwarded-For`（同旧限制）。
-- 判分结果完全以大脑为准：`pending_key`（没有标准答案）/`needs_review` 显示「待核对」、`unsupported` 显示「不自动判分」，都不显示对错；站点没有任何自己判分的逻辑。
+- 判分结果完全以大脑为准：`pending_key`（没有标准答案）/`needs_review` 显示「待核对」、`unsupported` 显示「不自动判分」，都不显示对错；站点对真题没有任何自己判分的逻辑（唯一例外是 §8 的本地测试套 `smoke-test`，它是服务端自判、不进大脑）。
 - 网络重试：大脑超时/5xx 时站点用同一个 `client_attempt_id` 和同一请求体重试一次（靠大脑幂等不重复记账）；仍失败 → 降级 `archive_only`，该 id 之后在站点内只会重放这条归档记录（要重新记入大脑需用户换答案/再做一次得到新 id）。
 - 同一题每个上海日最多记 3 次（大脑 429，带 `Retry-After`）：整批拒绝，页面提示「今天这题提交次数到上限」，答案保留，不归档、不提醒。
 - 大脑只收每个作答 ≤500 字；更长的自由作答（站点允许 ≤2000）不发给大脑，只留档、页面「不自动判分」。
 - 选题 `n` 大脑上限 10，站点请求更多时降为 10 并在页面提示。
 - 归档 v2：新行带逐题 `recorded`/`attempt_id`；v1 旧行仍能重放。回滚到旧二进制时，旧版读不懂 v2 行的新字段会忽略它们（只用于重放，不影响数据）。
+
+## 8. 本地测试套（`smoke-test`）：让家长自己点一次「提交」，验证归档 + ntfy，不碰真题、不碰大脑
+
+分支 `feat/local-smoke-set`（base = `feat/brain-contract-adapter`）。链接：`/m/practice/?set=smoke-test`。
+
+**是什么**：一种"本地套"（`"local": true`）：题目直接写在 `sets.json` 里（假题，只有 1 道、题干标「测试题，随便填」），不读大脑、**提交时永不调大脑**（即使配了 `RUYI_BRAIN_GRADE_TOKEN`）。页面有「检查」按钮（服务端判对错，**答案不下发浏览器**）和「提交」；提交后固定 `mode: archive_only`、`brain_note: test_set`，页面显示「已提交（仅留档，未记入大脑）」，不会出现「已提交到大脑」。
+
+### 8.1 怎么部署
+
+1. 部署带本功能的二进制（`ruyi-site-smoke-linux-amd64`，含 #11+#12+#13；**不含 #14 ntfy 修复**，与 #14 合并后需一起部署，见 PR 描述）。
+2. 把下面这个条目**追加**到 `/opt/ruyi-site/sets.json` 顶层 `"sets"` 数组末尾（该文件在 ECS 上，不进仓库；条目本身只有假值，同 `deploy/sets.smoke-entry.json`）：
+
+```json
+{
+  "id": "smoke-test",
+  "local": true,
+  "title": "测试套（随便填，只测提交和推送）",
+  "questions": [
+    {
+      "qref": "smoke:q1",
+      "qtype": "single_choice",
+      "stem": "【测试题，随便填】这道题只用来测试「提交」和「推送」，选哪个都行。想看「检查」的对错，就选 B。\n\n1 + 1 = ?",
+      "options": [
+        { "key": "A", "text": "1" },
+        { "key": "B", "text": "2" },
+        { "key": "C", "text": "3" }
+      ],
+      "answer": ["B"]
+    }
+  ]
+}
+```
+
+   用 jq 追加（先备份，写到临时文件、校验后再替换）：
+
+   ```bash
+   cp -p /opt/ruyi-site/sets.json /opt/ruyi-site/sets.json.bak
+   jq '.sets += [input]' /opt/ruyi-site/sets.json smoke-entry.json > /opt/ruyi-site/sets.json.new   # smoke-entry.json = 上面的条目
+   jq -e '.sets|map(.id)|index("smoke-test")' /opt/ruyi-site/sets.json.new && mv /opt/ruyi-site/sets.json.new /opt/ruyi-site/sets.json
+   ```
+
+   完整文件示例见 `deploy/sets.smoke.example.json`（一个占位真实套 + `smoke-test`）。
+3. `systemctl restart ruyi-site`（套文件只在启动时读取；有错会**启动即退出**，错误只写位置不写内容：`journalctl -u ruyi-site -n 20`）。
+4. 家长手机打开 `https://<站点>/m/practice/?set=smoke-test`，输入家庭码 → 选一个选项（想看对错可点「检查」；选 B 是对的）→ 点「提交」。每套每小时最多 5 次提交（按会话 + 来源 IP，沿用 `RUYI_GRADE_MAX_PER_HOUR`）。草稿存在手机本地 `ruyi-practice-smoke-test-v1`。
+
+不需要新增任何环境变量。**不要**把 `local.smoke`（保留 source）写进 `RUYI_AUTO_SOURCES` / `RUYI_ALLOWED_SOURCES`——会启动即报错。
+
+### 8.2 怎么识别测试提交
+
+- **归档**（`/var/lib/ruyi-site/attempts/attempts.jsonl`）：该行有 `"test":true`，`mode:"archive_only"`、`brain_note:"test_set"`、`source:"local.smoke"`、`set_id:"smoke-test"`、`items[].recorded:false`。真题提交的行**没有** `test` 字段。
+  `jq -c 'select(.test==true)' /var/lib/ruyi-site/attempts/attempts.jsonl`
+- **ntfy**：标题以「【测试】」开头（HTTP 头按 RFC 2047 编码，ntfy 会解码；真题标题仍是原来的 `Ruyi practice`），正文第一行以「【测试】如意练习：…」开头、含「未记入大脑」，正文 JSON 带 `"test":true`。
+- **大脑侧**：这次提交**没有**任何请求到大脑（判分/取题/选题全是 0）。
+
+### 8.3 怎么回滚
+
+- 删掉 `sets.json` 里的 `smoke-test` 条目（或 `cp -p /opt/ruyi-site/sets.json.bak /opt/ruyi-site/sets.json`），`systemctl restart ruyi-site`；`?set=smoke-test` 随即 404「没有这套题」。
+- 或者装回旧二进制：`cp -p /opt/ruyi-site/ruyi-site.<旧备份> /opt/ruyi-site/ruyi-site && systemctl restart ruyi-site`。**注意**：旧二进制不认识 `local` / `questions` 字段，`sets.json` 里还留着 `smoke-test` 条目时会**启动即退出**（严格解析）——装回旧二进制前**必须先删掉该条目**。
+- 已经写进 `attempts.jsonl` 的测试行是普通行（带 `test:true`），可留可滤，不要手改文件。
+
+### 8.4 约束（安全）
+
+- **保留命名空间**：本地套 id 必须以 `smoke-` 或 `test-` 开头，qref 必须以 `smoke:` 开头，source 固定为 `local.smoke`（可不写）；真实套**不得**使用这些 id 前缀 / qref 前缀 / source，也不能带 `questions`。违反任一条：启动即退出。
+- 本地套不能写 `qrefs`、必须有 `questions`；不会被 `/api/practice/new`（自动选题）选中，`local.smoke` 不是大脑 source（`/api/sets/…`、`/api/media/…` 对它一律 404）。
+- 答案字段（`questions[].answer`）只在服务端，用于「检查」和提交后的对错判断，不出现在任何响应、归档题干、ntfy 里（有测试 grep）。

@@ -72,7 +72,10 @@ type Record struct {
 	BrainNote string `json:"brain_note,omitempty"`
 	// Sig fingerprints the submitted answers (+revs), so the same
 	// client_attempt_id with different answers is refused, not silently replayed.
-	Sig     string  `json:"sig,omitempty"`
+	Sig string `json:"sig,omitempty"`
+	// Test marks a submission of a local test set (never sent to the brain).
+	// Absent for real sets, so their archive lines stay byte-identical.
+	Test    bool    `json:"test,omitempty"`
 	Items   []Item  `json:"items"`
 	Summary Summary `json:"summary"`
 	Client  Client  `json:"client"`

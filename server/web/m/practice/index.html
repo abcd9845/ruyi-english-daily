@@ -86,6 +86,8 @@ footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
   <div id="status"></div>
   <div id="qs"></div>
   <div class="card submitcard" id="submitCard" style="display:none">
+    <div id="testBanner" class="notice" style="display:none;margin-bottom:12px;text-align:left">这是测试套：随便填，答案只留档、不会记入大脑；家长手机会收到一条「【测试】」提醒。</div>
+    <button type="button" class="btn-ghost" id="btnCheck" style="display:none;margin-bottom:10px">检查</button>
     <button type="button" class="btn-submit" id="btnSubmit">提交</button>
     <p class="meta" style="margin:10px 0 0">没做的题可以先空着；提交前答案只保存在本机。</p>
     <div id="submitMsg" class="msg bad" role="status" aria-live="polite"></div>
@@ -106,7 +108,7 @@ footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
 'use strict';
 var SET_ID=null, DRAFT_KEY=null;
 var $=function(id){return document.getElementById(id);};
-var items=[], answers={}, saveTimer=null;
+var items=[], answers={}, saveTimer=null, isLocal=false;
 var cid=null, cidSig=null, cidAt=null, result=null, submitting=false;
 // optional ?kind=correction|variant is passed through as attempt_kind (nothing else reads it)
 var KIND=(function(){var m=/[?&]kind=(correction|variant)(?:&|#|$)/.exec(location.search);return m?m[1]:null;})();
@@ -289,6 +291,9 @@ function load(note){
       return;
     }
     items=r.json.items;
+    isLocal=r.json.local===true;
+    $('testBanner').style.display=isLocal?'block':'none';
+    $('btnCheck').style.display=isLocal?'inline-block':'none';
     $('title').textContent=r.json.title||'练习';
     document.title=(r.json.title||'练习')+' · 如意';
     var miss=Array.isArray(r.json.missing_qrefs)?r.json.missing_qrefs.length:0;
@@ -327,7 +332,10 @@ function saveDraftNow(){
   }catch(e){}
   updateProgress();
 }
-function saveDraft(){ clearTimeout(saveTimer); saveTimer=setTimeout(saveDraftNow,250); }
+function saveDraft(){
+  document.querySelectorAll('#qs .vd.chk').forEach(function(n){ n.remove(); });   // an old 「检查」 verdict is stale once the answer changes
+  clearTimeout(saveTimer); saveTimer=setTimeout(saveDraftNow,250);
+}
 function filled(q){
   var v=answers[q.qref];
   if(Array.isArray(v)) return v.some(function(x){ return typeof x==='string' && x.trim()!==''; });
@@ -476,6 +484,10 @@ function applyResult(){
     else if(confirmed && r.recorded===true && r.status==='graded' && typeof r.correct==='boolean'){
       if(r.correct){ cls='ok'; txt='✓ 答对了'; } else { cls='wrong'; txt='✗ 不对'; }
     }
+    else if(result.test===true && r.recorded!==true && r.status==='graded' && typeof r.correct==='boolean'){
+      // local test set: judged by the server, never recorded in the brain
+      if(r.correct){ cls='ok'; txt='✓ 答对了（测试）'; } else { cls='wrong'; txt='✗ 不对（测试）'; }
+    }
     card.appendChild(el('div','vd '+cls,txt));
   });
   var sm=result.summary||{};
@@ -487,6 +499,11 @@ function applyResult(){
     box.appendChild(el('div','sum','共 '+total+' 题 · 答对 '+(+sm.correct||0)+' · 答错 '+Math.max(0,(+sm.graded||0)-(+sm.correct||0))+' · 待核对 '+(+sm.pending||0)+(uns>0?' · 不自动判分 '+uns:'')+' · 未作答 '+un));
     if((+sm.pending||0)>0) box.appendChild(el('p','meta','「待核对」是这道题暂时没有判分（参考答案还在核对），不是做错了。'));
     if(rc<asked) box.appendChild(el('p','meta','有 '+(asked-rc)+' 道题不能自动判分，答案只存在练习站的存档里，家长会看。'));
+  } else if(result.test===true){
+    box.appendChild(el('h2',null,'已提交（仅留档，未记入大脑）'));
+    box.appendChild(el('div','sum','测试套 · 共 '+total+' 题 · 已作答 '+asked+' · 答对 '+(+sm.correct||0)+' · 未作答 '+un));
+    box.appendChild(el('p','meta','这是测试，答案只存在练习站的存档里，家长会收到一条「【测试】」提醒。'));
+    if(result.archived===false) box.appendChild(el('p','msg bad','这次提交没能保存下来，请告诉家长。'));
   } else if(result.mode==='graded'){
     box.appendChild(el('h2',null,'已提交（仅留档，未记入大脑）'));
     box.appendChild(el('div','sum','共 '+total+' 题 · 已作答 '+asked+' · 未作答 '+un));
@@ -552,6 +569,31 @@ function submit(retriedOnce){
   });
 }
 
+// 「检查」 (local test sets only): the server judges, nothing is archived or sent.
+function checkAnswers(){
+  if(submitting || result || !isLocal) return;
+  var list=payloadAnswers().map(function(a){ return {qref:a.qref,answer:a.answer}; });
+  if(!list.length){ submitMsg('还没有作答，先做几道题再检查。'); return; }
+  submitMsg('');
+  var btn=$('btnCheck'); btn.disabled=true;
+  api('POST','/api/practice/'+SET_ID+'/check',{answers:list}).then(function(r){
+    var j=r.json;
+    if(r.status===401){ showGate('登录已过期，请重新输入家庭码；答案还在。'); return; }
+    if(r.status===200 && j && Array.isArray(j.results)){
+      document.querySelectorAll('#qs .vd.chk').forEach(function(n){ n.remove(); });
+      j.results.forEach(function(x){
+        var card=document.querySelector('#qs section[data-qref="'+String(x.qref).replace(/"/g,'')+'"]'); if(!card) return;
+        var cls='none', txt='未作答';
+        if(x.status==='graded' && typeof x.correct==='boolean'){ if(x.correct){ cls='ok'; txt='✓ 答对了'; } else { cls='wrong'; txt='✗ 不对，再试试'; } }
+        card.appendChild(el('div','vd chk '+cls,txt));
+      });
+      return;
+    }
+    submitMsg((j && typeof j.message==='string' && j.message) ? '没检查成功：'+j.message : '没检查成功，稍后再点一次「检查」。');
+  }).catch(function(){ submitMsg('连不上练习站服务，网络好了再点一次「检查」。'); })
+  .then(function(){ btn.disabled=false; });
+}
+
 // ---- wiring --------------------------------------------------------------------
 $('gateForm').addEventListener('submit',function(ev){
   ev.preventDefault();
@@ -572,6 +614,7 @@ $('btnClear').onclick=function(){
   resetAll();
 };
 $('btnSubmit').onclick=function(){ submit(false); };
+$('btnCheck').onclick=checkAnswers;
 $('btnLogout').onclick=function(){
   api('POST','/api/logout').then(function(){
     items=[]; $('qs').innerHTML=''; $('submitCard').style.display='none'; $('resultCard').style.display='none'; $('countPill').textContent='已退出'; showGate('');

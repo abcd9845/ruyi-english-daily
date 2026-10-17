@@ -1,0 +1,32 @@
+{
+  "sets": [
+    {
+      "id": "demo-1",
+      "title": "示例套（占位，非真实题目）",
+      "source": "example.source",
+      "qrefs": [
+        "example.set:math:1",
+        "example.set:math:2",
+        "example.set:math:3"
+      ]
+    },
+    {
+      "id": "smoke-test",
+      "local": true,
+      "title": "测试套（随便填，只测提交和推送）",
+      "questions": [
+        {
+          "qref": "smoke:q1",
+          "qtype": "single_choice",
+          "stem": "【测试题，随便填】这道题只用来测试「提交」和「推送」，选哪个都行。想看「检查」的对错，就选 B。\n\n1 + 1 = ?",
+          "options": [
+            { "key": "A", "text": "1" },
+            { "key": "B", "text": "2" },
+            { "key": "C", "text": "3" }
+          ],
+          "answer": ["B"]
+        }
+      ]
+    }
+  ]
+}

@@ -68,3 +68,27 @@ func TestUnwritableLogsOnceWithoutContent(t *testing.T) {
 		t.Errorf("log:\n%s", buf.String())
 	}
 }
+
+// Test is only archived for local test sets: a real attempt's line has no "test" key.
+func TestTestFlagOnlyArchivedWhenSet(t *testing.T) {
+	dir := t.TempDir()
+	s := Open(dir, nil)
+	defer s.Close()
+	r1, r2 := rec("aaaaaaaa"), rec("bbbbbbbb")
+	r2.Test = true
+	if err := s.Append(r1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(r2); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, FileName))
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if strings.Contains(lines[0], `"test"`) || !strings.Contains(lines[1], `"test":true`) {
+		t.Errorf("lines: %v", lines)
+	}
+	got := s.Load(10)
+	if len(got) != 2 || got[0].Test || !got[1].Test {
+		t.Errorf("load: %+v", got)
+	}
+}

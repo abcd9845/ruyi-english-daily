@@ -21,7 +21,8 @@ merge 之后的提交（都不改功能）：
 |---|---|
 | `test(acceptance)…`（`cfc2800`） | 修 #16 与 #17 合并后验收脚本的互相覆盖（§3-3），仅测试脚本 |
 | `docs(deploy)…`（`53630df`） | `DEPLOY-P3.md` §6 回滚加一句指向 §8.3；§8.2 加「每次重启 1 次只读 lookup 探测」 |
-| `docs: INTEGRATION.md` | 本文件 |
+| `docs/test: replace real brain identifiers…`（`2fa464f`） | PM 拍板：`deploy/sets.qa-practice.example.json` 里的真实 source key / qref 换成占位值（`<qa-practice-source>`、`<qa-practice-source-2>`、`<qa-practice-source-3>`、`<qref-lowercase-1…7>`）；`internal/sets/sets_test.go` 的样例加载单测与 `test/acceptance.sh` 的 U4i–U4l 改为先校验模板结构（套 id、占位数量与编号）、再把占位值替换成夹具值（`qa-fixture.src…`）后走真实校验并启动加载；`README.md` 说明「占位值，使用前需替换成大脑给的真实 source key 和小写 qref；联调用，非线上」。只改样例 / 测试 / 说明，二进制不变 |
+| `docs: INTEGRATION.md` | 本文件（本文件的提交就是「到此为止」的最后一个提交；最终 head 以分支 head / 交付报告为准，文中不写自身 hash） |
 
 ## 2. 合并顺序
 
@@ -34,6 +35,8 @@ merge 之后的提交（都不改功能）：
 3. **#17 并入**：`server/test/acceptance.sh` —— 两边都新增了一个 `section "T. …"`（#16：本地套 T1–T22；#17：RUYI_BRAIN_ID）。解决：#16 的 T 段原样保留；#17 的段改名为 **`U.`**，其测试编号 `T1…T12` 改为 `U1…U12`（只改显示用的名字），两段先后顺序执行。随后发现 #17 的段会把 `$WORK/sets-t.json` 覆盖掉（该文件后面还被 #16 的浏览器用例 L9 使用，导致 L9/L9c 失败），于是单独用一个 `test(acceptance)` 提交把 #17 段里的文件名改为 `sets-u.json`。没有改任何断言内容。
 4. `grade.go`（postNtfy / ntfy 标题）、`server.go`、`README.md`、`DEPLOY-P3.md`、`config.go`、`testenv_test.go`：git 自动合并，无文本冲突；合并后 `go build / vet / test` 全绿，ntfy 标题（#14 基址 + #16 的 `【测试】` RFC 2047 标题）两者行为都保留（有测试和验收覆盖）。
 
+5. **真实题标识已清除（`2fa464f`）**：#17 的样例文件曾含真实 source key / qref，现已换成占位值；当前分支树中不再出现这些标识。**但 #17 的提交 `f4631e3`（及公开分支 `feat/brain-id-config`、本分支经 merge #17 带入的历史）里仍含旧值**，只有 force-push 改写历史才能抹掉，未获授权，所以没做。
+
 不需要重新生成 `static-allowlist.txt` / vendor（未运行 `scripts/gen-allowlist.sh`；`allowlist_test.go` 通过）。
 
 ## 4. 最终二进制
@@ -42,6 +45,7 @@ merge 之后的提交（都不改功能）：
 - sha256：`8d7abf3565b6a15971d6710db520872656695085f593e9724466bce0a58d3aa1`
 - 构建参数（同 `Makefile` 的 `build` 目标）：`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags '-s -w' -o <out> ./cmd/ruyi-site`（在 `server/` 下）。
 - Go：`go1.27.2 linux/amd64`（`go.mod` 写的是 `go 1.26.0` / `toolchain go1.26.9`；本机 Go 更新，没有降级使用 1.26.9）。同源两次构建 sha256 一致；`ldd` 为 not a dynamic executable。
+- 样例 / 测试 / README 的占位值改动（`2fa464f`）之后实际重编：sha256 **与上一版相同**（`8d7abf35…`），因为这些文件都不进二进制（二进制嵌入的只有 `static-allowlist.txt`、`web/`、`vendor/katex`）。
 - 注意：这个 sha 只对应「Go 1.27.2 + 本分支内容」；换 Go 版本重编会得到不同的 sha。
 
 ## 5. 与线上现用二进制（#11+#12+#14，sha `1cc0c775…`）的差异
@@ -69,3 +73,5 @@ merge 之后的提交（都不改功能）：
 ## 6. 验证摘要
 
 `gofmt -l`（不含 vendor）无输出；`go vet ./...` 通过；`CGO_ENABLED=0 go test ./... -count=1` 全包通过；`CGO_ENABLED=1 go test -race ./... -count=1` 全包通过；`test/acceptance.sh`（带 SHOTS 与 headless Chrome、mockbrain）全过。另跑了集成专项断言：`/api/config` 的 `ntfy_url` 跟随 `RUYI_NTFY_BASE_URL`；本地套提交 0 次调大脑；`RUYI_BRAIN_ID=qa-practice` 时 grade body / pick 查询的 brain 正确、pick 用判分令牌；契约错误映射；对 main 新增行的公开库安全 grep。
+
+`2fa464f` 之后全部重跑并通过：gofmt、vet、`go test`、`-race`、acceptance（458 通过 / 0 失败，其中样例模板检查为 U4i–U4l 四条）。

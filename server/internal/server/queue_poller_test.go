@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -411,5 +412,27 @@ func TestQueueArchiveV3LinesAreReadableByThePreviousBuild(t *testing.T) {
 	after, _ := os.ReadFile(filepath.Join(e.attDir, "attempts.jsonl"))
 	if string(before) != string(after) {
 		t.Errorf("replay rewrote the archive")
+	}
+}
+
+// P3-1: a failing events read backs off exponentially (45 s base, jitter off in tests) up
+// to 5 minutes; the first successful read goes back to the normal period.
+func TestPollerEventReadBackoffDoublesCapsAndResets(t *testing.T) {
+	e, _, _ := queueEnv(t, opts{queueNotify: true})
+	ctx := context.Background()
+	e.brain.q.Set("events_fail", "1000")
+	want := []time.Duration{90 * time.Second, 180 * time.Second, 5 * time.Minute, 5 * time.Minute, 5 * time.Minute}
+	for i, w := range want {
+		if got := e.app.TPollStep(ctx); got != w {
+			t.Fatalf("failure %d: next wait %v, want %v", i+1, got, w)
+		}
+	}
+	e.brain.q.Set("events_fail", "0")
+	if got := e.app.TPollStep(ctx); got != 45*time.Second {
+		t.Fatalf("after a good read the period is back to 45 s, got %v", got)
+	}
+	e.brain.q.Set("events_fail", "1")
+	if got := e.app.TPollStep(ctx); got != 90*time.Second {
+		t.Fatalf("the backoff restarts from the first step, got %v", got)
 	}
 }

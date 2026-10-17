@@ -371,10 +371,14 @@ func (m *Mock) enqueueInner(w http.ResponseWriter, r *http.Request) {
 		canon[i] = string(c)
 	}
 	if sref != "" && req.SessionTotal != nil {
+		// a session_ref has ONE session_total: a request with another value is a 400 for the
+		// whole request (not a per-item 422) and nothing is written
 		if s := m.sessions[sref]; s != nil && s.Total != 0 && s.Total != *req.SessionTotal {
-			for i := range vs {
-				vs[i].reasons = append(vs[i].reasons, "session_total_mismatch")
-			}
+			m.Stats["enqueue_400"]++
+			m.Stats["enqueue_total_mismatch"]++
+			jerr(w, 400, "session_total_mismatch", "session_total differs from the one already registered for this session_ref",
+				map[string]any{"field": "session_total", "registered": s.Total}, nil, nil)
+			return
 		}
 	}
 	// idempotency conflict: same key, different answer

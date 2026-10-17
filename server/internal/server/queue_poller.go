@@ -137,19 +137,25 @@ func (p *poller) loop() {
 		case <-t.C:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		err := p.tick(ctx)
+		delay = p.step(ctx)
 		cancel()
-		if err != nil {
-			p.fails++
-		} else {
-			p.fails = 0
-		}
-		delay = p.interval()
-		for i := 0; i < p.fails && delay < pollBackoffMax; i++ {
-			delay *= 2
-		}
-		delay = min(delay, pollBackoffMax)
 	}
+}
+
+// step runs one tick and returns the wait before the next one. A tick that could not
+// read the events (brain down, token refused, ...) doubles the wait each time, up to
+// 5 minutes; the first successful read goes back to the normal period.
+func (p *poller) step(ctx context.Context) time.Duration {
+	if err := p.tick(ctx); err != nil {
+		p.fails++
+	} else {
+		p.fails = 0
+	}
+	delay := p.interval()
+	for i := 0; i < p.fails && delay < pollBackoffMax; i++ {
+		delay *= 2
+	}
+	return min(delay, pollBackoffMax)
 }
 
 // PollOnce runs one tick (tests, and the loop's body).
@@ -248,6 +254,7 @@ func (p *poller) tick(ctx context.Context) error {
 	s := p.s
 	now := s.now()
 	p.markLate(now)
+	p.markExhausted(now)
 	if !p.capsLogged {
 		p.capsLogged = true
 		if c := s.enqueueCaps(ctx); c != nil {
@@ -259,10 +266,12 @@ func (p *poller) tick(ctx context.Context) error {
 		p.ack(ctx)
 	}
 	// 1-3: read, ingest (durable), ack
+	var readErr error // a failed read makes the tick fail (the loop backs off) but the rest still runs
 	for page := 0; page < pollPagesMax; page++ {
 		evs, err := s.Queue.QueueEvents(ctx, p.st.Cursor, brain.MaxEventsPage)
 		if err != nil {
 			p.warnRead(err)
+			readErr = err
 			break
 		}
 		if len(evs) == 0 {
@@ -287,7 +296,10 @@ func (p *poller) tick(ctx context.Context) error {
 	// reconcile sessions that asked for a read of the brain
 	p.reconcile(ctx)
 	// 4: tell the parent
-	return p.notifyDue(ctx)
+	if err := p.notifyDue(ctx); err != nil {
+		return err
+	}
+	return readErr
 }
 
 // ack tells the brain everything up to the cursor is stored here. A failure is only
@@ -337,6 +349,22 @@ func (p *poller) markLate(now time.Time) {
 		ss := p.sess(l.CID)
 		if (ss.State == sessOpen || ss.State == sessSending) && !ss.Reconciled {
 			ss.Reconcile = true
+		}
+	}
+}
+
+// markExhausted opens a session for a recent submission that has answers the site gave up
+// queueing (retry_exhausted): the parent hears about them even if no event will ever come.
+func (p *poller) markExhausted(now time.Time) {
+	for _, l := range p.s.q.links.all() {
+		if now.Sub(l.SubmittedAt) > reconcileAge || p.st.sent[l.CID] {
+			continue
+		}
+		for _, li := range l.Items {
+			if li.Enq == enqNotQueued && li.Reason == "retry_exhausted" {
+				p.sess(l.CID)
+				break
+			}
 		}
 	}
 }
@@ -412,6 +440,7 @@ func (p *poller) reconcile(ctx context.Context) {
 
 type sessCount struct {
 	done, manual, purged int
+	exhausted            int // answers the site gave up queueing (retry_exhausted)
 	fallback             bool
 }
 
@@ -435,10 +464,13 @@ func (p *poller) complete(cid string, ss *sessState, now time.Time) (sessCount, 
 			if li.Enq == enqFailed {
 				return c, false // still being queued
 			}
+			if li.Enq == enqNotQueued && li.Reason == "retry_exhausted" {
+				c.exhausted++
+			}
 		}
 		oks := l.okItems()
 		if len(oks) == 0 {
-			return c, false
+			return c, c.exhausted > 0
 		}
 		for _, li := range oks {
 			t, ok := ss.Terminal[li.ItemID]
@@ -497,7 +529,7 @@ func (p *poller) notifyDue(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		if c.done == 0 && c.manual == 0 { // everything was deleted: nothing to tell
+		if c.done == 0 && c.manual == 0 && c.exhausted == 0 { // everything was deleted: nothing to tell
 			ss.State = sessSilent
 			if err := p.save(); err != nil && firstErr == nil {
 				firstErr = err
@@ -598,6 +630,9 @@ func notifyText(l *link, cid string, c sessCount, now time.Time) (title, body st
 	}
 	if c.purged > 0 {
 		parts = append(parts, fmt.Sprintf("%d 题已被删除", c.purged))
+	}
+	if c.exhausted > 0 {
+		parts = append(parts, fmt.Sprintf("%d 题没能排队（答案在存档里）", c.exhausted))
 	}
 	b.WriteString("，")
 	if c.fallback {

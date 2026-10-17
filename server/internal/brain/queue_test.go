@@ -120,15 +120,19 @@ func TestEnqueue429CarriesRetryAfterFromBodyAndHeader(t *testing.T) {
 	}
 }
 
-func TestEnqueueSessionTotalMismatchIsNotPermanent(t *testing.T) {
+func TestEnqueueSessionTotalMismatchIs400ForTheWholeRequest(t *testing.T) {
 	c, _, _ := queueClient(t, "n-token")
 	if _, err := c.Enqueue(context.Background(), req("cid-dddddddd", 2, "ex:1", "ex:2")); err != nil {
 		t.Fatal(err)
 	}
 	_, err := c.Enqueue(context.Background(), req("cid-dddddddd", 3, "ex:3"))
 	var qe *QueueError
-	if !errors.As(err, &qe) || qe.Reason != "session_total_mismatch" || len(qe.Items) != 1 || qe.Items[0].Permanent() {
+	if !errors.As(err, &qe) || qe.Reason != "session_total_mismatch" || qe.Base.Status != 400 || len(qe.Items) != 0 {
 		t.Fatalf("%v %+v", err, qe)
+	}
+	// the same total again (a retry) is fine
+	if _, err := c.Enqueue(context.Background(), req("cid-dddddddd", 2, "ex:1", "ex:2")); err != nil {
+		t.Fatalf("same total must pass: %v", err)
 	}
 }
 

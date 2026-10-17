@@ -151,11 +151,22 @@ func (s *Server) dropCaps() {
 // brain refuses it (nothing written) and names items that can never be queued, those
 // are dropped and the rest is resubmitted once with session_total reduced to match.
 // It never panics on odd replies: every item of the input gets a result.
-func (s *Server) doEnqueue(ctx context.Context, cid string, items []brain.EnqueueItem) map[string]enqRes {
+//
+// base is how many answers of this cid are already queued (they count in session_total).
+// sticky is the session_total already sent for this cid (0 = none yet): the first request of
+// a retry keeps it, because the brain refuses a different total for the same session_ref.
+// The second return value is the total of the last request actually sent (0 = none).
+func (s *Server) doEnqueue(ctx context.Context, cid string, items []brain.EnqueueItem, sticky, base int) (map[string]enqRes, int) {
 	res := map[string]enqRes{}
 	cur := items
+	used := 0
 	for round := 0; round < 2 && len(cur) > 0; round++ {
-		resp, err := s.Queue.Enqueue(ctx, brain.EnqueueRequest{ClientAttemptID: cid, SessionRef: cid, SessionTotal: len(cur), Items: cur})
+		total := base + len(cur)
+		if round == 0 && sticky > 0 {
+			total = sticky
+		}
+		used = total
+		resp, err := s.Queue.Enqueue(ctx, brain.EnqueueRequest{ClientAttemptID: cid, SessionRef: cid, SessionTotal: total, Items: cur})
 		if err == nil {
 			got := map[string]brain.EnqueuedItem{}
 			for _, it := range resp.Items {
@@ -168,14 +179,14 @@ func (s *Server) doEnqueue(ctx context.Context, cid string, items []brain.Enqueu
 					res[it.QRef] = enqRes{Enq: enqFailed, Reason: "no_reply"}
 				}
 			}
-			return res
+			return res, used
 		}
 		drops, whole := s.classifyEnqErr(cur, err)
 		if len(drops) == 0 {
 			for _, it := range cur {
 				res[it.QRef] = whole(it.QRef)
 			}
-			return res
+			return res, used
 		}
 		var rest []brain.EnqueueItem
 		for _, it := range cur {
@@ -192,7 +203,7 @@ func (s *Server) doEnqueue(ctx context.Context, cid string, items []brain.Enqueu
 			}
 		}
 	}
-	return res
+	return res, used
 }
 
 // classifyEnqErr turns a failed batch into (per-item permanent drops, a function
@@ -243,6 +254,9 @@ func (s *Server) classifyEnqErr(cur []brain.EnqueueItem, err error) (map[string]
 		s.Log.Warn("queue enqueue: the brain has no pending-answers endpoint (yet)")
 		return nil, whole(enqNotQueued, brain.ReasonNotReady)
 	case be != nil && be.Kind == brain.KindBadRequest:
+		if reason == brain.ReasonSessionTotalMismatch {
+			s.Log.Warn("queue enqueue: the brain refused a changed session_total (site bug path)")
+		}
 		return nil, whole(enqNotQueued, "invalid")
 	case be != nil && be.Kind == brain.KindAuth:
 		s.Log.Warn("queue enqueue: the brain rejected the write token", "err", desc)
@@ -275,10 +289,23 @@ func nz(a, b string) string {
 	return b
 }
 
-var backoff = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute}
+// enqBackoff is the wait before the n-th automatic retry: 1, 2, 4 minutes, then 5 minutes.
+func enqBackoff(n int) time.Duration {
+	return min(time.Minute<<min(max(n-1, 0), 10), enqBackoffCap)
+}
 
-// applyEnq folds results into the link items (tries counted per failed attempt).
-func (s *Server) applyEnq(l *link, res map[string]enqRes) {
+// enqWindow is how long an answer is retried: until the brain's processing deadline.
+func enqWindow(li linkItem) time.Duration {
+	if li.Kind == brain.KindAbsolute {
+		return enqWindowAbsolute
+	}
+	return enqWindowJudged
+}
+
+// applyEnq folds results into the link items. A failed automatic attempt counts for the
+// backoff; a failed page-forced attempt (forced) costs nothing: the schedule stays as it
+// was. Whatever the way, an answer still failing at its deadline becomes retry_exhausted.
+func (s *Server) applyEnq(l *link, res map[string]enqRes, forced bool) {
 	now := s.now()
 	for i := range l.Items {
 		li := &l.Items[i]
@@ -293,14 +320,16 @@ func (s *Server) applyEnq(l *link, res map[string]enqRes) {
 		case enqNotQueued:
 			li.Enq, li.Reason, li.NextTry = enqNotQueued, r.Reason, time.Time{}
 		default:
-			li.Tries++
 			li.Enq, li.Reason = enqFailed, r.Reason
-			d := backoff[min(li.Tries-1, len(backoff)-1)]
-			if ra := time.Duration(r.RetryAfterS) * time.Second; ra > d {
-				d = ra
+			if !forced || li.NextTry.IsZero() {
+				li.Tries++
+				d := enqBackoff(li.Tries)
+				if ra := time.Duration(r.RetryAfterS) * time.Second; ra > d {
+					d = ra
+				}
+				li.NextTry = now.Add(d)
 			}
-			li.NextTry = now.Add(d)
-			if li.Tries >= enqMaxTries || now.Sub(l.SubmittedAt) > enqRetryWindow {
+			if now.Sub(l.SubmittedAt) > enqWindow(*li) {
 				li.Enq, li.Reason, li.NextTry = enqNotQueued, "retry_exhausted", time.Time{}
 			}
 		}
@@ -396,9 +425,12 @@ func (s *Server) queueAfterGrade(ctx context.Context, cid, setID, setTitle strin
 	anchors := map[string]int{}
 	if len(send) > 0 {
 		ectx, cancel := context.WithTimeout(ctx, enqueueBudget)
-		res := s.doEnqueue(ectx, cid, send)
+		res, used := s.doEnqueue(ectx, cid, send, 0, 0)
 		cancel()
-		s.applyEnq(l, res)
+		if used > 0 {
+			l.SessionTotal = used
+		}
+		s.applyEnq(l, res, false)
 		for qref, r := range res {
 			if r.Enq != enqOK {
 				continue

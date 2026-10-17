@@ -39,12 +39,16 @@ const (
 
 	// linksKeep: submissions older than this are not loaded at startup (the longest
 	// brain deadline is 48 h; this is far beyond it).
-	linksKeep      = 30 * 24 * time.Hour
-	sessionsKeep   = 14 * 24 * time.Hour
-	maxSessions    = 2000
-	maxQueueLine   = 1 << 20
-	enqMaxTries    = 5
-	enqRetryWindow = 24 * time.Hour
+	linksKeep    = 30 * 24 * time.Hour
+	sessionsKeep = 14 * 24 * time.Hour
+	maxSessions  = 2000
+	maxQueueLine = 1 << 20
+	// The automatic enqueue retry is time-windowed (no try count): exponential backoff capped
+	// at 5 minutes until the brain's processing deadline for the item (math 24 h, open question
+	// 48 h; 48 h while the kind is not known yet), then retry_exhausted.
+	enqWindowAbsolute = 24 * time.Hour
+	enqWindowJudged   = 48 * time.Hour
+	enqBackoffCap     = 5 * time.Minute
 )
 
 // Enqueue states of one answer.
@@ -77,7 +81,10 @@ type link struct {
 	SubmittedAt time.Time  `json:"submitted_at"`
 	AnsweredAt  time.Time  `json:"answered_at,omitzero"` // the value sent with grade (zero = not sent)
 	Items       []linkItem `json:"items"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	// SessionTotal is the session_total of the last enqueue request sent for this cid. Every
+	// later request (retry, resubmit) keeps it: the brain refuses a changed total (400).
+	SessionTotal int       `json:"session_total,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 func (l *link) clone() *link {

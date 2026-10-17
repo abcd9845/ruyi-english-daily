@@ -64,6 +64,7 @@ func TestQueueTokensMustPairwiseDiffer(t *testing.T) {
 		"notify==write": {"RUYI_BRAIN_NOTIFY_TOKEN": "write-token-2"},
 	} {
 		m := queueEnvMap(t)
+		m["RUYI_QUEUE_ENABLED"] = "1"
 		for k, v := range set {
 			m[k] = v
 		}
@@ -76,7 +77,6 @@ func TestQueueTokensMustPairwiseDiffer(t *testing.T) {
 func TestQueueEnvRejects(t *testing.T) {
 	for name, set := range map[string]map[string]string{
 		"enabled without write token":  {"RUYI_QUEUE_ENABLED": "1", "RUYI_BRAIN_GRADE_TOKEN": ""},
-		"notify without queue":         {"RUYI_QUEUE_NOTIFY_ENABLED": "1"},
 		"notify without token":         {"RUYI_QUEUE_ENABLED": "1", "RUYI_QUEUE_NOTIFY_ENABLED": "1", "RUYI_BRAIN_NOTIFY_TOKEN": ""},
 		"notify without topic":         {"RUYI_QUEUE_ENABLED": "1", "RUYI_QUEUE_NOTIFY_ENABLED": "1", "RUYI_NTFY_TOPIC": ""},
 		"poll below 40 s":              {"RUYI_QUEUE_POLL_SECONDS": "39"},
@@ -88,6 +88,7 @@ func TestQueueEnvRejects(t *testing.T) {
 		"pending path without a slash": {"RUYI_BRAIN_PENDING_PATH": "pending"},
 	} {
 		m := queueEnvMap(t)
+		m["RUYI_QUEUE_ENABLED"] = "1"
 		for k, v := range set {
 			m[k] = v
 		}
@@ -96,8 +97,52 @@ func TestQueueEnvRejects(t *testing.T) {
 		}
 	}
 	m := queueEnvMap(t)
+	m["RUYI_QUEUE_ENABLED"] = "1"
 	m["RUYI_QUEUE_POLL_SECONDS"] = "40"
 	if _, err := Load(env(m)); err != nil {
 		t.Errorf("poll 40 s is the minimum and must be accepted: %v", err)
+	}
+}
+
+// RUYI_QUEUE_ENABLED=0 is the one rollback switch: every other queue variable is ignored,
+// a problem with one is a warning and never a refusal to start.
+func TestQueueOffIgnoresTheOtherQueueVariables(t *testing.T) {
+	m := queueEnvMap(t)
+	m["RUYI_QUEUE_ENABLED"] = "0"
+	m["RUYI_QUEUE_NOTIFY_ENABLED"] = "1" // the rollback case: only ENABLED was switched off
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatalf("ENABLED=0 + NOTIFY_ENABLED=1 must start: %v", err)
+	}
+	if c.QueueEnabled || c.QueueNotifyEnabled {
+		t.Fatalf("both must be off: %+v", c)
+	}
+	if len(c.Warnings) == 0 || !strings.Contains(strings.Join(c.Warnings, "|"), "RUYI_QUEUE_NOTIFY_ENABLED") {
+		t.Fatalf("a warning is expected: %v", c.Warnings)
+	}
+	// ... and so does unset ENABLED with junk in every other queue variable
+	m = valid(t)
+	m["RUYI_QUEUE_NOTIFY_ENABLED"] = "yes"
+	m["RUYI_QUEUE_POLL_SECONDS"] = "fast"
+	m["RUYI_QUEUE_STATE_DIR"] = "relative"
+	m["RUYI_BRAIN_NOTIFY_TOKEN"] = "a b"
+	m["RUYI_BRAIN_PENDING_PATH"] = "pending"
+	c, err = Load(env(m))
+	if err != nil {
+		t.Fatalf("junk queue variables with the queue off must not stop the start: %v", err)
+	}
+	if len(c.Warnings) < 4 {
+		t.Fatalf("each ignored variable should be warned about: %v", c.Warnings)
+	}
+	for _, w := range c.Warnings {
+		if strings.Contains(w, "a b") {
+			t.Errorf("a warning must not echo a token value: %q", w)
+		}
+	}
+	// a malformed ENABLED itself is still an error
+	m = valid(t)
+	m["RUYI_QUEUE_ENABLED"] = "yes"
+	if _, err := Load(env(m)); err == nil {
+		t.Error("RUYI_QUEUE_ENABLED=yes must be refused")
 	}
 }

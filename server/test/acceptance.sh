@@ -995,6 +995,15 @@ curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/config?enqueue_mode=" >/dev/nu
 CODE_HTTP=$(curl -sS -o "$WORK/resp/w4e.b" -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' -b "$WORK/jarW" "$WA/api/practice/attempts/66666666-6666-4666-8666-666666666666/enqueue")
 get wv "$WA/api/practice/attempts/66666666-6666-4666-8666-666666666666/queue" -b "$WORK/jarW"
 expect "W11b the single page-triggered retry queued it (idempotent: brain items +1 only)" "$CODE_HTTP $(jq -r '.items[0].ui_state' "$WORK/resp/wv.b")" '200 waiting'
+# an old brain (no enqueue endpoint: 404): "not queued", no retry, no failed try
+curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/config?enqueue_mode=off" >/dev/null
+W404=88888888-8888-4888-8888-888888888888; E0=$(wq enqueue_calls)
+gpost w5 "$WA" free-3 "$(mkbody $W404 '[{"qref":"example.set:math:4","answer":"o"}]')" -b "$WORK/jarW"
+CODE_HTTP=$(curl -sS -o "$WORK/resp/w5e.b" -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' -b "$WORK/jarW" "$WA/api/practice/attempts/$W404/enqueue")
+get wv "$WA/api/practice/attempts/$W404/queue" -b "$WORK/jarW"
+expect "W11c old brain (enqueue 404): 200 + archived, item not_queued/not_ready, ONE call only (no retry), shown as 未排队, not 'retrying'" "$(jq -c '[.archived,.queue.items[0].enq,.queue.items[0].reason]' "$WORK/resp/w5.b") $(( $(wq enqueue_calls) - E0 )) $(jq -c '[.items[0].ui_state,(.items[0].label|test("未排队")),.summary.enqueue_retry]' "$WORK/resp/wv.b")" '[true,"not_queued","not_ready"] 1 ["not_queued",true,0]'
+curl -s -X POST "http://127.0.0.1:$WQ/_mock/queue/config?enqueue_mode=" >/dev/null
+expect "W11d no request of this run ever carried a changed session_total (mock answers 400 for that)" "$(wq enqueue_total_mismatch)" 0
 # hygiene
 grep -qiE "$CODE|$TOKEN|$GTOKEN|$NTOKEN|$TOPIC" "$WORK/W.log" "$WORK/W2.log" && bad "W12 secrets in the site log" || ok "W12 no code/token/topic in the site log"
 grep -rqiE "$GTOKEN|$NTOKEN|$TOKEN|$TOPIC" "$WORK/q-W" "$WORK/att-W" && bad "W12b secrets in the queue state / archive" || ok "W12b no token/topic in the queue state files or the archive"
@@ -1005,6 +1014,11 @@ gpost wo "http://127.0.0.1:18302" demo-1 "$(mkbody 77777777-7777-4777-8777-77777
 get wov "http://127.0.0.1:18302/api/practice/attempts/77777777-7777-4777-8777-777777777777/queue" -b "$WORK/jarWO"
 expect "W13 RUYI_QUEUE_ENABLED=0: grade has the #22 keys (no queue), the status route is not served, the brain queue gets nothing" "$(jq -c 'has("queue")' "$WORK/resp/wo.b") $CODE_HTTP $(( $(wq enqueue_calls) - E0 ))" "false 400 0"
 kill "$PID_WO" 2>/dev/null
+# rollback with only the master switch off: the other queue variables stay in the env file and are ignored
+start_site WO2 18305 "http://127.0.0.1:$WQ" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-WO2" "RUYI_QUEUE_ENABLED=0" "RUYI_QUEUE_NOTIFY_ENABLED=1" "RUYI_BRAIN_NOTIFY_TOKEN=$NTOKEN" "RUYI_QUEUE_POLL_SECONDS=fast"
+wait_http "http://127.0.0.1:18305/healthz" && ok "W13b RUYI_QUEUE_ENABLED=0 + RUYI_QUEUE_NOTIFY_ENABLED=1 (+ a bad poll value) starts" || bad "W13b start with the queue off and notify on" "$(head -c 300 "$WORK/WO2.log")"
+grep -q 'configuration warning' "$WORK/WO2.log" && ! grep -qF "$NTOKEN" "$WORK/WO2.log" && ok "W13c ... the start log has a warning, no token" || bad "W13c warning in the log"
+kill "$PID_WO2" 2>/dev/null
 # startup validation: three identical tokens refuse to start; values never printed
 OUT=$(env -i PATH="$PATH" RUYI_LISTEN=127.0.0.1:18303 RUYI_STATIC_DIR="$STATIC" RUYI_FAMILY_CODE="$CODE" RUYI_SESSION_SECRET="$SECRET" RUYI_BRAIN_BASE_URL="http://127.0.0.1:$WQ" RUYI_BRAIN_TOKEN="$TOKEN" RUYI_BRAIN_GRADE_TOKEN="$TOKEN" RUYI_BRAIN_NOTIFY_TOKEN="$TOKEN" RUYI_QUEUE_ENABLED=1 RUYI_NTFY_TOPIC="$TOPIC" timeout 5 "$BIN" 2>&1); RC=$?
 [ "$RC" != 0 ] && [ "$RC" != 124 ] && echo "$OUT" | grep -q 'RUYI_BRAIN_NOTIFY_TOKEN' && ! echo "$OUT" | grep -qF "$TOKEN" && ok "W14 three identical tokens -> refuses to start (exit $RC), names the variable, prints no value" || bad "W14 identical tokens" "rc=$RC"

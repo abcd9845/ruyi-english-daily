@@ -106,3 +106,11 @@ merge 之后的提交（都不改功能）：
 - 范围：入队 + 状态页 + 完成提醒（见 README「待解答队列」）。不含：图片上传（S2）、重新分析按钮（S3，`reanalyze_enabled=false` 时隐藏；站点不调用 reanalyze / review / void / stats）。
 - 与已批准 S1-plan 的差异（只列冲突）：（a）详情默认不带正文 → 站点用 `include=result`；（b）`session_ref`/`session_total` 顶层发送（plan A1 原为不发/不确定）；（c）ack 只收 `{up_to_id}`（plan 备选的 `ids[]` 不用）；（d）新增 `capabilities`，用于判定 judged 是否开启、超时小时数，**不盲试** `kind_not_enabled`；（e）入队响应的 `daily_remaining` / `new_attempt_written` 成为「约还剩 N 次」的首选来源（plan A3 原为推断）；（f）`purged` 是独立状态且 purged 事件仍会发出（plan 按 expired+purged 处理）；（g）`retry_after_s` 在 `error.details`，另有 `Retry-After` 头；（h）批量读默认 `limit=100`；（i）stats 对站点三枚令牌 403，站点不用；（j）events 单页最大 200，站点用 100。
 - 与大脑终稿可能不同、已集中在 `internal/brain/queue.go` 头部注释的假设（C1–C6，只影响该文件）：C1 入队成功项缺 `ok` / `new_attempt_written` / `daily_remaining` 时，按 grade 状态推断「新写作答」（unsupported）并退回本地估算「约还剩 N 次」；C2 `result` 只在 `include=result` 时出现，`review.verdict` 在 ①b 前恒为 none；C3 `kinds.<kind>.deadline_hours` 只作文案兜底（入队响应的 `deadline_at` 优先）；C4 未知 state → 页面「状态更新中」，未知 reason → 视为该条永久不可入队；C5 `item_id` 整数 / 字符串都收，统一为字符串；C6 `session_total` = 本次批内条数（剔除坏条目重提时同步改小；后台重试同值）。另：逐项原因 `daily_cap` 站点按「该题今天不可入队」处理（剔除并标「未排队」），契约把它归为批次级/暂时性——**需 PM/大脑确认这一取舍**。
+
+### 8.x 修复单（PR #24 复审）补记
+
+- **`RUYI_QUEUE_ENABLED=0` 是总开关**：其余队列变量全部忽略，出错只 warn（`Config.Warnings`），不拒绝启动。回滚只改这一个值（DEPLOY-P3 §9.2）。
+- **`session_ref` / `session_total`（大脑确认）**：`session_ref` 一律传 `client_attempt_id`，单题也传、`session_total=1`（不传 null）。`session_total` = 该 session 下**实际入队**条目数；同一 `session_ref` 前后必须一致，不一致大脑返 400（整请求，`session_total_mismatch`，不是逐项 422）。站点把发出的值存在 `links.jsonl`（`session_total`），补发沿用；剔除重发（大脑未写入）才减小。mock 同样返回 400。
+- **老大脑 404**：入队端点不存在返回 404（不是 422）→ 「大脑未升级」：未排队（`not_ready`），不重试、不计失败次数。新大脑 422 才按逐项 `queueable_reason` 剔除重发。
+- **入队重试**：按时间窗口（指数退避封顶 5 分钟，到题的处理时限 24h/48h 为止）而非次数；页面 POST 不占自动重试。`retry_exhausted` 进家长提醒。
+- **归档 `queue` 行是提交时快照**；`daily_remaining` 在补发窗口内可能与大脑差 1（见 README）。

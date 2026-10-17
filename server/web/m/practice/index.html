@@ -632,7 +632,7 @@ function qSeed(){
   var rq=result&&result.queue; if(!rq||!Array.isArray(rq.items)) return null;
   var items=rq.items.map(function(x){
     var ui=x.enq==='ok'?'waiting':(x.enq==='failed'?'enqueue_retry':'not_queued');
-    var label=x.enq==='ok'?'已排队，等 AI 判卷':(x.enq==='failed'?'已提交，正在排队（会自动重试）':'未排队：答案已存档，家长会核对（不入大脑）');
+    var label=x.enq==='ok'?'已排队，等 AI 判卷':(x.enq==='failed'?'已提交，正在排队（会自动重试）':(x.reason==='daily_cap'?'今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。':(x.reason==='retry_exhausted'?'暂时没能排队，答案已存档，家长会看到':'未排队：答案已存档，家长会核对（不入大脑）')));
     return {qref:x.qref,ui_state:ui,label:label};
   });
   return {items:items,summary:{any_pending:items.some(function(i){return i.ui_state!=='not_queued';})}};
@@ -664,7 +664,7 @@ function qPaint(view){
   if(wait>0) parts.push('还在等 '+wait+' 题');
   if(+sm.manual>0) parts.push((+sm.manual)+' 题转人工');
   if(+sm.purged>0) parts.push((+sm.purged)+' 题的解析已被家长删除');
-  if(+sm.not_queued>0) parts.push((+sm.not_queued)+' 题未排队（答案已存档，不入大脑）');
+  if(+sm.not_queued>0) parts.push((+sm.not_queued)+' 题未排队（答案已存档）');
   b.className='qbanner'+(sm.any_pending?'':' done');
   b.textContent=parts.length?parts.join(' · ')+(sm.any_pending?'。可以关掉页面，AI 初评出来后家长手机会收到提醒。':'。'):'';
   if(view.stale) b.textContent+=' （状态更新慢，稍后自动刷新）';

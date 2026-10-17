@@ -46,6 +46,9 @@ func run() error {
 	}
 	logw := server.NewRedactWriter(os.Stderr, cfg.Secrets())
 	log := slog.New(slog.NewTextHandler(logw, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	for _, w := range cfg.Warnings {
+		log.Warn("configuration warning", "detail", w)
+	}
 
 	entries, err := staticfiles.ParseAllowlist(ruyisite.StaticAllowlist)
 	if err != nil {

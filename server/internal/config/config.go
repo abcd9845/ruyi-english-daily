@@ -28,6 +28,9 @@ const DefaultAllowedSource = "math-intake.zz-yuekao-numberline-4y"
 
 // Config is the validated runtime configuration.
 type Config struct {
+	// Warnings are configuration problems that do not stop the start (the caller logs them).
+	Warnings []string
+
 	Listen        string
 	StaticDir     string
 	FamilyCode    string
@@ -346,25 +349,34 @@ func Load(getenv func(string) string) (*Config, error) {
 	if c.QueueEnabled, ok = flag01(getenv("RUYI_QUEUE_ENABLED")); !ok {
 		bad("RUYI_QUEUE_ENABLED", "must be 0 or 1")
 	}
+	// With the queue switched off (RUYI_QUEUE_ENABLED=0/unset) every other queue variable
+	// is ignored: a problem with it is only a warning, never a refusal to start. One switch
+	// is therefore enough to go back to the pre-S1 behaviour (rollback).
+	qbad := bad
+	if !c.QueueEnabled && ok {
+		qbad = func(name, why string) {
+			c.Warnings = append(c.Warnings, name+": "+why+" (ignored: RUYI_QUEUE_ENABLED is off)")
+		}
+	}
 	if c.QueueNotifyEnabled, ok = flag01(getenv("RUYI_QUEUE_NOTIFY_ENABLED")); !ok {
-		bad("RUYI_QUEUE_NOTIFY_ENABLED", "must be 0 or 1")
+		qbad("RUYI_QUEUE_NOTIFY_ENABLED", "must be 0 or 1")
 	}
 	c.BrainNotifyToken = strings.TrimSpace(getenv("RUYI_BRAIN_NOTIFY_TOKEN"))
 	if strings.ContainsAny(c.BrainNotifyToken, " \t\r\n") {
-		bad("RUYI_BRAIN_NOTIFY_TOKEN", "must not contain whitespace")
+		qbad("RUYI_BRAIN_NOTIFY_TOKEN", "must not contain whitespace")
 	}
 	// the three tokens (read / write=grade / notify) are three different tokens
 	if c.BrainNotifyToken != "" && c.BrainNotifyToken == c.BrainToken {
-		bad("RUYI_BRAIN_NOTIFY_TOKEN", "must be a different token from RUYI_BRAIN_TOKEN")
+		qbad("RUYI_BRAIN_NOTIFY_TOKEN", "must be a different token from RUYI_BRAIN_TOKEN")
 	}
 	if c.BrainNotifyToken != "" && c.BrainNotifyToken == c.BrainGradeToken {
-		bad("RUYI_BRAIN_NOTIFY_TOKEN", "must be a different token from RUYI_BRAIN_GRADE_TOKEN")
+		qbad("RUYI_BRAIN_NOTIFY_TOKEN", "must be a different token from RUYI_BRAIN_GRADE_TOKEN")
 	}
 	c.QueuePoll = 45 * time.Second
 	if v := strings.TrimSpace(getenv("RUYI_QUEUE_POLL_SECONDS")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || time.Duration(n)*time.Second < MinQueuePoll || n > 600 {
-			bad("RUYI_QUEUE_POLL_SECONDS", "must be an integer from 40 to 600")
+			qbad("RUYI_QUEUE_POLL_SECONDS", "must be an integer from 40 to 600")
 		} else {
 			c.QueuePoll = time.Duration(n) * time.Second
 		}
@@ -373,20 +385,28 @@ func Load(getenv func(string) string) (*Config, error) {
 	if c.QueueStateDir == "" {
 		c.QueueStateDir = DefaultQueueDir
 	} else if !strings.HasPrefix(c.QueueStateDir, "/") || strings.ContainsRune(c.QueueStateDir, 0) {
-		bad("RUYI_QUEUE_STATE_DIR", "must be an absolute path")
+		qbad("RUYI_QUEUE_STATE_DIR", "must be an absolute path")
 	}
-	c.BrainPendingPath = pathVar("RUYI_BRAIN_PENDING_PATH")
+	if v := strings.TrimSpace(getenv("RUYI_BRAIN_PENDING_PATH")); v != "" {
+		if !gradePathRe.MatchString(v) || strings.Contains(v, "..") || strings.Contains(v, "//") {
+			qbad("RUYI_BRAIN_PENDING_PATH", "must be an absolute URL path like /v1/bank/pending-answers")
+		} else {
+			c.BrainPendingPath = v
+		}
+	}
 	if c.QueueEnabled && c.BrainGradeToken == "" {
-		bad("RUYI_QUEUE_ENABLED", "needs RUYI_BRAIN_GRADE_TOKEN (the write token queues the answers)")
+		qbad("RUYI_QUEUE_ENABLED", "needs RUYI_BRAIN_GRADE_TOKEN (the write token queues the answers)")
+	}
+	if !c.QueueEnabled && c.QueueNotifyEnabled {
+		c.Warnings = append(c.Warnings, "RUYI_QUEUE_NOTIFY_ENABLED=1 is ignored: RUYI_QUEUE_ENABLED is off")
+		c.QueueNotifyEnabled = false // queue off: nothing to notify about
 	}
 	if c.QueueNotifyEnabled {
 		switch {
-		case !c.QueueEnabled:
-			bad("RUYI_QUEUE_NOTIFY_ENABLED", "needs RUYI_QUEUE_ENABLED=1")
 		case c.BrainNotifyToken == "":
-			bad("RUYI_QUEUE_NOTIFY_ENABLED", "needs RUYI_BRAIN_NOTIFY_TOKEN")
+			qbad("RUYI_QUEUE_NOTIFY_ENABLED", "needs RUYI_BRAIN_NOTIFY_TOKEN")
 		case c.NtfyTopic == "":
-			bad("RUYI_QUEUE_NOTIFY_ENABLED", "needs RUYI_NTFY_TOPIC")
+			qbad("RUYI_QUEUE_NOTIFY_ENABLED", "needs RUYI_NTFY_TOPIC")
 		}
 	}
 

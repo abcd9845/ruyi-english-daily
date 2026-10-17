@@ -198,10 +198,10 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `RUYI_QUEUE_ENABLED` | `0` | `1` = 无法自动判分的答案再入队，页面显示逐题状态。需要 `RUYI_BRAIN_GRADE_TOKEN` |
+| `RUYI_QUEUE_ENABLED` | `0` | `1` = 无法自动判分的答案再入队，页面显示逐题状态。需要 `RUYI_BRAIN_GRADE_TOKEN`。**总开关**：`0` 时下面所有 `RUYI_QUEUE_*` / notify / pending 变量都被忽略（有问题只 warn，不拒绝启动） |
 | `RUYI_QUEUE_NOTIFY_ENABLED` | `0` | `1` = 起完成提醒轮询。需要 `RUYI_QUEUE_ENABLED=1`、`RUYI_BRAIN_NOTIFY_TOKEN`、`RUYI_NTFY_TOPIC` |
 | `RUYI_BRAIN_NOTIFY_TOKEN` | 空 | 第三枚令牌，只调 `events` / `ack`；与读令牌、写令牌都必须不同，否则拒绝启动 |
-| `RUYI_QUEUE_POLL_SECONDS` | `45` | 40–600；实际间隔 ±10% 抖动，失败指数退避到 5 分钟 |
+| `RUYI_QUEUE_POLL_SECONDS` | `45` | 40–600；实际间隔 ±10% 抖动；读事件失败时每失败一次间隔翻倍，最多 5 分钟，读成功一次就恢复正常间隔 |
 | `RUYI_QUEUE_STATE_DIR` | `/var/lib/ruyi-site/queue` | 绝对路径；要事先建好，0700，属主 `ruyi-site`，单元的 `ReadWritePaths` 要包含它（样例单元已改成 `/var/lib/ruyi-site`）。队列开着而目录不可用 → 启动失败（不会悄悄丢状态） |
 | `RUYI_BRAIN_PENDING_PATH` | `/v1/bank/pending-answers` | 入队路径 |
 
@@ -211,7 +211,7 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
 2. 换二进制（`ruyi-site-queue-s1-linux-amd64`），**不改环境变量先重启一次**：行为应与 #22 一致（`GET /api/practice/attempts/<cid>/queue` 仍是 400）。
 3. 在 env 文件里加 `RUYI_QUEUE_ENABLED=1`（先不开提醒）→ 重启 → 家长自己交一份含「待核对」题的练习，看状态页：待解答 → …。
 4. 再加 `RUYI_QUEUE_NOTIFY_ENABLED=1` 和 `RUYI_BRAIN_NOTIFY_TOKEN` → 重启。日志里应有 `queue capabilities`；notify 令牌被拒只会出现 `queue notify token rejected … no fallback`，站点其余功能不受影响。
-5. **回滚**：把 `RUYI_QUEUE_ENABLED` 改 `0` 重启（行为回到 #22；`queue/` 目录可留可删）；或直接换回 #22 的二进制。归档里 S1 写的 `v:3` 行带多出来的 `queue` 字段，#22 的读取器忽略未知字段（测试 `TestQueueArchiveV3LinesAreReadableByThePreviousBuild`），不需要改归档。
+5. **回滚**：**只改一个开关**——把 `RUYI_QUEUE_ENABLED` 改 `0` 重启（行为回到 #22；`queue/` 目录可留可删）。**其余 `RUYI_QUEUE_*` / `RUYI_BRAIN_NOTIFY_TOKEN` / `RUYI_BRAIN_PENDING_PATH` 可以原样留在 env 文件里，不用删**：队列关闭时它们全被忽略（包括 `RUYI_QUEUE_NOTIFY_ENABLED=1`，提醒轮询也不会起），值有问题也只在启动日志里打一条 `configuration warning`，不会拒绝启动（测试 `TestQueueOffIgnoresTheOtherQueueVariables`）。`RUYI_QUEUE_ENABLED` 自己写错（不是 0/1）仍会拒绝启动。也可以直接换回 #22 的二进制。归档里 S1 写的 `v:3` 行带多出来的 `queue` 字段，#22 的读取器忽略未知字段（测试 `TestQueueArchiveV3LinesAreReadableByThePreviousBuild`），不需要改归档。
 
 ### 9.3 本地状态与丢失时的对账
 

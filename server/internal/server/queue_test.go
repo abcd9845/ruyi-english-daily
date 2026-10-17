@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/abcd9845/ruyi-english-daily/server/internal/attempts"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/server"
 )
 
 // S1: pending-answer queue. Everything runs against the in-process fake brain
@@ -479,5 +482,233 @@ func TestQueueGradeReplayKeepsQueueStateAndNeverReEnqueues(t *testing.T) {
 	}
 	if e.brain.q.Counter("enqueue_calls") != calls {
 		t.Errorf("a replay enqueued again")
+	}
+}
+
+// ---- repair order: retry window, session_total, old brain, daily_cap wording ----
+
+func postEnqueue(t *testing.T, e *env, ck, cid string) int {
+	t.Helper()
+	resp, _ := e.do(t, "POST", "/api/practice/attempts/"+cid+"/enqueue", "{}", map[string]string{"Content-Type": "application/json"}, ck)
+	return resp.StatusCode
+}
+
+func reqTotals(t *testing.T, e *env) []float64 {
+	t.Helper()
+	var out []float64
+	for _, b := range e.brain.q.Requests() {
+		var m map[string]any
+		must(t, json.Unmarshal(b, &m))
+		out = append(out, m["session_total"].(float64))
+	}
+	return out
+}
+
+func TestQueueEnqBackoffDoublesAndCapsAtFiveMinutes(t *testing.T) {
+	want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute, 5 * time.Minute}
+	for i, w := range want {
+		if got := server.TEnqBackoff(i + 1); got != w {
+			t.Errorf("try %d: %v want %v", i+1, got, w)
+		}
+	}
+	if server.TEnqBackoff(500) != 5*time.Minute {
+		t.Error("cap")
+	}
+}
+
+func TestQueuePagePostDoesNotConsumeAutoRetries(t *testing.T) {
+	now := time.Now()
+	clock := &now
+	e, _, ck := queueEnv(t, opts{now: func() time.Time { return *clock }})
+	e.brain.q.Set("enqueue_mode", "500")
+	e.qgrade(t, ck, "pend-2", answersJSON(cid1, map[string]any{q3: "free text"}))
+	li := func() server.TItem { return e.app.TLink(cid1).Items[0] }
+	before := li()
+	if before.Tries != 1 || before.Enq != "failed" {
+		t.Fatalf("%+v", before)
+	}
+	for i := 0; i < 2; i++ {
+		postEnqueue(t, e, ck, cid1) // page-triggered: may fail again, costs nothing
+	}
+	if after := li(); after.Tries != 1 || !after.NextTry.Equal(before.NextTry) || after.Enq != "failed" {
+		t.Fatalf("a page POST changed the automatic schedule: %+v -> %+v", before, after)
+	}
+}
+
+func TestQueueAutoRetryRunsUntilTheDeadlineThenRetryExhausted(t *testing.T) {
+	now := time.Now()
+	clock := &now
+	e, _, ck := queueEnv(t, opts{now: func() time.Time { return *clock }})
+	e.brain.q.Set("enqueue_mode", "500")
+	e.qgrade(t, ck, "pend-2", answersJSON(cid1, map[string]any{q3: "free text"}))
+	for i := 0; i < 12; i++ { // far more than the old 5 tries
+		*clock = clock.Add(6 * time.Minute)
+		e.app.SweepOnce(context.Background())
+	}
+	it := e.app.TLink(cid1).Items[0]
+	if it.Enq != "failed" || it.Tries < 10 {
+		t.Fatalf("still retrying after 72 min: %+v", it)
+	}
+	if v := e.qview(t, ck, cid1); v.item(q3).UI != "enqueue_retry" || !strings.Contains(v.item(q3).Label, "自动重试") {
+		t.Fatalf("%+v", v.item(q3))
+	}
+	// the brain comes back inside the window: the next attempt queues it
+	// (checked on a second answer below); here it stays down past the deadline
+	*clock = clock.Add(49 * time.Hour)
+	e.app.SweepOnce(context.Background())
+	v := e.qview(t, ck, cid1)
+	if it := v.item(q3); it.UI != "not_queued" || it.Reason != "retry_exhausted" || it.Label != "暂时没能排队，答案已存档，家长会看到" {
+		t.Fatalf("%+v", it)
+	}
+}
+
+func TestQueueAutoRetrySucceedsWhenTheBrainComesBackLate(t *testing.T) {
+	now := time.Now()
+	clock := &now
+	e, _, ck := queueEnv(t, opts{now: func() time.Time { return *clock }})
+	e.brain.q.Set("enqueue_mode", "500")
+	e.qgrade(t, ck, "pend-2", answersJSON(cid1, map[string]any{q3: "free text"}))
+	for i := 0; i < 8; i++ {
+		*clock = clock.Add(6 * time.Minute)
+		e.app.SweepOnce(context.Background())
+	}
+	e.brain.q.Set("enqueue_mode", "")
+	*clock = clock.Add(6 * time.Minute)
+	e.app.SweepOnce(context.Background())
+	if e.qview(t, ck, cid1).item(q3).UI != "waiting" {
+		t.Fatalf("not queued once the brain was back")
+	}
+}
+
+func TestQueueRetryExhaustedIsToldToTheParent(t *testing.T) {
+	now := time.Now()
+	clock := &now
+	e, n, ck := queueEnv(t, opts{queueNotify: true, now: func() time.Time { return *clock }})
+	e.brain.q.Set("enqueue_mode", "500")
+	e.qgrade(t, ck, "pend-2", answersJSON(cid1, map[string]any{q3: "free text"}))
+	*clock = clock.Add(49 * time.Hour)
+	e.app.SweepOnce(context.Background())
+	pollOnce(t, e)
+	pollOnce(t, e)
+	if d, _ := notices(n); d != 1 {
+		t.Fatalf("completion notices %d", d)
+	}
+	if got := n.last().Body; !strings.Contains(got, "1 题没能排队") || !strings.Contains(got, "存档") {
+		t.Errorf("notification: %q", got)
+	}
+	pollOnce(t, e)
+	if d, _ := notices(n); d != 1 {
+		t.Errorf("told twice: %d", d)
+	}
+}
+
+func TestQueueSessionTotalCountsOnlyQueuedAnswers(t *testing.T) {
+	e, _, ck := queueEnv(t, opts{}) // hints on: the brain says q5 can never be queued
+	e.brain.q.SetKind(q5, "judged")
+	_, q := e.qgrade(t, ck, "tri-3", triAnswers(cid1))
+	if q.enq(q3) != "ok" || q.enq(q4) != "ok" || q.enq(q5) != "not_queued" {
+		t.Fatalf("%+v", q.Queue)
+	}
+	if tot := reqTotals(t, e); len(tot) != 1 || tot[0] != 2 {
+		t.Fatalf("session_total must count the queued answers only: %v", tot)
+	}
+}
+
+func TestQueueSessionTotalSurvivesLostReplyAndDropResubmitRetries(t *testing.T) {
+	// (a) lost reply: the retry carries the very same total (the brain would answer 400 otherwise)
+	e, _, ck := queueEnv(t, opts{})
+	e.brain.q.Set("enqueue_mode", "lost")
+	e.qgrade(t, ck, "tri-3", triAnswers(cid1))
+	if postEnqueue(t, e, ck, cid1) != 200 {
+		t.Fatal("retry post")
+	}
+	if tot := reqTotals(t, e); len(tot) != 2 || tot[0] != 3 || tot[1] != 3 || e.brain.q.Counter("enqueue_total_mismatch") != 0 {
+		t.Fatalf("totals %v, mismatches %d", tot, e.brain.q.Counter("enqueue_total_mismatch"))
+	}
+	if v := e.qview(t, ck, cid1); v.item(q3).UI != "waiting" || v.item(q5).UI != "waiting" {
+		t.Fatalf("%+v", v.Items)
+	}
+	// (b) down at first, then one answer's kind is switched off: the retry starts with the
+	// value already sent (3), the brain refuses the batch (nothing written), the resubmit
+	// is reduced to what is actually queued (2) -- never a total the brain has seen change
+	e2, _, ck2 := queueEnv(t, opts{queueNoHint: true})
+	e2.brain.q.Set("enqueue_mode", "500")
+	e2.qgrade(t, ck2, "tri-3", triAnswers(cid1))
+	e2.brain.q.Set("enqueue_mode", "")
+	e2.brain.q.SetKind(q5, "judged")
+	if e2.app.TLink(cid1).SessionTotal != 3 {
+		t.Fatalf("the sent total is not remembered: %+v", e2.app.TLink(cid1))
+	}
+	postEnqueue(t, e2, ck2, cid1)
+	tot := reqTotals(t, e2)
+	if len(tot) != 2 || tot[0] != 3 || tot[1] != 2 || e2.brain.q.Counter("enqueue_total_mismatch") != 0 {
+		t.Fatalf("totals %v mismatches %d", tot, e2.brain.q.Counter("enqueue_total_mismatch"))
+	}
+	if l := e2.app.TLink(cid1); l.SessionTotal != 2 {
+		t.Errorf("remembered total %d", l.SessionTotal)
+	}
+	v := e2.qview(t, ck2, cid1)
+	if v.item(q3).UI != "waiting" || v.item(q4).UI != "waiting" || v.item(q5).UI != "not_queued" {
+		t.Fatalf("%+v", v.Items)
+	}
+	// (c) later retries of the same cid after some answers are queued count the queued ones
+	// again: a link written before SessionTotal existed gets queued + sent
+	e3, _, ck3 := queueEnv(t, opts{})
+	e3.brain.q.Set("enqueue_mode", "500")
+	e3.qgrade(t, ck3, "tri-3", triAnswers(cid1))
+	e3.brain.q.Set("enqueue_mode", "")
+	e3.app.TLegacyQueued(cid1)
+	postEnqueue(t, e3, ck3, cid1)
+	if tot := reqTotals(t, e3); tot[len(tot)-1] != 3 {
+		t.Errorf("queued + resent must be 3: %v", tot)
+	}
+}
+
+func TestQueueOldBrain404MeansNotQueuedNoRetryNoFailedTry(t *testing.T) {
+	now := time.Now()
+	clock := &now
+	for _, noHint := range []bool{false, true} {
+		e, _, ck := queueEnv(t, opts{queueNoHint: noHint, now: func() time.Time { return *clock }})
+		e.brain.q.Set("enqueue_mode", "off") // an un-upgraded brain: the endpoint answers 404
+		_, q := e.qgrade(t, ck, "pend-2", answersJSON(cid1, map[string]any{q3: "free text", q4: []string{"x=5"}}))
+		if q.enq(q3) != "not_queued" || q.enq(q4) != "not_queued" {
+			t.Fatalf("hint-free=%v: %+v", noHint, q.Queue)
+		}
+		calls := e.brain.q.Counter("enqueue_calls")
+		*clock = clock.Add(3 * time.Hour)
+		e.app.SweepOnce(context.Background())
+		postEnqueue(t, e, ck, cid1)
+		if e.brain.q.Counter("enqueue_calls") != calls {
+			t.Errorf("a 404 must not be retried (calls %d -> %d)", calls, e.brain.q.Counter("enqueue_calls"))
+		}
+		for _, it := range e.app.TLink(cid1).Items {
+			if it.Tries != 0 || it.Enq != "not_queued" || it.Reason != "not_ready" || !it.NextTry.IsZero() {
+				t.Errorf("a 404 is no failed try: %+v", it)
+			}
+		}
+		v := e.qview(t, ck, cid1)
+		if v.item(q3).UI != "not_queued" || !strings.Contains(v.item(q3).Label, "未排队") || v.Summary.Retrying != 0 {
+			t.Errorf("%+v", v.item(q3))
+		}
+	}
+}
+
+func TestQueueDailyCapWordingAndParentLine(t *testing.T) {
+	r := &attempts.Record{ClientAttemptID: cid1, SetTitle: "待评套", Mode: "graded", Summary: attempts.Summary{Total: 2}, SubmittedAt: time.Now(),
+		Items: []attempts.Item{
+			{QRef: q3, Queue: &attempts.ItemQueue{Enq: "not_queued", Reason: "daily_cap"}},
+			{QRef: q4, Queue: &attempts.ItemQueue{Enq: "ok"}},
+		}}
+	line := server.TSummaryLine(r)
+	if !strings.Contains(line, "1 题未排队（今天已满 3 次），答案在存档里") {
+		t.Errorf("%q", line)
+	}
+	r.Items[0].Queue.Reason = "kind_not_enabled"
+	if strings.Contains(server.TSummaryLine(r), "未排队") {
+		t.Error("only daily_cap is announced in the heads-up")
+	}
+	e, _, _ := queueEnv(t, opts{})
+	if l := e.app.TNotQueuedLabel("daily_cap"); l != "今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。" || strings.Contains(l, "家长会核对") || strings.Contains(l, "不入大脑") {
+		t.Errorf("%q", l)
 	}
 }

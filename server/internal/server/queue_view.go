@@ -57,7 +57,7 @@ func (s *Server) retryEnqueue(ctx context.Context, cid string, force bool) bool 
 	var send []brain.EnqueueItem
 	for _, i := range due {
 		li := l.Items[i]
-		if now.Sub(l.SubmittedAt) > enqRetryWindow {
+		if now.Sub(l.SubmittedAt) > enqWindow(li) {
 			res[li.QRef] = enqRes{Enq: enqNotQueued, Reason: "retry_exhausted"}
 			continue
 		}
@@ -77,8 +77,20 @@ func (s *Server) retryEnqueue(ctx context.Context, cid string, force bool) bool 
 	}
 	if len(send) > 0 {
 		ectx, cancel := context.WithTimeout(ctx, enqueueBudget)
-		for k, v := range s.doEnqueue(ectx, cid, send) {
+		// the session_total of this cid never changes between requests: keep the one already
+		// sent (an older link without it: answers already queued + the ones sent now)
+		queued := 0
+		for _, it := range l.Items {
+			if it.Enq == enqOK {
+				queued++
+			}
+		}
+		r2, used := s.doEnqueue(ectx, cid, send, l.SessionTotal, queued)
+		for k, v := range r2 {
 			res[k] = v
+		}
+		if used > 0 {
+			l.SessionTotal = used
 		}
 		cancel()
 	}
@@ -86,7 +98,7 @@ func (s *Server) retryEnqueue(ctx context.Context, cid string, force bool) bool 
 	for _, li := range l.Items {
 		status[li.QRef] = li.Status
 	}
-	s.applyEnq(l, res)
+	s.applyEnq(l, res, force)
 	day := shanghaiDay(now)
 	for qref, r := range res {
 		if r.Enq != enqOK {
@@ -235,11 +247,18 @@ func (s *Server) itemView(li linkItem, p *brain.Pending, submitted time.Time, ca
 	switch li.Enq {
 	case enqNotQueued:
 		o.UI, o.Reason = uiNotQueued, li.Reason
-		why := notQueuedText[li.Reason]
-		if why == "" {
-			why = "暂时不能排队"
+		switch li.Reason {
+		case brain.ReasonDailyCap:
+			o.Label = "今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。"
+		case "retry_exhausted":
+			o.Label = "暂时没能排队，答案已存档，家长会看到"
+		default:
+			why := notQueuedText[li.Reason]
+			if why == "" {
+				why = "暂时不能排队"
+			}
+			o.Label = "未排队：" + why + "，答案已存档，家长会核对（不入大脑）"
 		}
-		o.Label = "未排队：" + why + "，答案已存档，家长会核对（不入大脑）"
 		return o
 	case enqFailed:
 		o.UI, o.Reason = uiRetry, li.Reason

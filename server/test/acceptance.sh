@@ -44,7 +44,7 @@ cp "$ROOT/m/numberline-4y/index.html" "$STATIC/m/numberline-4y/index.html"
 echo "JUNK-LOG-MARKER" > "$STATIC/server.log"; echo 1234 > "$STATIC/server.pid"
 printf '#!/bin/sh\necho JUNK-SH-MARKER\n' > "$STATIC/start-server.sh"; cp "$STATIC/start-server.sh" "$STATIC/stop-server.sh"
 echo "JUNK-ENV-MARKER=1" > "$STATIC/.env"; printf '[core]\n\tJUNK-GIT-MARKER\n' > "$STATIC/.git/config"
-MAIN_FILES="$(git -C "$ROOT" ls-tree -r --name-only "$MAIN_REF")"
+MAIN_FILES="$(git -C "$ROOT" ls-tree -r --name-only "$MAIN_REF" | grep -vE '^(server/|\.gitignore$|m/numberline-4y/)')"
 
 start_mock() { # name port [env...]
   local name=$1 port=$2; shift 2

@@ -146,3 +146,54 @@ func TestSetsFileLocalSetFailsAtLoad(t *testing.T) {
 		}
 	}
 }
+
+func TestBrainIDUnsetStaysEmpty(t *testing.T) {
+	c, err := Load(env(valid(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.BrainID != "" {
+		t.Fatalf("unset RUYI_BRAIN_ID must leave BrainID empty (the brain package defaults it), got %q", c.BrainID)
+	}
+	m := valid(t)
+	m["RUYI_BRAIN_ID"] = "   " // blank = unset
+	if c, err = Load(env(m)); err != nil || c.BrainID != "" {
+		t.Fatalf("blank value: %v %q", err, c.BrainID)
+	}
+}
+
+func TestBrainIDAccepts(t *testing.T) {
+	for _, v := range []string{"qa-practice", "ruyi", "a", "0", "a_b", "a-b_c-9", "qa_practice", "9lives", strings.Repeat("a", 64)} {
+		m := valid(t)
+		m["RUYI_BRAIN_ID"] = v
+		c, err := Load(env(m))
+		if err != nil {
+			t.Errorf("%q rejected: %v", v, err)
+			continue
+		}
+		if c.BrainID != v {
+			t.Errorf("%q loaded as %q", v, c.BrainID)
+		}
+	}
+}
+
+func TestBrainIDRejectsAndNeverEchoesTheValue(t *testing.T) {
+	for _, v := range []string{
+		"QA-practice", "Ruyi", "qa practice", "-qa", "_qa", strings.Repeat("a", 65),
+		"qa.practice", "qa/practice", "qa\\practice", "qa+x", "练习", "qa:x", "qa?brain=x",
+	} {
+		m := valid(t)
+		m["RUYI_BRAIN_ID"] = v
+		c, err := Load(env(m))
+		if err == nil {
+			t.Errorf("%q accepted (BrainID=%q)", v, c.BrainID)
+			continue
+		}
+		if !strings.Contains(err.Error(), "RUYI_BRAIN_ID: invalid") {
+			t.Errorf("%q: error does not name the variable: %v", v, err)
+		}
+		if strings.Contains(err.Error(), v) {
+			t.Errorf("%q: error echoes the value: %v", v, err)
+		}
+	}
+}

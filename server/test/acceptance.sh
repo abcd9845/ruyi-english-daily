@@ -854,6 +854,59 @@ for pair in "family code:$CODE" "grade token:$GTOKEN" "ntfy topic:$TOPIC" "beare
 done
 kill "$PID_T" "$PID_mockT" 2>/dev/null
 
+section "U. RUYI_BRAIN_ID — a configurable brain id (default ruyi; qa-practice for integration) — mock brain only"
+cat > "$WORK/sets-t.json" <<JSON
+{"sets":[{"id":"one-t","title":"单题套","source":"$PSRC","qrefs":["example.set:math:2"]}]}
+JSON
+TB_ANS='[{"qref":"example.set:math:2","answer":"B"}]'
+TENV=("RUYI_SETS_FILE=$WORK/sets-t.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-T" "RUYI_GRADE_MAX_PER_HOUR=100" "RUYI_AUTO_SOURCES=$PSRC" "RUYI_AUTO_TTL=60s")
+# U-A: the default (RUYI_BRAIN_ID unset) against a default mock: everything is "ruyi", exactly as before
+start_mock mockT0 18270 "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "http://127.0.0.1:18270/_mock/stats"
+start_site T0 18271 "http://127.0.0.1:18270" "${TENV[@]}" "RUYI_ATTEMPTS_DIR=$WORK/att-T0"; wait_http "http://127.0.0.1:18271/healthz"
+post_login t0 "http://127.0.0.1:18271" "$CODE" -c "$WORK/jarT0"
+get t0 "http://127.0.0.1:18271/api/practice/new?source=$PSRC&n=2&mode=due_first&brain=evil" -b "$WORK/jarT0"; expect "U1 default: pick-practice answered by the ruyi mock (an extra ?brain= on the site URL is ignored)" "$CODE_HTTP" 200
+gpost t0 "http://127.0.0.1:18271" one-t "$(mkbody 00000001-bbbb-4bbb-8bbb-bbbbbbbbbbbb "$TB_ANS")" -b "$WORK/jarT0"
+expect "U2 default: graded and recorded by the brain" "$CODE_HTTP $(jq -c '[.mode,.brain_recorded]' "$WORK/resp/t0.b")" '200 ["graded",true]'
+expect "U3 default: the grade body says brain=ruyi" "$(curl -s http://127.0.0.1:18270/_mock/last-grade | jq -r .brain)" ruyi
+grep -q 'brain_id=ruyi' "$WORK/T0.log" && ok "U4 startup summary shows the effective brain id (ruyi)" || bad "U4 startup summary"
+# pick-practice needs the brain's write scope: the grade token works, the bank:read token is 403 (checked on the mock directly)
+PURL="http://127.0.0.1:18270/v1/brain/pick-practice?source=$PSRC&n=2&mode=due_first&brain=ruyi"
+expect "U4b mock: pick with the grade token -> 200" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GTOKEN" "$PURL")" 200
+expect "U4c mock: pick with the bank:read token -> 403" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$PURL")" 403
+expect "U4d the site's own pick (T1) never used the read token (mock counted 1: only the direct probe T4c)" "$(mstat pick_with_bank_read_token 18270)" 1
+# no grade token configured: pick is "not ready" (501), the mock receives no pick request at all, the read token is not used instead
+P0=$(mstat pick 18270)
+start_site T0N 18279 "http://127.0.0.1:18270" "RUYI_SETS_FILE=$WORK/sets-t.json" "RUYI_ATTEMPTS_DIR=$WORK/att-T0N" "RUYI_AUTO_SOURCES=$PSRC"; wait_http "http://127.0.0.1:18279/healthz"
+post_login t0n "http://127.0.0.1:18279" "$CODE" -c "$WORK/jarT0N"
+get t0n "http://127.0.0.1:18279/api/practice/new?source=$PSRC&n=2&mode=due_first" -b "$WORK/jarT0N"
+expect "U4e no grade token: due_first -> 501 due_first_unavailable (not ready), message names the grade token" "$CODE_HTTP $(jq -r '[.error,(.message|contains("判分令牌"))]|@csv' "$WORK/resp/t0n.b")" '501 "due_first_unavailable",true'
+get t0n "http://127.0.0.1:18279/api/practice/new?source=$PSRC&n=2&wrong_only=1" -b "$WORK/jarT0N"; expect "U4f ... and wrong_only -> 501" "$CODE_HTTP" 501
+expect "U4g ... and the mock received 0 pick requests from it" "$(( $(mstat pick 18270) - P0 ))" 0
+grep -qF -e "$TOKEN" -e "$GTOKEN" "$WORK/T0.log" "$WORK/T0N.log" "$WORK/resp/t0n.b" && bad "U4h a token appears in the site logs / responses" || ok "U4h no token in the T site logs or the 501 response"
+kill "$PID_T0N" 2>/dev/null
+OUT=$(env -i PATH="$PATH" "${FULL[@]}" RUYI_SETS_FILE="$SRV/deploy/sets.qa-practice.example.json" RUYI_LISTEN=127.0.0.1:18278 timeout 2 "$BIN" 2>&1); RC=$?
+[ "$RC" = 124 ] && ok "U4i deploy/sets.qa-practice.example.json is accepted at startup (kept running until the 2 s timeout)" || bad "U4i qa-practice sets file" "rc=$RC $OUT"
+# U-B: RUYI_BRAIN_ID=qa-practice against a mock that serves only qa-practice
+start_mock mockT1 18272 "MOCK_GRADE_TOKEN=$GTOKEN" MOCK_BRAIN_ID=qa-practice; wait_http "http://127.0.0.1:18272/_mock/stats"
+start_site T1 18273 "http://127.0.0.1:18272" "${TENV[@]}" "RUYI_ATTEMPTS_DIR=$WORK/att-T1" RUYI_BRAIN_ID=qa-practice; wait_http "http://127.0.0.1:18273/healthz"
+post_login t1 "http://127.0.0.1:18273" "$CODE" -c "$WORK/jarT1"
+get t1 "http://127.0.0.1:18273/api/practice/new?source=$PSRC&n=2&mode=due_first&brain=ruyi" -b "$WORK/jarT1"; expect "U5 qa-practice: pick-practice accepted (the mock would 404 any other brain; ?brain=ruyi on the site URL is ignored)" "$CODE_HTTP" 200
+gpost t1 "http://127.0.0.1:18273" one-t "$(mkbody 00000002-bbbb-4bbb-8bbb-bbbbbbbbbbbb "$TB_ANS")" -b "$WORK/jarT1"
+expect "U6 qa-practice: graded and recorded:true by the brain" "$CODE_HTTP $(jq -c '[.mode,.brain_recorded,.recorded_count]' "$WORK/resp/t1.b")" '200 ["graded",true,1]'
+expect "U7 qa-practice: the grade body says brain=qa-practice" "$(curl -s http://127.0.0.1:18272/_mock/last-grade | jq -r .brain)" qa-practice
+expect "U8 qa-practice: the mock saw no 400-class request (grade/pick/lookup)" "$(mstat grade_400 18272) $(mstat pick_400 18272) $(mstat lookup_400 18272)" "0 0 0"
+grep -q 'brain_id=qa-practice' "$WORK/T1.log" && ok "U9 startup summary shows brain id qa-practice" || bad "U9 startup summary"
+# U-C: scope mismatch (default site -> a qa-practice-only mock): the brain refuses, the page never claims a brain write
+start_site T2 18274 "http://127.0.0.1:18272" "${TENV[@]}" "RUYI_ATTEMPTS_DIR=$WORK/att-T2"; wait_http "http://127.0.0.1:18274/healthz"
+post_login t2 "http://127.0.0.1:18274" "$CODE" -c "$WORK/jarT2"
+get t2 "http://127.0.0.1:18274/api/practice/new?source=$PSRC&n=2&mode=due_first" -b "$WORK/jarT2"; [ "$CODE_HTTP" != 200 ] && ok "U10 scope mismatch: pick-practice for ruyi refused by the qa-practice mock ($CODE_HTTP)" || bad "U10 mismatch pick"
+gpost t2 "http://127.0.0.1:18274" one-t "$(mkbody 00000003-bbbb-4bbb-8bbb-bbbbbbbbbbbb "$TB_ANS")" -b "$WORK/jarT2"
+expect "U11 scope mismatch: the page never claims the brain recorded it" "$(jq -r '.brain_recorded // false' "$WORK/resp/t2.b")" false
+# U-D: startup validation — the bad value is never printed
+run_bad x "${FULL[@]}" RUYI_BRAIN_ID='Bad Brain/1'
+[ "$RC" != 0 ] && echo "$OUT" | grep -q 'RUYI_BRAIN_ID' && ! echo "$OUT" | grep -qF 'Bad Brain' && ok "U12 invalid RUYI_BRAIN_ID -> exit $RC, names the variable, prints no value" || bad "U12 invalid brain id" "rc=$RC"
+for p in "$PID_T0" "$PID_T1" "$PID_T2"; do kill "$p" 2>/dev/null; done
+
 if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/dev/null; then
   section "L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow"
   start_site BR 18199 "http://127.0.0.1:$PORT_MOCK"; wait_http "http://127.0.0.1:18199/healthz"

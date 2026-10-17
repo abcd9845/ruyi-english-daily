@@ -15,6 +15,11 @@ import (
 // live. Callers must report it ("brain interface not ready"), not emulate it.
 var ErrUnsupported = errors.New("not supported by the brain yet")
 
+// ErrPickNoToken: pick-practice needs the grade token (RUYI_BRAIN_GRADE_TOKEN; the contract
+// asks for the brain's write scope) and none is configured. Nothing is sent to the brain and
+// the read token is never used instead.
+var ErrPickNoToken = errors.New("pick-practice needs the grade token")
+
 // Selection modes understood by pick-practice. The empty mode is the legacy
 // local pick (whole source, library order or shuffled) that needs no brain data.
 const (
@@ -102,7 +107,8 @@ func (c *Client) listLookup(ctx context.Context, source string, qrefs []string) 
 //     from the list endpoint. No brain data is needed or invented.
 //   - Mode due_first / wrong_only: GET pick-practice (see contract.go). If the
 //     endpoint is not deployed (404/501/405) the result is ErrUnsupported; the
-//     site never fakes brain-side selection.
+//     site never fakes brain-side selection. The request carries the grade token
+//     (the read token is not accepted); without one the result is ErrPickNoToken.
 func (c *Client) SelectForPractice(ctx context.Context, source string, n int, o SelectOpts) ([]Pick, error) {
 	switch o.Mode {
 	case ModeDueFirst, ModeWrongOnly:

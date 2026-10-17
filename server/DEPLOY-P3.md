@@ -21,10 +21,10 @@
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `RUYI_BRAIN_GRADE_TOKEN` | 空 | 练习站令牌（见上 §0-2）。**空 = 不判分**（`mode:"archive_only"`）。必须 ≠ `RUYI_BRAIN_TOKEN`（启动校验）。写进 `/etc/ruyi-site/ruyi-site.env`，同样 600 root:root。日志里的 `[redacted]` 过滤器已包含它 |
+| `RUYI_BRAIN_GRADE_TOKEN` | 空 | 练习站令牌（见上 §0-2）。**空 = 不判分**（`mode:"archive_only"`），同时**不能用 `mode=due_first|wrong_only` 选题**（选题也用这枚令牌）。必须 ≠ `RUYI_BRAIN_TOKEN`（启动校验）。写进 `/etc/ruyi-site/ruyi-site.env`，同样 600 root:root。日志里的 `[redacted]` 过滤器已包含它 |
 | `RUYI_BRAIN_GRADE_PATH` | `/v1/bank/grade` | 判分接口路径。必须以 `/` 开头 |
 | `RUYI_BRAIN_LOOKUP_PATH` | `/v1/bank/questions/lookup` | 按 qref 取题文（读令牌） |
-| `RUYI_BRAIN_PICK_PATH` | `/v1/brain/pick-practice` | 大脑选题（读令牌） |
+| `RUYI_BRAIN_PICK_PATH` | `/v1/brain/pick-practice` | 大脑选题。**用判分令牌 `RUYI_BRAIN_GRADE_TOKEN`**（契约要目标练习脑的 write 权限；读令牌调它是 403）。没配判分令牌 → 选题 501「大脑接口未就绪（选题需要配置判分令牌）」，不会改用读令牌；大脑回 401/403 → 502 `pick_forbidden`「选题令牌无权限」 |
 | `RUYI_PICK_SKIP_DEFERRED` | `0` | `1` = 跳过带 `deferred:*` 的选题结果；`0` = 保留并标「参考答案待核」 |
 | `RUYI_ATTEMPTS_DIR` | `/var/lib/ruyi-site/attempts` | 作答归档目录，见下。绝对路径 |
 | `RUYI_GRADE_MAX_PER_HOUR` | `5` | 1–1000 |
@@ -45,7 +45,7 @@
   install -d -m 700 -o ruyi-site -g ruyi-site /var/lib/ruyi-site/attempts
   ls -ld /var/lib/ruyi-site/attempts     # 期望：drwx------ ruyi-site ruyi-site
   ```
-- 文件是 JSON Lines，一次提交一行（`v,client_attempt_id,set_id,set_title,source,submitted_at,mode,brain_attempt_id,items[{qref,answer,status,correct}],summary,client{ua,ip}`）。**不含** cookie、令牌、家庭码、topic。
+- 文件是 JSON Lines，一次提交一行（v2）。顶层：`v`（=2）、`client_attempt_id`、`set_id`、`set_title`、`source`、`submitted_at`、`mode`（`graded` = 大脑答复了 / `archive_only` = 降级）、`brain_note`（降级原因：`not_configured` / `not_ready` / `unavailable`，未降级时没有）、`sig`（答案指纹，用于识别「同 id 换答案」）、`items`、`summary`（`total/graded/correct/pending/unsupported/unanswered/recorded`）、`client{ua,ip}`。每题 `items[]`：`qref`、`answer`、`status`、`correct`、`rev`（学生看到的题目版本，未知则无）、`recorded`（大脑确认落库才为 true）、`attempt_id`（大脑的整数 id，没落库则无）、`duplicate`（大脑认为是重放时才有）。旧的 v1 行（单个 `brain_attempt_id`）仍可读。**不含** cookie、令牌、家庭码、topic。
 - 它同时是"重启后仍能识别重复提交"的依据（启动时重读，文件上限 64 MiB 以内）。**不要手工改它。** 备份/清理前先停服务。
 - 目录写不了：答案照样判、照样推送，响应里 `archived:false`，日志只有一条 error。
 

@@ -109,6 +109,7 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
 - 只关判分：删掉 `RUYI_BRAIN_GRADE_TOKEN` 重启 → 全部走归档 + 提醒。
 - 只关自动出题：清空 `RUYI_AUTO_SOURCES` 重启。
 - 归档目录与 `ReadWritePaths` 的改动留着无害；`attempts.jsonl` 里已有的记录是家长核对用的原始凭据，**回滚不要删**。
+- 装回旧二进制前注意：旧二进制遇到 `sets.json` 中的 smoke 条目会启动失败，须先删除该条目（见 §8.3）。
 
 ## 7. 已知限制（上线前心里有数）
 
@@ -174,6 +175,7 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
   `jq -c 'select(.test==true)' /var/lib/ruyi-site/attempts/attempts.jsonl`
 - **ntfy**：标题以「【测试】」开头（HTTP 头按 RFC 2047 编码，ntfy 会解码；真题标题仍是原来的 `Ruyi practice`），正文第一行以「【测试】如意练习：…」开头、含「未记入大脑」，正文 JSON 带 `"test":true`。
 - **大脑侧**：这次提交**没有**任何请求到大脑（判分/取题/选题全是 0）。
+- 注意：sets 文件非空时，每次重启有 1 次只读 lookup 探测（启动后异步发一个明显不存在的 qref，只写日志、不写任何数据、不影响启动）；这不是测试提交产生的请求。
 
 ### 8.3 怎么回滚
 

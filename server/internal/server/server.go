@@ -292,9 +292,15 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 	var ntfy any
 	if s.Topic != "" {
-		ntfy = ntfyBase + s.Topic
+		ntfy = s.ntfyURL()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ntfy_url": ntfy})
+}
+
+// ntfyURL is "<NtfyBase>/<Topic>" with exactly one slash between them, whether
+// or not NtfyBase ends in one. Both /api/config and the server-side push use it.
+func (s *Server) ntfyURL() string {
+	return strings.TrimRight(s.NtfyBase, "/") + "/" + s.Topic
 }
 
 // ---- brain proxy -----------------------------------------------------------

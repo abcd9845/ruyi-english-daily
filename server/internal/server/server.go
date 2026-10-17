@@ -82,14 +82,18 @@ type Server struct {
 func New(d Deps) *Server {
 	s := &Server{Deps: d, srcRe: config.SourceRe(), allow: map[string]bool{}}
 	for _, x := range d.Sources {
-		s.allow[x] = true
+		if x != sets.LocalSource { // reserved for local test sets: never a brain source
+			s.allow[x] = true
+		}
 	}
 	if s.Bank == nil && s.Brain != nil {
 		s.Bank = s.Brain
 	}
 	s.auto = map[string]bool{}
 	for _, x := range d.AutoSources {
-		s.auto[x] = true
+		if x != sets.LocalSource {
+			s.auto[x] = true
+		}
 	}
 	if s.AutoTTL <= 0 {
 		s.AutoTTL = 6 * time.Hour
@@ -207,6 +211,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.need(w, r, http.MethodGet, s.authed(s.autoNew))
+		case strings.HasSuffix(rest, "/check"):
+			id := strings.TrimSuffix(rest, "/check")
+			s.need(w, r, http.MethodPost, s.authed(func(w http.ResponseWriter, r *http.Request) { s.checkLocal(w, r, id) }))
 		case strings.HasSuffix(rest, "/grade"):
 			id := strings.TrimSuffix(rest, "/grade")
 			s.need(w, r, http.MethodPost, s.authed(func(w http.ResponseWriter, r *http.Request) { s.grade(w, r, id) }))

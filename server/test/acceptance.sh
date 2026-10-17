@@ -382,7 +382,7 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(s):
         n = int(s.headers.get('Content-Length', 0)); b = s.rfile.read(n).decode('utf-8', 'replace')
         with open(sys.argv[2], 'a') as f:
-            f.write(json.dumps({"path": s.path, "auth": s.headers.get('Authorization'), "cookie": s.headers.get('Cookie'), "body": b}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"path": s.path, "auth": s.headers.get('Authorization'), "cookie": s.headers.get('Cookie'), "title": s.headers.get('Title'), "body": b}, ensure_ascii=False) + "\n")
         s.send_response(200); s.end_headers(); s.wfile.write(b'{}')
     def log_message(self, *a): pass
 http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
@@ -792,6 +792,68 @@ for pair in "bearer token:$TOKEN" "grade token:$GTOKEN" "family code:$CODE"; do
 done
 for p in "$PID_S" "$PID_S2"; do kill "$p" 2>/dev/null; done
 
+section "T. Local smoke set (smoke-test): served and judged by the site itself, never touches the brain"
+# the deploy snippet itself is appended to the sets file here (jq), exactly as the DEPLOY doc says
+jq '.sets += [input]' "$WORK/sets.json" "$SRV/deploy/sets.smoke-entry.json" > "$WORK/sets-t.json"
+start_mock mockT 18260 "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "http://127.0.0.1:18260/_mock/stats"
+TENV=("RUYI_SETS_FILE=$WORK/sets-t.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_NTFY_RETRY_DELAY=300ms" "RUYI_ATTEMPTS_DIR=$WORK/att-T" "RUYI_GRADE_MAX_PER_HOUR=100" "RUYI_AUTO_SOURCES=$PSRC" "RUYI_AUTO_TTL=60s")
+start_site T 18261 "http://127.0.0.1:18260" "${TENV[@]}"; TA="http://127.0.0.1:18261"; wait_http "$TA/healthz"
+sleep 0.6   # the startup lookup probe (read-only) has happened; count from here
+post_login t1 "$TA" "$CODE" -c "$WORK/jarT"
+mtotal() { curl -s "http://127.0.0.1:18260/_mock/stats" | jq -r '[.[]|numbers]|add // 0'; }
+T0=$(mtotal)
+get s "$TA/api/practice/smoke-test" -b "$WORK/jarT"; expect "T1 GET /api/practice/smoke-test -> 200, local:true, 1 question" "$CODE_HTTP $(jq -c '[.local,(.items|length),.items[0].qref]' "$WORK/resp/s.b")" '200 [true,1,"smoke:q1"]'
+grep -qi -e '"answer' -e 'explanation' -e 'solution' "$WORK/resp/s.b" && bad "T2 response mentions an answer-like key" || ok "T2 no answer / explanation / solution key anywhere in the response"
+grep -q '测试题，随便填' "$WORK/resp/s.b" && ok "T3 the stem says 测试题，随便填" || bad "T3 stem marker"
+CODE_HTTP=$(curl -sS -o "$WORK/resp/c.b" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"answers":[{"qref":"smoke:q1","answer":"B"}]}' -b "$WORK/jarT" "$TA/api/practice/smoke-test/check")
+expect "T4 /check: right choice -> graded, correct:true; response has no answer key" "$CODE_HTTP $(jq -c '[.test,.results[0].status,.results[0].correct]' "$WORK/resp/c.b") $(grep -ci '"answer' "$WORK/resp/c.b")" '200 [true,"graded",true] 0'
+CODE_HTTP=$(curl -sS -o "$WORK/resp/c.b" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"answers":[{"qref":"smoke:q1","answer":"A"}]}' -b "$WORK/jarT" "$TA/api/practice/smoke-test/check")
+expect "T5 /check: wrong choice -> correct:false" "$CODE_HTTP $(jq -c '.results[0].correct' "$WORK/resp/c.b")" '200 false'
+CODE_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"answers":[{"qref":"example.set:math:1","answer":["1","2","3"]}]}' -b "$WORK/jarT" "$TA/api/practice/demo-1/check")
+expect "T6 /check on a real set -> 404" "$CODE_HTTP" 404
+CODE_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"answers":[{"qref":"smoke:q1","answer":"B"}]}' "$TA/api/practice/smoke-test/check"); expect "T7 /check anonymous -> 401" "$CODE_HTTP" 401
+N0=$(ntfy_n)
+CT1=33333333-3333-4333-8333-333333333331
+gpost t "$TA" smoke-test "$(printf '{"client_attempt_id":"%s","answers":[{"qref":"smoke:q1","answer":"B"}]}' $CT1)" -b "$WORK/jarT"
+expect "T8 submit -> 200 archive_only, brain_note test_set, test:true, nothing recorded" "$CODE_HTTP $(jq -c '[.mode,.brain_note,.test,.brain_recorded,.recorded_count,.archived,.notify,.results[0].status,.results[0].correct,.results[0].recorded]' "$WORK/resp/t.b")" '200 ["archive_only","test_set",true,false,0,true,"sent","graded",true,false]'
+expect "T9 the brain got 0 requests of any kind (grade token IS configured; list/lookup/grade/pick/media all 0)" "$(( $(mtotal) - T0 ))" 0
+expect "T10 archive line has test:true, mode archive_only, brain_note test_set, source local.smoke" "$(tail -1 "$WORK/att-T/attempts.jsonl" | jq -c '[.test,.mode,.brain_note,.source,.set_id,.items[0].recorded]')" '[true,"archive_only","test_set","local.smoke","smoke-test",false]'
+expect "T11 one ntfy post" "$(( $(ntfy_n) - N0 ))" 1
+python3 - "$WORK/ntfy.jsonl" > "$WORK/resp/ntfy_t.txt" <<'PY'
+import sys, json, email.header
+last = [json.loads(l) for l in open(sys.argv[1]) if l.strip()][-1]
+t = str(email.header.make_header(email.header.decode_header(last["title"])))
+body = last["body"]
+print(json.dumps({"title_has_tag": t.startswith("【测试】"), "title_ascii_on_wire": all(ord(c) < 127 for c in last["title"]), "body_starts_tag": body.startswith("【测试】"), "body_test_true": '"test":true' in body, "says_not_in_brain": "未记入大脑" in body}, ensure_ascii=False))
+PY
+expect "T12 ntfy: Title starts with 【测试】 (RFC 2047 on the wire), body starts with 【测试】, JSON has test:true, says 未记入大脑" "$(cat "$WORK/resp/ntfy_t.txt")" '{"title_has_tag": true, "title_ascii_on_wire": true, "body_starts_tag": true, "body_test_true": true, "says_not_in_brain": true}'
+# a real set next to it is unchanged: graded by the brain, plain ntfy title, no test fields
+N1=$(ntfy_n); T1=$(mtotal)
+gpost t "$TA" demo-1 "$(mkbody 33333333-3333-4333-8333-333333333332)" -b "$WORK/jarT"
+expect "T13 real set on the same server: graded by the brain, no test key in the response" "$CODE_HTTP $(jq -c '[.mode,(has("test"))]' "$WORK/resp/t.b")" '200 ["graded",false]'
+expect "T14 real set: archive line has no test key, ntfy title is the plain 'Ruyi practice', no 【测试】" "$(tail -1 "$WORK/att-T/attempts.jsonl" | jq -c 'has("test")') $(tail -1 "$WORK/ntfy.jsonl" | jq -r '.title') $(tail -1 "$WORK/ntfy.jsonl" | jq -r '.body' | grep -c '测试')" 'false Ruyi practice 0'
+[ "$(mtotal)" -gt "$T1" ] && ok "T15 the real set did use the brain (sanity: the counter works)" || bad "T15 sanity"
+# not auto-selectable
+get s "$TA/api/practice/new?source=local.smoke&n=1" -b "$WORK/jarT"; expect "T16 /api/practice/new?source=local.smoke -> 400" "$CODE_HTTP" 400
+get s "$TA/api/practice/new?source=$PSRC&n=5&order=seq" -b "$WORK/jarT"; expect "T17 /api/practice/new picks only from the brain source (id auto-…, no smoke qrefs)" "$CODE_HTTP $(jq -r '.set_id|startswith("auto-")' "$WORK/resp/s.b")" '200 true'
+SETID=$(jq -r .set_id "$WORK/resp/s.b"); get s "$TA/api/practice/$SETID" -b "$WORK/jarT"; grep -q 'smoke:' "$WORK/resp/s.b" && bad "T18 an auto set contains a smoke qref" || ok "T18 the auto set has no smoke qref"
+# config refuses the reserved source
+for V in RUYI_AUTO_SOURCES RUYI_ALLOWED_SOURCES; do
+  run_bad x "${FULL[@]}" "$V=local.smoke"
+  [ "$RC" != 0 ] && echo "$OUT" | grep -q "$V" && ok "T19 $V=local.smoke -> refused at startup, names $V" || bad "T19 $V" "rc=$RC out=$OUT"
+done
+# bad local sets fail at load
+printf '{"sets":[{"id":"demo-9","local":true,"title":"t","questions":[{"qref":"smoke:SECRET-QREF-MARK","qtype":"single_choice","stem":"s","options":[{"key":"A","text":"1"},{"key":"B","text":"2"}],"answer":["A"]}]}]}' > "$WORK/badlocal.json"
+run_bad x "${FULL[@]}" RUYI_SETS_FILE="$WORK/badlocal.json"
+[ "$RC" != 0 ] && echo "$OUT" | grep -q RUYI_SETS_FILE && ! echo "$OUT" | grep -q -e SECRET-QREF-MARK && ok "T20 local set with a non-smoke-/test- id -> refused, names RUYI_SETS_FILE, no content echoed" || bad "T20" "rc=$RC out=$OUT"
+OUT=$(env -i PATH="$PATH" "${FULL[@]}" RUYI_SETS_FILE="$SRV/deploy/sets.smoke.example.json" RUYI_LISTEN=127.0.0.1:18216 timeout 2 "$BIN" 2>&1); RC=$?
+[ "$RC" = 124 ] && ok "T21 deploy/sets.smoke.example.json is accepted at startup" || bad "T21" "rc=$RC $OUT"
+cat "$WORK"/T.log > "$WORK/tlogs"
+for pair in "family code:$CODE" "grade token:$GTOKEN" "ntfy topic:$TOPIC" "bearer token:$TOKEN"; do
+  grep -qF -- "${pair#*:}" "$WORK/tlogs" && bad "T22 ${pair%%:*} appears in the T site log" || ok "T22 ${pair%%:*} not in the T site log"
+done
+kill "$PID_T" "$PID_mockT" 2>/dev/null
+
 if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/dev/null; then
   section "L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow"
   start_site BR 18199 "http://127.0.0.1:$PORT_MOCK"; wait_http "http://127.0.0.1:18199/healthz"
@@ -837,6 +899,15 @@ if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/d
   cat "$WORK/browser7.out" | tee -a "$RESULTS"
   [ "$BRC" = 0 ] && ok "L8 grade endpoint not deployed: the page says 暂未判分 / 大脑接口还没准备好, never 已提交到大脑 (all passed)" || bad "L8 not-ready browser checks"
   kill "$PID_PN" 2>/dev/null
+  start_mock mockSM 18262 "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "http://127.0.0.1:18262/_mock/stats"
+  start_site SM 18263 "http://127.0.0.1:18262" "RUYI_SETS_FILE=$WORK/sets-t.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-SM" "RUYI_GRADE_MAX_PER_HOUR=200"; wait_http "http://127.0.0.1:18263/healthz"
+  sleep 0.6; SM0=$(curl -s "http://127.0.0.1:18262/_mock/stats" | jq -r '[.[]|numbers]|add // 0'); NS0=$(ntfy_n)
+  BROWSER_FLOW=smoke BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18263" "$SHOTS" > "$WORK/browser8.out" 2>&1; BRC=$?
+  cat "$WORK/browser8.out" | tee -a "$RESULTS"
+  [ "$BRC" = 0 ] && ok "L9 local smoke set in headless Chrome: answer, 检查, submit -> archive-only wording, never 已提交到大脑 (all passed)" || bad "L9 smoke browser checks"
+  expect "L9b the brain got 0 requests during the whole browser run (grade token configured)" "$(( $(curl -s "http://127.0.0.1:18262/_mock/stats" | jq -r '[.[]|numbers]|add // 0') - SM0 ))" 0
+  expect "L9c the browser run was archived with test:true and pushed once, with 【测试】" "$(tail -1 "$WORK/att-SM/attempts.jsonl" | jq -c '.test') $(( $(ntfy_n) - NS0 )) $(tail -1 "$WORK/ntfy.jsonl" | jq -r '.body' | head -c 12)" 'true 1 【测试】'
+  kill "$PID_SM" "$PID_mockSM" 2>/dev/null
 fi
 
 kill "$PID_P" 2>/dev/null

@@ -202,6 +202,10 @@ func Load(getenv func(string) string) (*Config, error) {
 				bad("RUYI_ALLOWED_SOURCES", "contains an invalid source key")
 				break
 			}
+			if s == sets.LocalSource {
+				bad("RUYI_ALLOWED_SOURCES", "contains a source reserved for local test sets")
+				break
+			}
 			c.AllowedSource = append(c.AllowedSource, s)
 		}
 	}
@@ -265,6 +269,10 @@ func Load(getenv func(string) string) (*Config, error) {
 			x = strings.TrimSpace(x)
 			if !sourceRe.MatchString(x) {
 				bad("RUYI_AUTO_SOURCES", "contains an invalid source key")
+				break
+			}
+			if x == sets.LocalSource {
+				bad("RUYI_AUTO_SOURCES", "contains a source reserved for local test sets")
 				break
 			}
 			c.AutoSources = append(c.AutoSources, x)

@@ -51,6 +51,10 @@ func (s *Server) practice(w http.ResponseWriter, r *http.Request, id string) {
 		writeErr(w, http.StatusNotFound, "unknown_set", "没有这套题")
 		return
 	}
+	if set.Local {
+		s.practiceLocal(w, set)
+		return
+	}
 	byRef, missingRefs, err := s.Bank.LookupByQrefs(r.Context(), set.Source, set.QRefs)
 	if err != nil {
 		s.brainErr(w, "practice", err)
@@ -103,6 +107,25 @@ func (s *Server) practice(w http.ResponseWriter, r *http.Request, id string) {
 	})
 }
 
+// practiceLocal serves a local test set from its inline questions: the brain is
+// not contacted, and the answer field of the question is never copied out.
+func (s *Server) practiceLocal(w http.ResponseWriter, set *sets.Set) {
+	items := make([]practiceItem, 0, len(set.Questions))
+	for _, q := range set.Questions {
+		it := practiceItem{
+			Ordinal: len(items) + 1, QRef: q.QRef, QType: q.QType, StemMD: q.Stem,
+			Blanks: practice.CountBlanks(q.Stem), FigureStatus: "none", Media: []mediaOut{},
+		}
+		for _, o := range q.Options {
+			it.Options = append(it.Options, practiceOption{Key: o.Key, TextMD: o.Text})
+		}
+		items = append(items, it)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"set_id": set.ID, "title": set.Title, "items": items, "missing_qrefs": []string{}, "local": true,
+	})
+}
+
 // getSet finds a configured set, or a live generated one ("auto-…").
 func (s *Server) getSet(id string) (*sets.Set, bool) {
 	if set, ok := s.Sets.Get(id); ok {
@@ -128,7 +151,7 @@ func (s *Server) getSet(id string) (*sets.Set, bool) {
 func (s *Server) autoNew(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	source := q.Get("source")
-	if len(source) > 128 || !s.srcRe.MatchString(source) || !s.auto[source] {
+	if len(source) > 128 || !s.srcRe.MatchString(source) || source == sets.LocalSource || !s.auto[source] {
 		writeErr(w, http.StatusBadRequest, "source_not_allowed", "这个题库不能自动出题")
 		return
 	}

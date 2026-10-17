@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,8 @@ import (
 )
 
 const source = "math-intake.zz-yuekao-numberline-4y"
+
+var mockCIDRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,160}$`)
 
 // practiceSource is a second, purely synthetic source with 5 math questions in
 // the shape of the real exam list (Markdown + LaTeX stems, ________ blanks,
@@ -380,25 +383,219 @@ func main() {
 		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 		_, _ = w.Write(b)
 	})
-	// Draft grading endpoint (see internal/brain/grade.go). Synthetic answer keys
-	// for the practiceSource questions live ONLY here. MOCK_GRADE=off -> 404,
-	// MOCK_GRADE_FAIL=1 -> 500. Idempotent on client_attempt_id.
+	// ---- contract endpoints (docs: brain "practice-site automatic plan") -------
+	// Switches: MOCK_GRADE / MOCK_LOOKUP / MOCK_PICK = off (plain 404, like a
+	// route that is not deployed) | 501 | fail (500); changeable at run time with
+	// POST /_mock/switch?name=grade|lookup|pick&v=…
+	switches := map[string]string{"grade": os.Getenv("MOCK_GRADE"), "lookup": os.Getenv("MOCK_LOOKUP"), "pick": os.Getenv("MOCK_PICK")}
+	if os.Getenv("MOCK_GRADE_FAIL") == "1" {
+		switches["grade"] = "fail"
+	}
+	var swmu sync.Mutex
+	// blocked answers true (and has written the reply) if the endpoint is switched off/failing.
+	blocked := func(name string, w http.ResponseWriter, r *http.Request) bool {
+		swmu.Lock()
+		v := switches[name]
+		swmu.Unlock()
+		switch v {
+		case "off":
+			http.NotFound(w, r)
+		case "501":
+			apiErr(w, 501, "not_implemented")
+		case "fail":
+			apiErr(w, 500, "internal")
+		default:
+			return false
+		}
+		return true
+	}
+	mux.HandleFunc("POST /_mock/switch", func(w http.ResponseWriter, r *http.Request) {
+		n := r.URL.Query().Get("name")
+		if _, ok := switches[n]; !ok {
+			http.Error(w, "bad name", 400)
+			return
+		}
+		swmu.Lock()
+		switches[n] = r.URL.Query().Get("v")
+		swmu.Unlock()
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	// qref index over every question the mock knows.
+	known := map[string]question{}
+	for _, q := range practiceQuestions() {
+		known[q.QRef] = q
+	}
+	for _, q := range qs {
+		known[q.QRef] = q
+	}
+	var gmu sync.Mutex // guards revs, keys, writes, caps, attempt ids
+	revs := map[string]int{}
+	curRev := func(q string) int {
+		if v, ok := revs[q]; ok {
+			return v
+		}
+		return 1
+	}
+	mux.HandleFunc("POST /_mock/bump-rev", func(w http.ResponseWriter, r *http.Request) {
+		gmu.Lock()
+		defer gmu.Unlock()
+		q := r.URL.Query().Get("qref")
+		revs[q] = curRev(q) + 1
+		_, _ = w.Write([]byte(strconv.Itoa(revs[q]) + "\n"))
+	})
+
+	// POST /v1/questions/lookup: no answers, with rev / media / figure_status; missing[] for unknown qrefs.
+	mux.HandleFunc("POST /v1/bank/questions/lookup", func(w http.ResponseWriter, r *http.Request) {
+		bump("lookup")
+		if blocked("lookup", w, r) {
+			return
+		}
+		if !bearer(r) {
+			apiErr(w, 401, "unauthorized")
+			return
+		}
+		var req struct {
+			QRefs []string `json:"qrefs"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil || len(req.QRefs) == 0 || len(req.QRefs) > 100 {
+			apiErr(w, 400, "validation_failed")
+			return
+		}
+		type lq struct {
+			question
+			Rev int `json:"rev"`
+		}
+		items := []lq{}
+		missing := []string{}
+		gmu.Lock()
+		for _, ref := range req.QRefs {
+			q, ok := known[ref]
+			if !ok {
+				missing = append(missing, ref)
+				continue
+			}
+			q.Answer, q.Explanation, q.Solution = "", "", "" // lookup never carries answers
+			items = append(items, lq{q, curRev(ref)})
+		}
+		gmu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "missing": missing})
+	})
+
+	// GET /v1/brain/pick-practice?source=&n=&mode=due_first|wrong_only&brain=ruyi
+	mux.HandleFunc("GET /v1/brain/pick-practice", func(w http.ResponseWriter, r *http.Request) {
+		bump("pick")
+		if blocked("pick", w, r) {
+			return
+		}
+		if !bearer(r) {
+			apiErr(w, 401, "unauthorized")
+			return
+		}
+		qv := r.URL.Query()
+		mode, src := qv.Get("mode"), qv.Get("source")
+		n, nerr := strconv.Atoi(qv.Get("n"))
+		if qv.Get("brain") != "ruyi" || (mode != "due_first" && mode != "wrong_only") || nerr != nil || n < 1 || n > 50 {
+			apiErr(w, 400, "validation_failed")
+			return
+		}
+		type pick struct {
+			QRef    string   `json:"qref"`
+			Number  string   `json:"number"`
+			Origin  string   `json:"origin"`
+			Reasons []string `json:"reasons"`
+		}
+		mk := func(ref, origin string, reasons ...string) pick {
+			return pick{QRef: ref, Number: known[ref].Number, Origin: origin, Reasons: reasons}
+		}
+		var all []pick
+		switch src {
+		case practiceSource:
+			if mode == "wrong_only" {
+				all = []pick{mk("example.set:math:1", "wrong", "unresolved_wrong"),
+					mk("example.set:math:3", "wrong", "unresolved_wrong", "deferred:pending_key"),
+					mk("example.set:math:4", "wrong", "unresolved_wrong", "deferred:unsupported_qtype")}
+			} else {
+				all = []pick{mk("example.set:math:2", "review", "due_review"),
+					mk("example.set:math:1", "wrong", "unresolved_wrong"),
+					mk("example.set:math:5", "review", "due_review")}
+			}
+		case source:
+			ids := []int{3, 17, 5, 9, 12, 21}
+			origin, reason := "wrong", "unresolved_wrong"
+			if mode == "due_first" {
+				ids = []int{2, 3, 6, 17, 8}
+				origin, reason = "review", "due_review"
+			}
+			for _, i := range ids {
+				ref := fmt.Sprintf("math:%s:q%02d", source, i)
+				if i == 17 {
+					all = append(all, mk(ref, origin, reason, "deferred:figure_missing"))
+				} else {
+					all = append(all, mk(ref, origin, reason))
+				}
+			}
+		}
+		if len(all) > n {
+			all = all[:n]
+		}
+		if all == nil {
+			all = []pick{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": all})
+	})
+
+	// POST /v1/bank/grade (grade token, NOT the bank:read token).
 	gradeToken := os.Getenv("MOCK_GRADE_TOKEN")
 	if gradeToken == "" {
 		gradeToken = "grade-" + token
 	}
-	var gmu sync.Mutex
-	gradeStore := map[string][]byte{}
 	var lastGrade []byte
-	keys := map[string]any{
+	type stored struct {
+		answer    string // canonical JSON of the answer
+		status    string
+		correct   *bool
+		attemptID int64
+		recorded  bool
+	}
+	idem := map[string]stored{}  // ps:<client_attempt_id>:<qref>
+	dayCount := map[string]int{} // <day>|<qref> -> writes
+	keys := map[string]any{      // synthetic answer keys; they exist ONLY here
 		"example.set:math:1": []any{"1", "2", "3"},
 		"example.set:math:2": "B",
 		"example.set:math:5": "B",
 	}
+	for i := 1; i <= 10; i++ {
+		keys[fmt.Sprintf("math:%s:q%02d", source, i)] = "B"
+	}
+	mux.HandleFunc("POST /_mock/set-key", func(w http.ResponseWriter, r *http.Request) {
+		var v any
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&v)
+		gmu.Lock()
+		keys[r.URL.Query().Get("qref")] = v
+		gmu.Unlock()
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	var attemptSeq int64 = 1000
+	decide := func(ref string, ans any, a string) (status string, correct *bool) {
+		if strings.Contains(a, "~review~") {
+			return "needs_review", nil
+		}
+		switch {
+		case ref == "example.set:math:4", ref == fmt.Sprintf("math:%s:q17", source):
+			return "unsupported", nil
+		}
+		if want, ok := keys[ref]; ok {
+			wnt, _ := json.Marshal(want)
+			c := a == string(wnt)
+			return "graded", &c
+		}
+		return "pending_key", nil
+	}
 	mux.HandleFunc("POST /v1/bank/grade", func(w http.ResponseWriter, r *http.Request) {
 		bump("grade")
-		if os.Getenv("MOCK_GRADE") == "off" {
-			http.NotFound(w, r)
+		if blocked("grade", w, r) {
 			return
 		}
 		if r.Header.Get("Authorization") != "Bearer "+gradeToken {
@@ -408,60 +605,128 @@ func main() {
 			apiErr(w, 403, "forbidden")
 			return
 		}
-		if os.Getenv("MOCK_GRADE_FAIL") == "1" {
-			apiErr(w, 500, "internal")
-			return
-		}
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		var req struct {
-			CID    string `json:"client_attempt_id"`
-			SetID  string `json:"set_id"`
-			Source string `json:"source"`
-			Items  []struct {
-				QRef   string `json:"qref"`
-				Answer any    `json:"answer"`
+			Brain string `json:"brain"`
+			CID   string `json:"client_attempt_id"`
+			Items []struct {
+				QRef        string `json:"qref"`
+				Answer      any    `json:"answer"`
+				Rev         *int   `json:"rev"`
+				AttemptKind string `json:"attempt_kind"`
+				AnsweredAt  string `json:"answered_at"`
+				SessionRef  string `json:"session_ref"`
 			} `json:"items"`
 		}
-		if json.Unmarshal(body, &req) != nil || req.CID == "" {
-			apiErr(w, 400, "invalid_request")
+		dec := json.NewDecoder(bytes.NewReader(body))
+		bad := func() { apiErr(w, 400, "validation_failed") }
+		if dec.Decode(&req) != nil || req.Brain != "ruyi" || !mockCIDRe.MatchString(req.CID) || len(req.Items) == 0 || len(req.Items) > 50 {
+			bad()
 			return
+		}
+		seen := map[string]bool{}
+		canon := make([]string, len(req.Items))
+		for i, it := range req.Items {
+			if it.QRef == "" || seen[it.QRef] || it.Answer == nil || (it.AttemptKind != "" && it.AttemptKind != "correction" && it.AttemptKind != "variant") {
+				bad()
+				return
+			}
+			seen[it.QRef] = true
+			switch a := it.Answer.(type) {
+			case string:
+			case []any:
+				if len(a) > 10 {
+					bad()
+					return
+				}
+			default:
+				bad()
+				return
+			}
+			if it.AnsweredAt != "" {
+				if _, err := time.Parse(time.RFC3339, it.AnsweredAt); err != nil {
+					bad()
+					return
+				}
+			}
+			c, _ := json.Marshal(it.Answer)
+			canon[i] = string(c)
 		}
 		gmu.Lock()
 		defer gmu.Unlock()
 		lastGrade = body
-		if prev, ok := gradeStore[req.CID]; ok {
-			bump("grade_replay")
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(prev)
-			return
-		}
-		type outItem struct {
-			QRef    string `json:"qref"`
-			Status  string `json:"status"`
-			Correct *bool  `json:"correct"`
-		}
-		var items []outItem
+		// 1. any unknown qref: 404 for the whole batch, nothing written
 		for _, it := range req.Items {
-			o := outItem{QRef: it.QRef, Status: "pending_key"}
-			switch it.QRef {
-			case "example.set:math:4":
-				o.Status = "unsupported"
-			case "example.set:math:3":
-			default:
-				if want, ok := keys[it.QRef]; ok {
-					a, _ := json.Marshal(it.Answer)
-					wnt, _ := json.Marshal(want)
-					c := string(a) == string(wnt)
-					o.Status, o.Correct = "graded", &c
+			if _, ok := known[it.QRef]; !ok {
+				apiErr(w, 404, "unknown_qref")
+				return
+			}
+		}
+		// 2. rev must be the current one
+		for _, it := range req.Items {
+			if it.Rev != nil && *it.Rev != curRev(it.QRef) {
+				apiErr(w, 409, "rev_mismatch")
+				return
+			}
+		}
+		// 3. idempotency: same id+qref with another answer/result is a conflict
+		type plan struct {
+			status string
+			corr   *bool
+			prev   *stored
+		}
+		plans := make([]plan, len(req.Items))
+		for i, it := range req.Items {
+			st, c := decide(it.QRef, it.Answer, canon[i])
+			plans[i] = plan{status: st, corr: c}
+			if prev, ok := idem["ps:"+req.CID+":"+it.QRef]; ok {
+				p := prev
+				plans[i].prev = &p
+				if prev.answer != canon[i] || prev.status != st || !sameCorrect(prev.correct, c) {
+					apiErr(w, 409, "idempotency_conflict")
+					return
 				}
 			}
-			items = append(items, o)
 		}
-		resp, _ := json.Marshal(map[string]any{"client_attempt_id": req.CID, "attempt_id": "mock-" + req.CID[:8], "recorded": true, "items": items})
-		gradeStore[req.CID] = resp
+		// 4. daily cap: a question is written at most 3 times a day (new writes only)
+		day := now().UTC().Format("2006-01-02")
+		for i, it := range req.Items {
+			if plans[i].prev == nil && plans[i].status != "unsupported" && dayCount[day+"|"+it.QRef] >= 3 {
+				apiErr(w, 429, "rate_limited")
+				return
+			}
+		}
+		// 5. write
+		type outItem struct {
+			QRef      string `json:"qref"`
+			Status    string `json:"status"`
+			Correct   *bool  `json:"correct,omitempty"`
+			AttemptID int64  `json:"attempt_id,omitempty"`
+			Recorded  bool   `json:"recorded"`
+			Duplicate bool   `json:"duplicate"`
+		}
+		out := make([]outItem, len(req.Items))
+		for i, it := range req.Items {
+			p := plans[i]
+			o := outItem{QRef: it.QRef, Status: p.status, Correct: p.corr}
+			switch {
+			case p.prev != nil:
+				o.AttemptID, o.Recorded, o.Duplicate = p.prev.attemptID, p.prev.recorded, true
+				bump("grade_dup_item")
+			case p.status == "unsupported":
+				idem["ps:"+req.CID+":"+it.QRef] = stored{answer: canon[i], status: p.status}
+			default:
+				attemptSeq++
+				o.AttemptID, o.Recorded = attemptSeq, true
+				dayCount[day+"|"+it.QRef]++
+				idem["ps:"+req.CID+":"+it.QRef] = stored{canon[i], p.status, p.corr, attemptSeq, true}
+				bump("grade_new_item")
+			}
+			out[i] = o
+		}
 		bump("grade_new")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(resp)
+		_ = json.NewEncoder(w).Encode(map[string]any{"client_attempt_id": req.CID, "items": out})
 	})
 	mux.HandleFunc("GET /_mock/last-grade", func(w http.ResponseWriter, r *http.Request) {
 		gmu.Lock()
@@ -519,4 +784,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "mockbrain:", err)
 		os.Exit(1)
 	}
+}
+
+func sameCorrect(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

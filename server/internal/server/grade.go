@@ -40,18 +40,30 @@ type gradeResult struct {
 	QRef    string `json:"qref"`
 	Status  string `json:"status"`
 	Correct *bool  `json:"correct"`
+	// Recorded is true only if the brain itself confirmed it recorded this
+	// answer. AttemptID is the brain's integer id; Duplicate marks a re-delivery
+	// of an answer the brain already had.
+	Recorded  bool  `json:"recorded"`
+	AttemptID int64 `json:"attempt_id,omitempty"`
+	Duplicate bool  `json:"duplicate,omitempty"`
 }
 
 type gradeOut struct {
-	ClientAttemptID string           `json:"client_attempt_id"`
-	SetID           string           `json:"set_id"`
-	Mode            string           `json:"mode"`
-	BrainRecorded   bool             `json:"brain_recorded"`
-	Results         []gradeResult    `json:"results"`
-	Summary         attempts.Summary `json:"summary"`
-	Archived        bool             `json:"archived"`
-	Notify          string           `json:"notify,omitempty"` // sent | retrying | off | unknown
-	Replayed        bool             `json:"replayed,omitempty"`
+	ClientAttemptID string `json:"client_attempt_id"`
+	SetID           string `json:"set_id"`
+	// Mode is "graded" when the brain replied (verdicts may be shown) and
+	// "archive_only" when it was not used (BrainNote says why).
+	Mode string `json:"mode"`
+	// BrainRecorded is true only if the brain recorded at least one answer;
+	// RecordedCount says how many. The page says "submitted to the brain" only then.
+	BrainRecorded bool             `json:"brain_recorded"`
+	RecordedCount int              `json:"recorded_count"`
+	BrainNote     string           `json:"brain_note,omitempty"` // not_configured | not_ready | unavailable | not_sent
+	Results       []gradeResult    `json:"results"`
+	Summary       attempts.Summary `json:"summary"`
+	Archived      bool             `json:"archived"`
+	Notify        string           `json:"notify,omitempty"` // sent | retrying | off | unknown
+	Replayed      bool             `json:"replayed,omitempty"`
 }
 
 // ---- idempotency by client_attempt_id --------------------------------------
@@ -115,13 +127,45 @@ func (d *idemStore) abort(id string, e *idemEntry) {
 
 // ---- request validation ------------------------------------------------------
 
+type gradeAnswer struct {
+	QRef   string          `json:"qref"`
+	Answer json.RawMessage `json:"answer"`
+	// Rev: the question revision the page was served (practice item "rev").
+	Rev *int `json:"rev"`
+	// AttemptKind: optional "correction" | "variant", per answer.
+	AttemptKind string `json:"attempt_kind"`
+}
+
 type gradeReq struct {
 	ClientAttemptID string `json:"client_attempt_id"`
-	Answers         []struct {
-		QRef   string          `json:"qref"`
-		Answer json.RawMessage `json:"answer"`
-	} `json:"answers"`
+	// AttemptKind is the default for answers that do not carry their own.
+	AttemptKind string `json:"attempt_kind"`
+	// AnsweredAt (RFC 3339) is fixed by the page together with the
+	// client_attempt_id, so a retry of the same id carries the same value (the
+	// brain compares it on idempotent replays). Out-of-window values are not forwarded.
+	AnsweredAt string        `json:"answered_at"`
+	Answers    []gradeAnswer `json:"answers"`
 }
+
+const (
+	answeredAtPast   = 7 * 24 * time.Hour
+	answeredAtFuture = 5 * time.Minute
+	maxRev           = 1_000_000_000
+)
+
+// Page-facing messages for the brain's error replies.
+const (
+	msgDailyCap     = "今天这题提交次数到上限了（同一题每天最多记 3 次），明天再试。答案还在。"
+	msgRevMismatch  = "题目已更新，请刷新页面后再提交。你的答案还在。"
+	msgIdemConflict = "这次提交的编号和上一次对不上，请再点一次「提交」（会换新编号）。"
+	msgUnknownQref  = "有题目在大脑里找不到了，请刷新页面；还不行请告诉家长。"
+)
+
+// unknownQrefCodes are the brain error codes that mean "a qref of the batch does
+// not exist". Any other 404 from the grade URL is read as "endpoint not
+// deployed" and degrades to archive-only (the answers are kept, nothing is
+// claimed as recorded).
+var unknownQrefCodes = map[string]bool{"unknown_qref": true, "qref_not_found": true, "question_not_found": true}
 
 type qshape struct {
 	kind    string // single | multi | fill | free
@@ -272,6 +316,25 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		writeErr(w, http.StatusBadRequest, "bad_answers", "提交的题数不对")
 		return
 	}
+	if len(req.Answers) > brain.MaxGradeItems {
+		writeErr(w, http.StatusBadRequest, "too_many_items", "一次最多提交 50 题")
+		return
+	}
+	if !validKind(req.AttemptKind) {
+		writeErr(w, http.StatusBadRequest, "bad_attempt_kind", "提交类型不对")
+		return
+	}
+	var answeredAt time.Time
+	if req.AnsweredAt != "" {
+		t, err := time.Parse(time.RFC3339, req.AnsweredAt)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_answered_at", "作答时间格式不对")
+			return
+		}
+		if now := s.now(); !t.After(now.Add(answeredAtFuture)) && t.After(now.Add(-answeredAtPast)) {
+			answeredAt = t.UTC()
+		}
+	}
 
 	found, _, err := s.Bank.LookupByQrefs(r.Context(), set.Source, set.QRefs)
 	if err != nil {
@@ -285,39 +348,85 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 	type given struct {
 		qref string
 		ans  any
+		rev  int
+		kind string
+		skip bool // not sent to the brain (contract limit); archived as unsupported
 	}
 	answered := map[string]given{}
 	for _, a := range req.Answers {
-		q, ok := found[a.QRef]
-		if !inSet[a.QRef] || !ok {
+		if !inSet[a.QRef] {
 			writeErr(w, http.StatusBadRequest, "qref_not_in_set", "有题目不属于这套练习")
+			return
+		}
+		q, ok := found[a.QRef]
+		if !ok {
+			writeErr(w, http.StatusNotFound, "unknown_qref", msgUnknownQref)
 			return
 		}
 		if _, dup := answered[a.QRef]; dup {
 			writeErr(w, http.StatusBadRequest, "duplicate_qref", "同一题提交了两次")
 			return
 		}
-		ans, empty, ok := parseAnswer(shapeOf(q), a.Answer)
+		sh := shapeOf(q)
+		ans, empty, ok := parseAnswer(sh, a.Answer)
 		if !ok {
 			writeErr(w, http.StatusBadRequest, "bad_answer_shape", "作答格式和题型不匹配")
 			return
 		}
+		g := given{qref: a.QRef}
 		if !empty {
-			answered[a.QRef] = given{a.QRef, ans}
-		} else {
-			answered[a.QRef] = given{a.QRef, nil}
+			g.ans = ans
+			g.skip = sh.kind == "fill" && sh.blanks > brain.MaxBlanks
 		}
+		if a.Rev != nil {
+			if *a.Rev < 1 || *a.Rev > maxRev {
+				writeErr(w, http.StatusBadRequest, "bad_rev", "题目版本号不对")
+				return
+			}
+			g.rev = *a.Rev
+		}
+		if !validKind(a.AttemptKind) {
+			writeErr(w, http.StatusBadRequest, "bad_attempt_kind", "提交类型不对")
+			return
+		}
+		g.kind = a.AttemptKind
+		if g.kind == "" {
+			g.kind = req.AttemptKind
+		}
+		answered[a.QRef] = g
 	}
-	nAnswered := 0
+	nAnswered, nSend := 0, 0
 	for _, g := range answered {
 		if g.ans != nil {
 			nAnswered++
+			if !g.skip {
+				nSend++
+			}
 		}
 	}
 	if nAnswered == 0 {
 		writeErr(w, http.StatusBadRequest, "nothing_answered", "还没有作答")
 		return
 	}
+	// fingerprint of what is being submitted (answers, revs, kinds; not the time)
+	type sigItem struct {
+		Q string
+		A any
+		R int
+		K string
+	}
+	var sigItems []sigItem
+	for _, q := range set.QRefs {
+		if g, ok := answered[q]; ok {
+			sigItems = append(sigItems, sigItem{q, g.ans, g.rev, g.kind})
+		}
+	}
+	sigRaw, _ := json.Marshal(struct {
+		Set   string
+		Items []sigItem
+	}{set.ID, sigItems})
+	sigSum := sha256.Sum256(sigRaw)
+	sig := hex.EncodeToString(sigSum[:12])
 
 	// idempotency: the same client_attempt_id returns the stored result
 	e, owner := s.idem.begin(cid)
@@ -333,6 +442,12 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		if e.rec.SetID != set.ID {
 			writeErr(w, http.StatusConflict, "attempt_id_conflict", "提交编号已用于别的套")
+			return
+		}
+		if e.rec.Sig != "" && e.rec.Sig != sig {
+			// same id, different answers: the page must use a new id (contract: idempotency_conflict)
+			s.Log.Warn("same client_attempt_id with different answers refused", "set", set.ID)
+			writeIdemConflict(w)
 			return
 		}
 		out := outFromRecord(e.rec)
@@ -365,46 +480,82 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 	s.gradeSess.Fail(sk)
 	s.gradeIP.Fail(ik)
 
-	// grade at the brain; any failure degrades to archive-only
+	// grade at the brain; the brain's refusals map to page states, anything else
+	// (not configured, endpoint not deployed, down) degrades to archive-only
 	var items []brain.GradeItem
 	for _, q := range set.QRefs {
-		if g, ok := answered[q]; ok && g.ans != nil {
-			items = append(items, brain.GradeItem{QRef: q, Answer: g.ans})
+		if g, ok := answered[q]; ok && g.ans != nil && !g.skip {
+			items = append(items, brain.GradeItem{QRef: q, Answer: g.ans, Rev: g.rev, AttemptKind: g.kind, AnsweredAt: answeredAt, SessionRef: set.ID})
 		}
 	}
 	mode := modeArchive
+	note := "not_configured"
 	verdict := map[string]gradeResult{}
-	brainID := ""
-	gresp, gerr := s.Bank.Grade(r.Context(), brain.GradeRequest{ClientAttemptID: cid, SetID: set.ID, Source: set.Source, Items: items})
+	var gresp *brain.GradeResponse
+	var gerr error
+	if nSend == 0 {
+		gerr = errors.New("nothing to send") // every answer exceeds a contract limit: archive only
+		note = "not_sent"
+	} else {
+		gresp, gerr = s.Bank.Grade(r.Context(), brain.GradeRequest{ClientAttemptID: cid, Items: items})
+	}
 	switch {
 	case gerr == nil:
-		mode, brainID = modeGraded, gresp.BrainAttemptID
+		mode, note = modeGraded, ""
 		for _, g := range gresp.Results {
-			verdict[g.QRef] = gradeResult{QRef: g.QRef, Status: g.Status, Correct: g.Correct}
+			verdict[g.QRef] = gradeResult{QRef: g.QRef, Status: g.Status, Correct: g.Correct, Recorded: g.Recorded, AttemptID: g.AttemptID, Duplicate: g.Duplicate}
 		}
 	case errors.Is(gerr, brain.ErrGradeDisabled):
 		// configured off: nothing to log per request
 	default:
 		var be *brain.Error
-		kind := "unknown"
+		desc := "unknown"
 		if errors.As(gerr, &be) {
-			kind = be.Error() // fixed text + status + upstream error code only
+			desc = be.Error() // fixed text + status + upstream error code only
 		}
-		s.Log.Warn("grading unavailable; archive-only", "set", set.ID, "err", kind)
+		note = "unavailable"
+		if nSend == 0 {
+			note = "not_sent"
+		}
+		if be != nil {
+			switch {
+			case be.Kind == brain.KindRateLimited:
+				s.Log.Warn("brain refused the batch: rate limited", "set", set.ID, "err", desc)
+				writeErr(w, http.StatusTooManyRequests, "daily_cap", msgDailyCap)
+				return
+			case be.Kind == brain.KindConflict && be.Code == "rev_mismatch":
+				s.Log.Warn("brain refused the batch: question revision changed", "set", set.ID, "err", desc)
+				writeErr(w, http.StatusConflict, "rev_mismatch", msgRevMismatch)
+				return
+			case be.Kind == brain.KindConflict && be.Code == "idempotency_conflict":
+				s.Log.Warn("brain refused the batch: idempotency conflict (client bug path)", "set", set.ID, "err", desc)
+				writeIdemConflict(w)
+				return
+			case be.Kind == brain.KindNotFound && unknownQrefCodes[be.Code]:
+				s.Log.Warn("brain refused the batch: unknown qref", "set", set.ID, "err", desc)
+				writeErr(w, http.StatusNotFound, "unknown_qref", msgUnknownQref)
+				return
+			case be.Kind == brain.KindNotReady || be.Kind == brain.KindNotFound:
+				note = "not_ready"
+			}
+		}
+		s.Log.Warn("grading unavailable; archive-only", "set", set.ID, "note", note, "err", desc)
 	}
 
 	rec := &attempts.Record{
-		V: 1, ClientAttemptID: cid, SetID: set.ID, SetTitle: set.Title, Source: set.Source,
-		SubmittedAt: s.now().UTC(), Mode: mode, BrainAttemptID: brainID,
+		V: 2, ClientAttemptID: cid, SetID: set.ID, SetTitle: set.Title, Source: set.Source,
+		SubmittedAt: s.now().UTC(), Mode: mode, BrainNote: note, Sig: sig,
 		Client: attempts.Client{UA: clip(r.UserAgent(), 160), IP: clientIP(r)},
 	}
-	out := &gradeOut{ClientAttemptID: cid, SetID: set.ID, Mode: mode, BrainRecorded: mode == modeGraded, Results: []gradeResult{}}
+	out := &gradeOut{ClientAttemptID: cid, SetID: set.ID, Mode: mode, BrainNote: note, Results: []gradeResult{}}
 	for _, q := range set.QRefs {
 		g, asked := answered[q]
 		var res gradeResult
 		switch {
 		case !asked || g.ans == nil:
 			res = gradeResult{QRef: q, Status: statusUnanswer}
+		case g.skip:
+			res = gradeResult{QRef: q, Status: brain.StatusUnsupport} // too many blanks for the contract
 		case mode == modeGraded:
 			if v, ok := verdict[q]; ok {
 				res = v
@@ -415,7 +566,7 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 			res = gradeResult{QRef: q, Status: brain.StatusPendingKey}
 		}
 		out.Results = append(out.Results, res)
-		it := attempts.Item{QRef: q, Status: res.Status, Correct: res.Correct}
+		it := attempts.Item{QRef: q, Status: res.Status, Correct: res.Correct, Recorded: res.Recorded, AttemptID: res.AttemptID, Duplicate: res.Duplicate, Rev: g.rev}
 		if asked && g.ans != nil {
 			it.Answer = g.ans
 		}
@@ -429,10 +580,17 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 			}
 		case statusUnanswer:
 			out.Summary.Unanswered++
-		default:
+		case brain.StatusUnsupport:
+			out.Summary.Unsupport++
+		default: // pending_key, needs_review, never sent
 			out.Summary.Pending++
 		}
+		if res.Recorded {
+			out.Summary.Recorded++
+		}
 	}
+	out.RecordedCount = out.Summary.Recorded
+	out.BrainRecorded = out.RecordedCount > 0
 	rec.Summary = out.Summary
 
 	rec.Archived = s.Attempts != nil && s.Attempts.Append(rec) == nil
@@ -446,12 +604,31 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func validKind(k string) bool {
+	return k == "" || k == brain.AttemptCorrect || k == brain.AttemptVariant
+}
+
+// writeIdemConflict is the answer to "this client_attempt_id was already used
+// for different answers" (our own bug path, or a changed page that kept an old
+// id). The page reacts to retry_new_id by dropping its id and resubmitting once.
+func writeIdemConflict(w http.ResponseWriter) {
+	writeJSON(w, http.StatusConflict, map[string]any{"error": "idempotency_conflict", "message": msgIdemConflict, "retry_new_id": true})
+}
+
 func outFromRecord(r *attempts.Record) *gradeOut {
-	out := &gradeOut{ClientAttemptID: r.ClientAttemptID, SetID: r.SetID, Mode: r.Mode, BrainRecorded: r.Mode == modeGraded,
+	out := &gradeOut{ClientAttemptID: r.ClientAttemptID, SetID: r.SetID, Mode: r.Mode, BrainNote: r.BrainNote,
 		Results: []gradeResult{}, Summary: r.Summary, Archived: r.Archived, Notify: r.Notify}
 	for _, it := range r.Items {
-		out.Results = append(out.Results, gradeResult{QRef: it.QRef, Status: it.Status, Correct: it.Correct})
+		rec := it.Recorded
+		if r.V < 2 && r.Mode == modeGraded && it.Status != statusUnanswer && it.Status != brain.StatusUnsupport {
+			rec = true // v1 archives: "graded" meant the brain confirmed the whole attempt
+		}
+		out.Results = append(out.Results, gradeResult{QRef: it.QRef, Status: it.Status, Correct: it.Correct, Recorded: rec, AttemptID: it.AttemptID, Duplicate: it.Duplicate})
+		if rec {
+			out.RecordedCount++
+		}
 	}
+	out.BrainRecorded = out.RecordedCount > 0
 	return out
 }
 
@@ -500,13 +677,21 @@ func summaryLine(r *attempts.Record) string {
 	if r.Summary.Pending > 0 || r.Mode != modeGraded {
 		fmt.Fprintf(&b, "待核对 %d，", r.Summary.Pending)
 	}
+	if r.Summary.Unsupport > 0 {
+		fmt.Fprintf(&b, "不自动判 %d，", r.Summary.Unsupport)
+	}
 	if r.Summary.Unanswered > 0 {
 		fmt.Fprintf(&b, "未答 %d，", r.Summary.Unanswered)
 	}
-	if r.Mode == modeGraded {
-		b.WriteString("已提交。")
-	} else {
+	switch {
+	case r.Mode != modeGraded:
 		b.WriteString("已提交（未判分）。")
+	case r.Summary.Recorded == 0:
+		b.WriteString("已提交（未记入大脑，仅留档）。")
+	case r.Summary.Recorded < answered:
+		fmt.Fprintf(&b, "已提交（%d 题记入大脑，其余仅留档）。", r.Summary.Recorded)
+	default:
+		b.WriteString("已提交。")
 	}
 	fmt.Fprintf(&b, "attempt %s。", r.ClientAttemptID[:8])
 	return b.String()
@@ -514,7 +699,7 @@ func summaryLine(r *attempts.Record) string {
 
 func ntfyBody(r *attempts.Record) string {
 	head := summaryLine(r)
-	full, _ := json.Marshal(map[string]any{"client_attempt_id": r.ClientAttemptID, "set_id": r.SetID, "mode": r.Mode, "brain_attempt_id": r.BrainAttemptID, "items": r.Items})
+	full, _ := json.Marshal(map[string]any{"client_attempt_id": r.ClientAttemptID, "set_id": r.SetID, "mode": r.Mode, "items": r.Items})
 	if len(head)+2+len(full) <= ntfyMsgMax {
 		return head + "\n\n" + string(full)
 	}

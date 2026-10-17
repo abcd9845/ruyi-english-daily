@@ -66,6 +66,10 @@ const (
 	KindNotFound                    // 404
 	KindTicket                      // ticket rejected twice (401 after refresh)
 	KindTooLarge
+	KindNotReady    // 501/405: the endpoint is not deployed on this brain (yet)
+	KindRateLimited // 429
+	KindConflict    // 409 (Code says which: rev_mismatch, idempotency_conflict, …)
+	KindBadRequest  // refused locally before sending (contract limits)
 )
 
 // Error is a safe, classified error.
@@ -110,6 +114,20 @@ type Question struct {
 	// FigureStatus is the brain's read-only derived field: ok / missing / none /
 	// unknown. It may be absent (not live yet); absent is treated as unknown.
 	FigureStatus *string `json:"figure_status"`
+	// Rev is the question revision the brain served (lookup contract). It is
+	// forwarded verbatim with the answer so the brain can detect "the student saw
+	// an older version" (409 rev_mismatch). Absent/odd values mean "unknown".
+	Rev json.RawMessage `json:"rev"`
+}
+
+// RevInt returns the question revision as a positive integer, or 0 if the
+// brain did not send one (or sent something that is not a small integer).
+func (q Question) RevInt() int {
+	var n int64
+	if len(q.Rev) == 0 || json.Unmarshal(q.Rev, &n) != nil || n < 1 || n > 1_000_000_000 {
+		return 0
+	}
+	return int(n)
 }
 
 // Figure statuses as delivered to the page.
@@ -144,6 +162,11 @@ type Config struct {
 	// GradeToken means grading is not configured (Grade reports ErrGradeDisabled).
 	GradeToken string
 	GradePath  string
+	// LookupPath / PickPath override the batch-lookup and pick-practice paths;
+	// BrainID is the "brain" value sent to grade and pick-practice (default "ruyi").
+	LookupPath string
+	PickPath   string
+	BrainID    string
 }
 
 type ticket struct {
@@ -162,13 +185,19 @@ type Client struct {
 	token      string
 	gradeToken string
 	gradePath  string
+	lookupPath string
+	pickPath   string
+	brainID    string
 	hc         *http.Client
 	now        func() time.Time
 
-	mu      sync.Mutex
-	tickets map[string]ticket
-	lists   map[string]*listEntry
-	listMu  map[string]*sync.Mutex
+	retryDelay time.Duration // pause before the single upstream retry of a grade call
+
+	mu              sync.Mutex
+	lookupDownUntil time.Time // lookup endpoint answered "not deployed": use the list fallback until then
+	tickets         map[string]ticket
+	lists           map[string]*listEntry
+	listMu          map[string]*sync.Mutex
 }
 
 // New builds a Client. It does not contact the brain.
@@ -209,6 +238,7 @@ func New(c Config) (*Client, error) {
 	}
 	return &Client{
 		base: c.BaseURL, token: c.Token, now: now, gradeToken: c.GradeToken, gradePath: c.GradePath,
+		lookupPath: c.LookupPath, pickPath: c.PickPath, brainID: c.BrainID, retryDelay: 200 * time.Millisecond,
 		hc: &http.Client{
 			Transport:     tr,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -278,6 +308,15 @@ func upstreamErr(resp *http.Response) *Error {
 	case resp.StatusCode == 401 || resp.StatusCode == 403:
 		e.Kind = KindAuth
 		e.What = "brain rejected credentials"
+	case resp.StatusCode == 501 || resp.StatusCode == 405:
+		e.Kind = KindNotReady
+		e.What = "endpoint not available"
+	case resp.StatusCode == 429:
+		e.Kind = KindRateLimited
+		e.What = "rate limited"
+	case resp.StatusCode == 409:
+		e.Kind = KindConflict
+		e.What = "conflict"
 	default:
 		e.Kind = KindUnavailable
 	}
@@ -357,6 +396,20 @@ func (c *Client) fetchSource(ctx context.Context, source string) ([]Question, er
 	return nil, &Error{Kind: KindUnavailable, What: "too many pages"}
 }
 
+// normalizeQuestion drops invalid media entries and orders media by ordinal.
+func normalizeQuestion(q Question) Question {
+	var ms []Media
+	for _, m := range q.Media {
+		if !ValidSHA(m.SHA256) || !allowedMime[m.Mime] || !slots[m.Slot] {
+			continue
+		}
+		ms = append(ms, m)
+	}
+	sort.SliceStable(ms, func(i, j int) bool { return ms[i].Ordinal < ms[j].Ordinal })
+	q.Media = ms
+	return q
+}
+
 // normalize drops foreign-source rows, invalid media entries and sorts.
 func normalize(in []Question, source string) []Question {
 	out := make([]Question, 0, len(in))
@@ -364,16 +417,7 @@ func normalize(in []Question, source string) []Question {
 		if q.QRef == "" || (q.Source != nil && *q.Source != source) {
 			continue
 		}
-		var ms []Media
-		for _, m := range q.Media {
-			if !ValidSHA(m.SHA256) || !allowedMime[m.Mime] || !slots[m.Slot] {
-				continue
-			}
-			ms = append(ms, m)
-		}
-		sort.SliceStable(ms, func(i, j int) bool { return ms[i].Ordinal < ms[j].Ordinal })
-		q.Media = ms
-		out = append(out, q)
+		out = append(out, normalizeQuestion(q))
 	}
 	SortQuestions(out)
 	return out

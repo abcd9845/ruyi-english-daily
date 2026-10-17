@@ -32,6 +32,14 @@ type Item struct {
 	Answer  any    `json:"answer,omitempty"`
 	Status  string `json:"status"`
 	Correct *bool  `json:"correct"`
+	// Rev is the question revision the student saw (0 = unknown / not sent).
+	Rev int `json:"rev,omitempty"`
+	// Recorded is true only if the brain itself confirmed it recorded this answer
+	// (unsupported items are recorded:false, so is everything archived without a
+	// brain reply). AttemptID is the brain's integer id for it.
+	Recorded  bool  `json:"recorded"`
+	AttemptID int64 `json:"attempt_id,omitempty"`
+	Duplicate bool  `json:"duplicate,omitempty"`
 }
 
 // Summary counts the verdicts.
@@ -39,8 +47,10 @@ type Summary struct {
 	Total      int `json:"total"`
 	Graded     int `json:"graded"`
 	Correct    int `json:"correct"`
-	Pending    int `json:"pending"`
+	Pending    int `json:"pending"`     // pending_key, needs_review, or never sent to the brain
+	Unsupport  int `json:"unsupported"` // brain says it cannot auto-grade this question
 	Unanswered int `json:"unanswered"`
+	Recorded   int `json:"recorded"` // items the brain confirmed as recorded
 }
 
 // Client is the short client description kept with an attempt.
@@ -51,17 +61,21 @@ type Client struct {
 
 // Record is one archived attempt.
 type Record struct {
-	V               int       `json:"v"`
+	V               int       `json:"v"` // 2: per-item recorded/attempt_id (v1 had one brain_attempt_id)
 	ClientAttemptID string    `json:"client_attempt_id"`
 	SetID           string    `json:"set_id"`
 	SetTitle        string    `json:"set_title"`
 	Source          string    `json:"source"`
 	SubmittedAt     time.Time `json:"submitted_at"`
-	Mode            string    `json:"mode"` // "graded" (brain confirmed) or "archive_only"
-	BrainAttemptID  string    `json:"brain_attempt_id,omitempty"`
-	Items           []Item    `json:"items"`
-	Summary         Summary   `json:"summary"`
-	Client          Client    `json:"client"`
+	Mode            string    `json:"mode"` // "graded" (the brain replied) or "archive_only"
+	// BrainNote says why the brain was not used: not_configured | not_ready | unavailable.
+	BrainNote string `json:"brain_note,omitempty"`
+	// Sig fingerprints the submitted answers (+revs), so the same
+	// client_attempt_id with different answers is refused, not silently replayed.
+	Sig     string  `json:"sig,omitempty"`
+	Items   []Item  `json:"items"`
+	Summary Summary `json:"summary"`
+	Client  Client  `json:"client"`
 
 	// runtime-only (not archived)
 	Archived bool   `json:"-"`

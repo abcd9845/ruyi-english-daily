@@ -1,16 +1,18 @@
 # DEPLOY-P3：练习套提交 / 判分 / 归档 / 提醒 的上线清单
 
-适用：`feat/practice-set-p1-p3`（依赖 P0 的 PR #11，须先合 #11）。本文只是**清单**，不含任何真实值；占位用 `<…>`。
+适用：`feat/brain-contract-adapter`（依赖链 **#11 → #12 → 本 PR**，须按顺序合；Refs #10）。本文只是**清单**，不含任何真实值；占位用 `<…>`。
+
+> **⚠ 接口需等大脑 #35 部署**：`POST /v1/bank/grade`、`POST /v1/bank/questions/lookup`、`GET /v1/brain/pick-practice` 这三个接口线上现在**不存在**。在它们部署之前上线本版本也是安全的——站点会自动降级（lookup 退回整卷列表；选题 → 501「大脑接口未就绪」；判分 → 只归档 + 提醒，页面显示「暂未判分」，绝不说「已提交到大脑」）。**不要**在大脑部署前配 `RUYI_BRAIN_GRADE_TOKEN`；配了也只会得到 404 → 降级，不会 500。本分支所有测试只对 mock，**没有**对线上联调。
 本分支**不改** systemd 单元文件、不改 allowlist、不改旧页、不改家庭码逻辑、不改大脑写接口。下面的"单元改动"是**部署时在 ECS 上手工做的**。
 
 ## 0. 部署前要先确认的事（需要家长 / 大脑 PM 拍板）
 
 | # | 事项 | 谁确认 | 说明 |
 |---|---|---|---|
-| 1 | **大脑判分接口的真实契约**（路径、请求/响应字段） | 大脑 PM | 站点按**草案**对接：`POST /v1/bank/grade`。契约全部集中在 `server/internal/brain/grade.go`（`encodeGradeRequest` / `decodeGradeResponse` / `DefaultGradePath`），路径还可用 `RUYI_BRAIN_GRADE_PATH` 改，不用动其它代码。拿到真契约前**不要**配 `RUYI_BRAIN_GRADE_TOKEN`，站点会走降级（只归档 + 提醒），页面不会声称"已提交到大脑"。 |
-| 2 | **判分令牌（grade token）的范围** | 大脑 PM / 家长 | 必须是**单独**的令牌（站点拒绝它与 `RUYI_BRAIN_TOKEN` 相同），**只能**调用"判分并记录一次作答"这一个接口：不能读题库（不要给 `bank:read`）、不能写题库/答案/解析、不能改复习队列以外的任何东西、不能 `include_answer`。大脑侧对令牌应有单独的限速。站点绝不直接写大脑，也不持有别的写权限。 |
-| 3 | **`client_attempt_id` 契约** | 大脑 PM | 站点生成 UUID（页面里 `crypto.randomUUID`），**同一份答案重试用同一个 id，改了答案换新 id**。它是**大脑侧幂等键**：同 id 再提交必须原样返回第一次的结果、不得重复记账、不得重复更新复习队列。站点自己也按这个 id 去重（内存 + 重启后从归档文件恢复），双保险。大脑返回必须回显 `client_attempt_id`、给出大脑自己的 `attempt_id` 且 `recorded:true`——三者缺一，站点就当"大脑没确认"而降级。 |
-| 4 | **选题能力**（`wrong_only` / `due_first`） | 大脑 PM | 现在大脑没有选题接口：站点只能"整卷拉取 + 白名单 + 随机/顺序"。`wrong_only=1`、`due_first=1` 明确返回 **501**（`wrong_only_unavailable` / `due_first_unavailable`），绝不自己编"错题"逻辑。等大脑出接口后只改 `internal/brain/bank.go` 的 `SelectForPractice`。 |
+| 1 | **大脑 #35 部署后复核契约** | 大脑 PM | 站点按「最终契约」对接：`POST /v1/bank/grade`（`{brain:"ruyi",client_attempt_id,items:[{qref,answer,rev?,attempt_kind?,answered_at?,session_ref?,payload?}]}`，≤50 题、qref 不重复、填空 ≤10 格；回复逐题 `{qref,status,correct?,attempt_id,recorded,duplicate}`；状态 `graded/pending_key/needs_review/unsupported`），错误 404（未知 qref，整批不写）/409 `rev_mismatch`·`idempotency_conflict`/429 `rate_limited`（同题同脑每天 >3 次）。契约集中在 `server/internal/brain/grade.go`、`contract.go`，路径可用 `RUYI_BRAIN_GRADE_PATH` / `RUYI_BRAIN_LOOKUP_PATH` / `RUYI_BRAIN_PICK_PATH` 改。待大脑确认的点见 PR 描述（`rev` 的来源与类型、未知 qref 的 404 错误码、`reasons` 词表是否完整、429 是否区分日上限与分钟限速）。 |
+| 2 | **练习站令牌（`RUYI_BRAIN_GRADE_TOKEN`）的范围** | 大脑 PM / 家长 | 必须是**单独**的令牌（站点启动时拒绝它与 `RUYI_BRAIN_TOKEN` 相同）。按最终契约它是「`bank:read` + 只写 ruyi 一个脑」的练习站令牌；**scope 名由大脑定，本站不写死**——以后若换成更窄的 `bank:grade`，只需换令牌值，代码不用改。站点只拿它调 `POST /v1/bank/grade`（读题/选题仍用 `RUYI_BRAIN_TOKEN`），令牌只在服务端：不下发浏览器、不入归档、不进日志/响应/ntfy（有测试 grep 令牌标记串）。不能 `include_answer`、不能写题库/答案/解析。 |
+| 3 | **`client_attempt_id` 契约** | 大脑 PM | 站点生成 UUID（页面里 `crypto.randomUUID`；契约允许 1–160 位 `[A-Za-z0-9._:-]`），**同一份答案重试用同一个 id（`answered_at` 也一起固定），用户改了答案换新 id**。大脑幂等键是 `ps:<client_attempt_id>:<qref>`：同 id 同答案 → 200 `duplicate:true` + 同一个 `attempt_id`；同 id 不同答案/结果 → 409 `idempotency_conflict`（站点先自查，页面收到后换新 id 自动重发一次）。站点自己也按 id 去重（内存 + 重启后从归档恢复），双保险。「已记入大脑」只看逐题 `recorded:true`；`unsupported`（`recorded:false`）、`pending_key`/`needs_review`（只记答案，页面「待核对」）都不会被说成判过分。 |
+| 4 | **选题能力**（`mode=due_first\|wrong_only`） | 大脑 PM | 走大脑 `GET /v1/brain/pick-practice`（题文用 lookup）。**接口没部署时**返回 **501**「大脑接口未就绪」（`wrong_only_unavailable` / `due_first_unavailable`），不自己编"错题"逻辑；不带 `mode` 的随机套照旧。带 `deferred:*` 的题默认保留并标「参考答案待核，不自动判」，`RUYI_PICK_SKIP_DEFERRED=1` 则跳过。`/api/practice/new` 仍**默认关**（`RUYI_AUTO_SOURCES` 为空）。 |
 | 5 | **ntfy**：`RUYI_NTFY_TOPIC` 是否沿用旧 topic | 家长 | 旧页里的 topic 是公开的；env 样例已要求用**新** topic。这个 topic 现在**同时**用于：①登录后 `/api/config` 下发给动态页（旧功能）；②服务端提交后"打招呼"推送（本期）。ECS 到 `ntfy.sh` 的出网需要通（不通也不影响判分，见下）。 |
 | 6 | `RUYI_AUTO_SOURCES` 开不开 | 家长 | 默认空 = 关闭 `GET /api/practice/new`。要开就填允许自动出题的 source key（逗号分隔，真实 key 只写在 ECS 的 env 里）。 |
 | 7 | 每套每小时提交上限 `RUYI_GRADE_MAX_PER_HOUR` | 家长 | 默认 5，按"会话 + 来源 IP"各限一次，**同一套**；重复提交同一个 `client_attempt_id`（重试）不占额度、校验不过的请求也不占。 |
@@ -19,8 +21,11 @@
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `RUYI_BRAIN_GRADE_TOKEN` | 空 | 判分令牌。**空 = 不判分**（`mode:"archive_only"`）。写进 `/etc/ruyi-site/ruyi-site.env`，同样 600 root:root。日志里的 `[redacted]` 过滤器已包含它 |
-| `RUYI_BRAIN_GRADE_PATH` | `/v1/bank/grade` | 判分接口路径（草案）。必须以 `/` 开头 |
+| `RUYI_BRAIN_GRADE_TOKEN` | 空 | 练习站令牌（见上 §0-2）。**空 = 不判分**（`mode:"archive_only"`）。必须 ≠ `RUYI_BRAIN_TOKEN`（启动校验）。写进 `/etc/ruyi-site/ruyi-site.env`，同样 600 root:root。日志里的 `[redacted]` 过滤器已包含它 |
+| `RUYI_BRAIN_GRADE_PATH` | `/v1/bank/grade` | 判分接口路径。必须以 `/` 开头 |
+| `RUYI_BRAIN_LOOKUP_PATH` | `/v1/bank/questions/lookup` | 按 qref 取题文（读令牌） |
+| `RUYI_BRAIN_PICK_PATH` | `/v1/brain/pick-practice` | 大脑选题（读令牌） |
+| `RUYI_PICK_SKIP_DEFERRED` | `0` | `1` = 跳过带 `deferred:*` 的选题结果；`0` = 保留并标「参考答案待核」 |
 | `RUYI_ATTEMPTS_DIR` | `/var/lib/ruyi-site/attempts` | 作答归档目录，见下。绝对路径 |
 | `RUYI_GRADE_MAX_PER_HOUR` | `5` | 1–1000 |
 | `RUYI_NTFY_TOPIC` | 空 | 同旧变量；空则不推送（`notify:"off"`），其它照常 |
@@ -79,9 +84,10 @@ curl -s -b /tmp/j $B/api/practice/<套号> | jq '.items|length'               # 
 CID=$(uuidgen)
 curl -s -b /tmp/j -H 'Content-Type: application/json' \
   -d "{\"client_attempt_id\":\"$CID\",\"answers\":[{\"qref\":\"<套内的 qref>\",\"answer\":\"B\"}]}" \
-  $B/api/practice/<套号>/grade | jq '{mode,brain_recorded,summary,archived,notify,replayed}'
-#   降级冒烟：mode=archive_only, brain_recorded=false, summary.pending=题数
-#   判分冒烟：mode=graded,       brain_recorded=true
+  $B/api/practice/<套号>/grade | jq '{mode,brain_recorded,brain_note,recorded_count,summary,archived,notify,replayed}'
+#   降级冒烟：mode=archive_only, brain_recorded=false, recorded_count=0；brain_note=not_ready（接口未部署）/ not_configured / unavailable
+#   判分冒烟：mode=graded,       brain_recorded=true,  recorded_count=逐题 recorded:true 的数量（unsupported 的题不算）
+#   同一个 CID 改了答案再交：409 idempotency_conflict（页面会自动换新 id）；同一题一天交第 4 次：429
 # 同一个 CID 再来一次：replayed=true，且归档文件不新增行、大脑不重复记账
 curl -s -b /tmp/j -H 'Content-Type: application/json' -d "<同上>" $B/api/practice/<套号>/grade | jq .replayed
 # 归档
@@ -93,7 +99,9 @@ journalctl -u ruyi-site --since '10 min ago' | grep -c -F -e '<家庭码>' -e '<
 curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 404
 ```
 
-手机端：打开 `/m/practice/?set=<套号>`，答 1–2 题 → 点「提交」。降级时页面显示「已提交（暂未判分）」且**不会**出现「已记入大脑 / 已提交到大脑」；判分成功才显示「已提交到大脑」。
+手机端：打开 `/m/practice/?set=<套号>`，答 1–2 题 → 点「提交」。降级时页面显示「已提交（暂未判分）」（接口未部署时还会写「大脑接口还没准备好」），且**不会**出现「已记入大脑 / 已提交到大脑」；只有逐题 `recorded:true` 才显示「已提交到大脑」，部分题 `recorded:false` 时显示「已提交（仅留档，未记入大脑）」。
+
+选题冒烟（**需大脑 #35 已部署**，否则应得 501）：`curl -s -b /tmp/j "$B/api/practice/new?source=<source>&n=3&mode=wrong_only" | jq '{mode,count,deferred,url}'`；未部署时 `{error:"wrong_only_unavailable",message:"…大脑接口未就绪…"}`，HTTP 501（不是 500）。
 
 ## 6. 回滚
 
@@ -107,4 +115,7 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
 - 自动套存在内存里，**重启即失效**（页面会提示"临时练习已过期，请重新出一套"）；已提交的作答不受影响。
 - 站点内的重复提交去重依赖内存 + 归档文件；归档目录写不了时，重启后同一个 id 会再次被当作新提交（大脑侧幂等键仍会兜底）。
 - 限速的"同 IP"取 TCP 对端地址，不信任 `X-Forwarded-For`（同旧限制）。
-- 判分结果完全以大脑为准：`pending_key`（没有标准答案）/`unsupported`（题型不支持）一律显示「待核对」，不显示对错；站点没有任何自己判分的逻辑。
+- 判分结果完全以大脑为准：`pending_key`（没有标准答案）/`needs_review` 显示「待核对」、`unsupported` 显示「不自动判分」，都不显示对错；站点没有任何自己判分的逻辑。
+- 网络重试：大脑超时/5xx 时站点用同一个 `client_attempt_id` 和同一请求体重试一次（靠大脑幂等不重复记账）；仍失败 → 降级 `archive_only`，该 id 之后在站点内只会重放这条归档记录（要重新记入大脑需用户换答案/再做一次得到新 id）。
+- 同一题每天最多记 3 次（大脑 429）：整批拒绝，页面提示「今天这题提交次数到上限」，答案保留，不归档、不提醒。
+- 归档 v2：新行带逐题 `recorded`/`attempt_id`；v1 旧行仍能重放。回滚到旧二进制时，旧版读不懂 v2 行的新字段会忽略它们（只用于重放，不影响数据）。

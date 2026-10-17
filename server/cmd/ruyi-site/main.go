@@ -48,7 +48,7 @@ func run() error {
 		log.Warn("allowlisted file missing from static dir (will 404)", "file", m)
 	}
 
-	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, GradeToken: cfg.BrainGradeToken, GradePath: cfg.BrainGradePath, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile})
+	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, GradeToken: cfg.BrainGradeToken, GradePath: cfg.BrainGradePath, LookupPath: cfg.BrainLookupPath, PickPath: cfg.BrainPickPath, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile})
 	if err != nil {
 		return err
 	}
@@ -83,6 +83,7 @@ func run() error {
 		NtfyRetryDelay:  cfg.NtfyRetryDelay,
 		GradeMaxPerHour: cfg.GradeMaxPerHour,
 		AutoSources:     cfg.AutoSources,
+		SkipDeferred:    cfg.SkipDeferred,
 		AutoTTL:         cfg.AutoTTL,
 	})
 	srv := &http.Server{

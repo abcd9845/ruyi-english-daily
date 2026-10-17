@@ -331,7 +331,7 @@ for f in d1 d2; do
   if grep -qiE '"(answer|explanation|solution|correct|is_correct|include_answer)"|MOCK-(ANSWER|EXPLANATION|SOLUTION)-MARKER' "$WORK/resp/$f.b"; then bad "P10 $f carries an answer/explanation/solution field"; else ok "P10 $f has no answer/explanation/solution (mock sends all three on every question)"; fi
 done
 grep -q 'MOCK-ANSWER-MARKER' <(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT_MOCK/v1/bank/questions?source=$PSRC&limit=500") && ok "P10b control: the mock really does send the answer marker upstream" || bad "P10b control"
-expect "P11 allowed item keys only" "$(jq -c '[.items[]|keys[]]|unique' "$WORK/resp/d1.b")" '["blanks","figure_status","media","options","ordinal","qref","qtype","stem_md"]'
+expect "P11 allowed item keys only" "$(jq -c '[.items[]|keys[]]|unique' "$WORK/resp/d1.b")" '["blanks","figure_status","media","options","ordinal","qref","qtype","rev","stem_md"]'
 if grep -qiE 'bearer|'"$TOKEN"'|ticket' "$WORK/resp/d1.b" "$WORK/resp/d1.h"; then bad "P12 token/Bearer/ticket in practice response"; else ok "P12 no token / Bearer / ticket in the practice response or headers"; fi
 expect "P13 mock saw the practice source list requests (only source/limit/cursor accepted by the mock, else 400)" "$(MSTAT | jq '.list_practice >= 1')" true
 
@@ -391,6 +391,7 @@ PY
 python3 "$WORK/ntfy_stub.py" $NTFY_PORT "$WORK/ntfy.jsonl" & PIDS+=($!)
 NTFYB="http://127.0.0.1:$NTFY_PORT"
 for _ in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/$NTFY_PORT) 2>/dev/null && break; sleep 0.1; done
+nextday() { curl -s -X POST "http://127.0.0.1:${1:-$PORT_MOCK}/_mock/advance-clock?d=25h" >/dev/null; } # the brain counts writes per question per (its) day: move its clock on
 ntfy_n() { wc -l < "$WORK/ntfy.jsonl" | tr -d ' '; }
 mstat() { curl -s "http://127.0.0.1:${2:-$PORT_MOCK}/_mock/stats" | jq -r ".$1 // 0"; }
 QENV=("RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_NTFY_RETRY_DELAY=300ms" "RUYI_ATTEMPTS_DIR=$WORK/att-Q" "RUYI_GRADE_MAX_PER_HOUR=4" "RUYI_AUTO_SOURCES=$PSRC" "RUYI_AUTO_TTL=3s")
@@ -413,12 +414,12 @@ expect "Q1c per-question verdicts (wrong key->false is NOT leaked as an answer; 
 expect "Q1d summary total/graded/correct/pending/unanswered" "$(jq -c '[.summary.total,.summary.graded,.summary.correct,.summary.pending,.summary.unanswered]' "$WORK/resp/g1.b")" '[3,2,1,1,0]'
 expect "Q1e archived and notified" "$(jq -c '[.archived,.notify]' "$WORK/resp/g1.b")" '[true,"sent"]'
 expect "Q1f the brain was asked exactly once (grade_new +1)" "$(( $(mstat grade_new) - G0 ))" 1
-expect "Q1g response has only the documented keys (replayed appears only on a replay)" "$(jq -c 'keys' "$WORK/resp/g1.b")" '["archived","brain_recorded","client_attempt_id","mode","notify","results","set_id","summary"]'
+expect "Q1g response has only the documented keys (replayed appears only on a replay)" "$(jq -c 'keys' "$WORK/resp/g1.b")" '["archived","brain_recorded","client_attempt_id","mode","notify","recorded_count","results","set_id","summary"]'
 # --- Q2 idempotent replay
 gpost g2 "$QA" demo-1 "$(mkbody $C1)" -b "$WORK/jarQ"
 expect "Q2 same client_attempt_id again -> 200 replayed:true with the stored result" "$(jq -c '[.replayed,.mode,.summary.correct]' "$WORK/resp/g2.b")" '[true,"graded",1]'
 gpost g2b "$QA" demo-1 "$(mkbody $C1 '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarQ"
-expect "Q2b replay ignores a different payload (stored result wins)" "$(jq -c '[.replayed,.summary.total,.summary.correct]' "$WORK/resp/g2b.b")" '[true,3,1]'
+expect "Q2b same client_attempt_id with different answers -> 409 idempotency_conflict, retry_new_id (nothing re-graded)" "$CODE_HTTP $(jq -c '[.error,.retry_new_id]' "$WORK/resp/g2b.b")" '409 ["idempotency_conflict",true]'
 expect "Q2c no second brain write, no second notification, one archive line" "$(( $(mstat grade_new) - G0 )) $(mstat grade_replay) $(( $(ntfy_n) - N0 )) $(wc -l < "$WORK/att-Q/attempts.jsonl" | tr -d ' ')" "1 0 1 1"
 gpost g2c "$QA" free-3 "$(mkbody $C1 '[{"qref":"example.set:math:4","answer":"x"}]')" -b "$WORK/jarQ"; expect "Q2d same id on another set -> 409" "$CODE_HTTP" 409
 # --- Q3 whitelist, shapes, auth
@@ -437,7 +438,7 @@ CODE_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/jarQ" "$QA/api/pra
 expect "Q3l none of the rejected requests reached the brain's grade endpoint" "$(( $(mstat grade) - G1 ))" 0
 # --- Q4 the archive
 expect "Q4 attempts dir is 700 and the file 600, owner is the site user" "$(stat -c '%a %a %U' "$WORK/att-Q" | head -1 | cut -d' ' -f1) $(stat -c %a "$WORK/att-Q/attempts.jsonl") $(stat -c %U "$WORK/att-Q/attempts.jsonl")" "700 600 $(id -un)"
-expect "Q4b record fields (JSON Lines, version 1, client_attempt_id naming, brain attempt id, mode)" "$(head -1 "$WORK/att-Q/attempts.jsonl" | jq -c '[.v,.client_attempt_id,.set_id,.set_title,.source,.mode,(.brain_attempt_id|length>0),(.items|length),(.attempt_id // "none")]')" "[1,\"$C1\",\"demo-1\",\"演示套\",\"$PSRC\",\"graded\",true,3,\"none\"]"
+expect "Q4b record fields (JSON Lines, version 2, client_attempt_id naming, per-item recorded, mode)" "$(head -1 "$WORK/att-Q/attempts.jsonl" | jq -c '[.v,.client_attempt_id,.set_id,.set_title,.source,.mode,([.items[]|select(.recorded)]|length==3),(.items|length),(.attempt_id // "none")]')" "[2,\"$C1\",\"demo-1\",\"演示套\",\"$PSRC\",\"graded\",true,3,\"none\"]"
 expect "Q4c answers are archived as given (fill blanks as arrays)" "$(head -1 "$WORK/att-Q/attempts.jsonl" | jq -c '[.items[].answer]')" '[["1","2","3"],"A",["x","y"]]'
 for pair in "family code:$CODE" "bearer token:$TOKEN" "grade token:$GTOKEN" "session secret:$SECRET" "ntfy topic:$TOPIC" "cookie name:ruyi_sess" "Authorization header:Authorization"; do
   name="${pair%%:*}"; val="${pair#*:}"; grep -qF -- "$val" "$WORK/att-Q/attempts.jsonl" && bad "Q4d $name found in the attempts archive" || ok "Q4d $name not in the attempts archive"
@@ -457,7 +458,7 @@ get s "$QA/api/practice/demo-1" -b "$WORK/jarQ"; grep -qiE 'explanation|"answer"
 # --- Q7 the read token can never be used for grading (separate token; mock counts such use)
 expect "Q7 the grade call never used the bank:read token (mock saw 0)" "$(mstat grade_with_bank_read_token)" 0
 # --- Q8 rate limit (4 / hour / session+IP / set; replays and rejected requests are free)
-for i in 2 3 4; do gpost r$i "$QA" demo-1 "$(mkbody 3333333$i-3333-4333-8333-333333333333)" -b "$WORK/jarQ"; [ "$CODE_HTTP" = 200 ] && ok "Q8 submission $i of 4 accepted" || bad "Q8 submission $i" "$CODE_HTTP"; done
+for i in 2 3 4; do nextday; gpost r$i "$QA" demo-1 "$(mkbody 3333333$i-3333-4333-8333-333333333333)" -b "$WORK/jarQ"; [ "$CODE_HTTP" = 200 ] && ok "Q8 submission $i of 4 accepted" || bad "Q8 submission $i" "$CODE_HTTP"; done
 gpost r5 "$QA" demo-1 "$(mkbody 33333335-3333-4333-8333-333333333333)" -b "$WORK/jarQ"; expect "Q8b 5th fresh submission in the hour -> 429" "$CODE_HTTP" 429
 grep -qi '^retry-after: [0-9]' "$WORK/resp/r5.h" && ok "Q8c 429 carries Retry-After" || bad "Q8c Retry-After"
 gpost r6 "$QA" demo-1 "$(mkbody $C1)" -b "$WORK/jarQ"; expect "Q8d replay of an accepted attempt is still served while limited" "$(jq -r '.replayed' "$WORK/resp/r6.b")" true
@@ -471,6 +472,7 @@ post_login q3 "$QA" "$CODE" -c "$WORK/jarQ"
 gpost g3 "$QA" demo-1 "$(mkbody $C1)" -b "$WORK/jarQ"
 expect "Q9 after a restart the same client_attempt_id is replayed from the archive" "$(jq -c '[.replayed,.mode,.summary.correct]' "$WORK/resp/g3.b")" '[true,"graded",1]'
 expect "Q9b ... without grading, notifying or archiving again" "$(( $(mstat grade) - G2 )) $(( $(ntfy_n) - N1 ))" "0 0"
+nextday
 # --- Q10 dynamic sets
 start_site QN 18231 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json"; wait_http "http://127.0.0.1:18231/healthz"
 post_login qn "http://127.0.0.1:18231" "$CODE" -c "$WORK/jarQN"
@@ -488,7 +490,7 @@ expect "Q10i grading a dynamic set works (graded, 1 right)" "$(jq -c '[.mode,.su
 get dn2 "$QA/api/practice/new?source=$PSRC&n=20" -b "$WORK/jarQ"
 expect "Q10j n larger than the source returns all (5) with truncated + note" "$(jq -c '[.count,.truncated,.requested,(.note|length>0)]' "$WORK/resp/dn2.b")" '[5,true,20,true]'
 get dn3 "$QA/api/practice/new?source=$PSRC&n=3&wrong_only=1" -b "$WORK/jarQ"
-expect "Q10k wrong_only -> 501 wrong_only_unavailable (no invented logic)" "$CODE_HTTP $(jq -r .error "$WORK/resp/dn3.b")" "501 wrong_only_unavailable"
+expect "Q10k legacy wrong_only=1 -> the brain's pick (mode wrong_only, 3 picks, 2 deferred)" "$CODE_HTTP $(jq -c '[.mode,.count,.deferred]' "$WORK/resp/dn3.b")" '200 ["wrong_only",3,2]'
 get dn4 "$QA/api/practice/new?source=$PSRC&n=3&seed=7" -b "$WORK/jarQ"; get dn5 "$QA/api/practice/new?source=$PSRC&n=3&seed=7" -b "$WORK/jarQ"
 get e1 "$QA/api/practice/$(jq -r .set_id "$WORK/resp/dn4.b")" -b "$WORK/jarQ"; get e2 "$QA/api/practice/$(jq -r .set_id "$WORK/resp/dn5.b")" -b "$WORK/jarQ"
 expect "Q10l same seed -> same selection" "$(jq -r '[.items[].qref]|join(",")' "$WORK/resp/e1.b")" "$(jq -r '[.items[].qref]|join(",")' "$WORK/resp/e2.b")"
@@ -526,6 +528,7 @@ gpost u2 "http://127.0.0.1:18235" demo-1 "$(mkbody 66666666-6666-4666-8666-66666
 expect "Q12 unwritable archive dir: still graded, archived:false (both submissions)" "$(jq -c '[.mode,.archived]' "$WORK/resp/u1.b")$(jq -c '[.mode,.archived]' "$WORK/resp/u2.b")" '["graded",false]["graded",false]'
 expect "Q12b exactly one error log line for it, without path or content" "$(grep -c 'attempts archive is not writable' "$WORK/QU.log") $(grep -c -e "$WORK/afile" -e 'example.set' "$WORK/QU.log")" "1 0"
 # --- Q13 ntfy down: grading result unaffected, one retry, nothing sensitive in the logs
+nextday
 start_site QX 18236 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=http://127.0.0.1:1" "RUYI_NTFY_RETRY_DELAY=300ms" "RUYI_ATTEMPTS_DIR=$WORK/att-QX"; wait_http "http://127.0.0.1:18236/healthz"
 post_login qx "http://127.0.0.1:18236" "$CODE" -c "$WORK/jarQX"
 gpost x1 "http://127.0.0.1:18236" demo-1 "$(mkbody 77777777-7777-4777-8777-777777777771)" -b "$WORK/jarQX"
@@ -554,6 +557,134 @@ OUT=$(env -i PATH="$PATH" "${FULL[@]}" RUYI_LISTEN=127.0.0.1:18237 RUYI_ATTEMPTS
 [ "$RC" = 124 ] && [ ! -e "$WORK/att-never-created" ] && ok "Q17 startup does not touch the attempts dir until the first submission (lazy create)" || bad "Q17" "rc=$RC"
 for p in "$PID_Q" "$PID_QN" "$PID_QD" "$PID_QO" "$PID_QF" "$PID_QU" "$PID_QX"; do kill "$p" 2>/dev/null; done
 
+
+section "R. Brain final contract (#35): statuses, errors, idempotency, token hygiene, degradation — mock brain only"
+cat > "$WORK/sets-r.json" <<JSON
+{"sets":[
+ {"id":"mix-4","title":"四态套","source":"$PSRC","qrefs":["example.set:math:1","example.set:math:2","example.set:math:3","example.set:math:4"]},
+ {"id":"ghost-2","title":"缺题套","source":"$PSRC","qrefs":["example.set:math:2","example.set:math:99"]},
+ {"id":"one-1","title":"单题套","source":"$PSRC","qrefs":["example.set:math:2"]}
+]}
+JSON
+RM=18240; RS=18241; RB="http://127.0.0.1:$RS"; RMB="http://127.0.0.1:$RM"
+start_mock mockR "$RM" "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "$RMB/_mock/stats"
+RENV=("RUYI_SETS_FILE=$WORK/sets-r.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_NTFY_RETRY_DELAY=300ms" "RUYI_ATTEMPTS_DIR=$WORK/att-R" "RUYI_GRADE_MAX_PER_HOUR=100" "RUYI_AUTO_SOURCES=$PSRC" "RUYI_AUTO_TTL=60s")
+start_site R "$RS" "$RMB" "${RENV[@]}"; wait_http "$RB/healthz"
+post_login r1 "$RB" "$CODE" -c "$WORK/jarR"
+rcid() { printf '%08d-aaaa-4aaa-8aaa-aaaaaaaaaaaa' "$1"; }
+rbody() { printf '{"client_attempt_id":"%s"%s,"answers":%s}' "$1" "${3:-}" "$2"; }
+MIXANS='[{"qref":"example.set:math:1","answer":["~review~","2","3"],"rev":1},{"qref":"example.set:math:2","answer":"B"},{"qref":"example.set:math:3","answer":["x","y"]},{"qref":"example.set:math:4","answer":"自由作答"}]'
+N0=$(ntfy_n)
+gpost m1 "$RB" mix-4 "$(rbody "$(rcid 1)" "$MIXANS" ',"answered_at":"2026-10-17T08:00:00Z"')" -b "$WORK/jarR"
+expect "R1 four statuses in one batch -> 200 (needs_review / graded / pending_key / unsupported)" "$CODE_HTTP $(jq -c '[.results[]|.status]' "$WORK/resp/m1.b")" '200 ["needs_review","graded","pending_key","unsupported"]'
+expect "R1b recorded per item: only unsupported is recorded:false; correct only on graded" "$(jq -c '[.results[]|[.recorded,.correct]]' "$WORK/resp/m1.b")" '[[true,null],[true,true],[true,null],[false,null]]'
+expect "R1c brain_recorded true, recorded_count 3 of 4; summary carries unsupported:1" "$(jq -c '[.brain_recorded,.recorded_count,.summary.unsupported,.summary.recorded]' "$WORK/resp/m1.b")" '[true,3,1,3]'
+expect "R1d every recorded item has the brain's integer attempt_id, the unsupported one has none" "$(jq -c '[.results[]|(.attempt_id|type)]' "$WORK/resp/m1.b")" '["number","number","number","null"]'
+expect "R1e the brain wrote 3 rows (grade_new_item), not 4" "$(mstat grade_new_item "$RM")" 3
+expect "R1f archive says the same: per-item recorded flags" "$(head -1 "$WORK/att-R/attempts.jsonl" | jq -c '[.mode,[.items[]|.recorded]]')" '["graded",[true,true,true,false]]'
+expect "R1g ntfy line says 3 of 4 went to the brain, the rest archive-only (never a flat 已提交)" "$(jq -rs '.[-1].body|split("\n")[0]' "$WORK/ntfy.jsonl")" '如意练习：四态套 4 题，对 1，待核对 2，不自动判 1，已提交（3 题记入大脑，其余仅留档）。attempt 00000001。'
+# what went over the wire (the mock keeps the last grade body)
+LG=$(curl -s "$RMB/_mock/last-grade")
+expect "R2 wire format: brain=ruyi, id, items with qref/answer/rev/answered_at/session_ref, no token or family code in the body" "$(echo "$LG" | jq -c '[.brain,.client_attempt_id,(.items|length),(.items[0]|[.qref,.rev,.answered_at,.session_ref]),(.items|map(has("attempt_kind"))|any)]')" "[\"ruyi\",\"$(rcid 1)\",4,[\"example.set:math:1\",1,\"2026-10-17T08:00:00Z\",\"mix-4\"],false]"
+echo "$LG" | grep -qF -e "$GTOKEN" -e "$TOKEN" -e "$CODE" && bad "R2b a token/family code is in the grade body" || ok "R2b grade body carries no token or family code"
+expect "R2c the grade call used the grade token only (read token never accepted for grading)" "$(mstat grade_with_bank_read_token "$RM")" 0
+# --- errors
+G0=$(mstat grade "$RM"); L0=$(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' '); N1=$(ntfy_n)
+gpost m2 "$RB" mix-4 "$(rbody "$(rcid 1)" "$(echo "$MIXANS" | jq -c '.[1].answer="A"')")" -b "$WORK/jarR"
+expect "R3 same client_attempt_id, changed answer -> 409 idempotency_conflict + retry_new_id (site-side check, brain not called)" "$CODE_HTTP $(jq -c '[.error,.retry_new_id]' "$WORK/resp/m2.b") $(( $(mstat grade "$RM") - G0 ))" '409 ["idempotency_conflict",true] 0'
+gpost m3 "$RB" mix-4 "$(rbody "$(rcid 2)" "$(echo "$MIXANS" | jq -c '.[1].answer="A"')")" -b "$WORK/jarR"
+expect "R3b ... the user's re-submit with changed answers gets a NEW id and is accepted (new write, wrong this time)" "$CODE_HTTP $(jq -c '[.mode,.results[1].correct,.results[1].duplicate]' "$WORK/resp/m3.b")" '200 ["graded",false,null]'
+gpost m4 "$RB" mix-4 "$(rbody "$(rcid 3)" "$MIXANS")" -b "$WORK/jarR"
+expect "R4 daily cap: 3rd write of the same questions the same day is still fine" "$CODE_HTTP" 200
+L1=$(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' '); N2=$(ntfy_n)
+gpost m5 "$RB" mix-4 "$(rbody "$(rcid 4)" "$MIXANS")" -b "$WORK/jarR"
+expect "R4b 4th write the same day -> 429 for the whole batch, with the page copy 今天这题提交次数到上限" "$CODE_HTTP $(jq -r '[.error,(.message|contains("今天这题提交次数到上限"))]|@json' "$WORK/resp/m5.b")" '429 ["daily_cap",true]'
+expect "R4c ... nothing archived and nothing notified for the refused batch" "$(( $(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' ') - L1 )) $(( $(ntfy_n) - N2 ))" "0 0"
+gpost m5b "$RB" mix-4 "$(rbody "$(rcid 1)" "$MIXANS" ',"answered_at":"2026-10-17T08:00:00Z"')" -b "$WORK/jarR"
+expect "R4d replay of an accepted attempt is still served after the cap (site archive, no brain call)" "$(jq -c '[.replayed,.mode]' "$WORK/resp/m5b.b")" '[true,"graded"]'
+curl -s -X POST "$RMB/_mock/bump-rev?qref=example.set:math:2" >/dev/null
+L2=$(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' '); nextday "$RM"
+gpost m6 "$RB" one-1 "$(rbody "$(rcid 5)" '[{"qref":"example.set:math:2","answer":"B","rev":1}]')" -b "$WORK/jarR"
+expect "R5 stale rev -> 409 rev_mismatch with the page copy 题目已更新，请刷新; nothing archived" "$CODE_HTTP $(jq -r '[.error,(.message|contains("题目已更新，请刷新"))]|@json' "$WORK/resp/m6.b") $(( $(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' ') - L2 ))" '409 ["rev_mismatch",true] 0'
+get pr "$RB/api/practice/one-1" -b "$WORK/jarR"
+expect "R5b the practice API serves the current rev (2) so a reload fixes it" "$(jq -c '[.items[0].rev]' "$WORK/resp/pr.b")" '[2]'
+gpost m7 "$RB" one-1 "$(rbody "$(rcid 6)" '[{"qref":"example.set:math:2","answer":"B","rev":2}]')" -b "$WORK/jarR"
+expect "R5c ... resubmitting with rev 2 is accepted" "$CODE_HTTP $(jq -r .mode "$WORK/resp/m7.b")" "200 graded"
+L3=$(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' ')
+G1=$(mstat grade "$RM")
+gpost m8 "$RB" ghost-2 "$(rbody "$(rcid 7)" '[{"qref":"example.set:math:99","answer":"B"}]')" -b "$WORK/jarR"
+expect "R6 a qref the brain does not know (lookup missing) -> 404 unknown_qref, nothing written, grade endpoint not called" "$CODE_HTTP $(jq -r .error "$WORK/resp/m8.b") $(( $(mstat grade "$RM") - G1 )) $(( $(wc -l < "$WORK/att-R/attempts.jsonl" | tr -d ' ') - L3 ))" "404 unknown_qref 0 0"
+get gp "$RB/api/practice/ghost-2" -b "$WORK/jarR"
+expect "R6b the set page still loads (missing qref listed, no crash)" "$CODE_HTTP $(jq -c '[(.items|length),.missing_qrefs]' "$WORK/resp/gp.b")" '200 [1,["example.set:math:99"]]'
+gpost m9 "$RB" mix-4 "$(rbody "$(rcid 8)" '[{"qref":"example.set:math:2","answer":"B"},{"qref":"example.set:math:2","answer":"A"}]')" -b "$WORK/jarR"; expect "R7 duplicate qref in a batch -> 400 (never sent)" "$CODE_HTTP" 400
+gpost m10 "$RB" mix-4 "$(rbody "$(rcid 9)" '[{"qref":"example.set:math:2","answer":"B","rev":"x"}]')" -b "$WORK/jarR"; expect "R7b non-integer rev -> 400" "$CODE_HTTP" 400
+gpost m11 "$RB" mix-4 "$(rbody "$(rcid 10)" '[{"qref":"example.set:math:2","answer":"B"}]' ',"attempt_kind":"bogus"')" -b "$WORK/jarR"; expect "R7c attempt_kind other than correction|variant -> 400" "$CODE_HTTP" 400
+gpost m12 "$RB" mix-4 "$(rbody "$(rcid 11)" '[{"qref":"example.set:math:2","answer":"B"}]' ',"attempt_kind":"correction"')" -b "$WORK/jarR"
+expect "R8 attempt_kind=correction is accepted and forwarded to the brain" "$CODE_HTTP $(curl -s "$RMB/_mock/last-grade" | jq -c '[.items[0].attempt_kind]')" '200 ["correction"]'
+# --- duplicate: the brain already has this id (site lost its archive) -> same attempt ids, duplicate:true, no new write
+cp "$WORK/resp/m1.b" "$WORK/m1.first"
+kill "$PID_R" 2>/dev/null; sleep 0.4; cp "$WORK/R.log" "$WORK/R1.log"
+start_site R "$RS" "$RMB" "${RENV[@]}" "RUYI_ATTEMPTS_DIR=$WORK/att-R2"; wait_http "$RB/healthz"; post_login r2 "$RB" "$CODE" -c "$WORK/jarR"
+W0=$(mstat grade_new_item "$RM"); D0=$(mstat grade_dup_item "$RM")
+gpost m13 "$RB" mix-4 "$(rbody "$(rcid 1)" "$MIXANS" ',"answered_at":"2026-10-17T08:00:00Z"')" -b "$WORK/jarR"
+expect "R9 network retry with the same id after the site lost its archive: brain answers duplicate:true with the SAME attempt ids" "$CODE_HTTP $(jq -c '[.results[]|.attempt_id]' "$WORK/resp/m13.b") $(jq -c '[.results[]|.duplicate]' "$WORK/resp/m13.b")" "200 $(jq -c '[.results[]|.attempt_id]' "$WORK/m1.first") [true,true,true,null]"
+expect "R9b ... no new brain writes (grade_new_item +0; the brain counts all 4 items as duplicates)" "$(( $(mstat grade_new_item "$RM") - W0 )) $(( $(mstat grade_dup_item "$RM") - D0 ))" "0 4"
+# --- recorded:false must never become "submitted to the brain"
+expect "R10 archive-only submit (no grade token): every result recorded:false, brain_recorded false" "$(jq -c '[.mode,.brain_recorded,.recorded_count,([.results[].recorded]|any)]' "$WORK/resp/dgrQD.b" 2>/dev/null || echo skipped)" '["archive_only",false,0,false]'
+# --- the dedicated grade token is server-side only: nothing leaks anywhere
+for f in "$WORK"/resp/m*.b "$WORK"/resp/pr.b "$WORK"/resp/gp.b "$WORK"/resp/m*.h; do
+  grep -qF -e "$GTOKEN" -e "$TOKEN" "$f" && bad "R11 token in $(basename "$f")" || :
+done; ok "R11 neither token appears in any R response (bodies or headers)"
+get pg2 "$RB/m/practice/"; grep -qF -e "$GTOKEN" -e "$TOKEN" "$WORK/resp/pg2.b" && bad "R11b token in the practice page" || ok "R11b practice page has no token"
+cat "$WORK/R1.log" "$WORK/R.log" > "$WORK/rlogs0"
+grep -qF -e "$GTOKEN" -e "$TOKEN" "$WORK/att-R/attempts.jsonl" "$WORK/att-R2/attempts.jsonl" "$WORK/ntfy.jsonl" "$WORK/rlogs0" && bad "R12 token in the archive / ntfy / log" || ok "R12 token marker not in the attempts archive, ntfy content, or the site log (grep)"
+grep -qF -- "$GTOKEN" "$WORK"/resp/*.h 2>/dev/null && bad "R12b grade token in some response header" || ok "R12b grade token in no response header of the whole run"
+grep -q 'brain refused the batch' "$WORK/rlogs0" && ok "R12c refusals are logged (kind/status/code only)" || bad "R12c"
+# --- degradation: endpoints not deployed (404/501) -> graceful, never 500
+sw() { curl -s -X POST "$RMB/_mock/switch?name=$1&v=$2" >/dev/null; }
+sw lookup 501
+get dl "$RB/api/practice/one-1" -b "$WORK/jarR"
+expect "R13 lookup endpoint missing (501): the set page falls back to the bank list, 200, no rev" "$CODE_HTTP $(jq -c '[(.items|length),(.items[0].rev // "none")]' "$WORK/resp/dl.b")" '200 [1,"none"]'
+nextday "$RM"; gpost m14 "$RB" one-1 "$(rbody "$(rcid 12)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarR"
+expect "R13b ... and grading still works without rev (graded, recorded)" "$CODE_HTTP $(jq -c '[.mode,.recorded_count]' "$WORK/resp/m14.b")" '200 ["graded",1]'
+sw lookup on
+sw pick 501
+get pk1 "$RB/api/practice/new?source=$PSRC&n=3&mode=wrong_only" -b "$WORK/jarR"
+expect "R14 pick endpoint missing (501): explicit 大脑接口未就绪, 501 (not 500)" "$CODE_HTTP $(jq -r '[.error,(.message|contains("大脑接口未就绪"))]|@json' "$WORK/resp/pk1.b")" '501 ["wrong_only_unavailable",true]'
+get pk2 "$RB/api/practice/new?source=$PSRC&n=3&mode=due_first" -b "$WORK/jarR"; expect "R14b due_first likewise" "$CODE_HTTP" 501
+get pk3 "$RB/api/practice/new?source=$PSRC&n=3" -b "$WORK/jarR"; expect "R14c plain random sets (P1–P3 behavior) keep working while pick is missing" "$CODE_HTTP" 200
+get pk4 "$RB/api/practice/new?source=$PSRC&n=3&mode=bogus" -b "$WORK/jarR"; expect "R14d unknown mode -> 400" "$CODE_HTTP" 400
+sw pick on
+sw grade 501
+nextday "$RM"; gpost m15 "$RB" one-1 "$(rbody "$(rcid 13)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarR"
+expect "R15 grade endpoint missing (501): 200 archive_only, brain_note not_ready, nothing recorded (not 500)" "$CODE_HTTP $(jq -c '[.mode,.brain_note,.brain_recorded,.recorded_count,.archived]' "$WORK/resp/m15.b")" '200 ["archive_only","not_ready",false,0,true]'
+expect "R15b ... the answer is archived with mode archive_only" "$(tail -1 "$WORK/att-R2/attempts.jsonl" | jq -c '[.mode,.brain_note,([.items[].recorded]|any)]')" '["archive_only","not_ready",false]'
+sw grade off; gpost m16 "$RB" one-1 "$(rbody "$(rcid 14)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarR"
+expect "R15c grade route 404 (not unknown_qref) is also 'not ready', not an error page" "$CODE_HTTP $(jq -r .brain_note "$WORK/resp/m16.b")" "200 not_ready"
+sw grade fail; gpost m17 "$RB" one-1 "$(rbody "$(rcid 15)" '[{"qref":"example.set:math:2","answer":"B"}]')" -b "$WORK/jarR"
+expect "R15d brain failing (500): archive_only, brain_note unavailable" "$CODE_HTTP $(jq -r '[.mode,.brain_note]|@json' "$WORK/resp/m17.b")" '200 ["archive_only","unavailable"]'
+sw grade on
+# --- skipping deferred picks (configurable; default is to mark them)
+get pk5 "$RB/api/practice/new?source=$PSRC&n=3&mode=wrong_only" -b "$WORK/jarR"
+expect "R16 default: deferred picks are kept and counted (marked 参考答案待核 by the page)" "$CODE_HTTP $(jq -c '[.mode,.count,.deferred]' "$WORK/resp/pk5.b")" '200 ["wrong_only",3,2]'
+start_site RK 18242 "$RMB" "${RENV[@]}" RUYI_ATTEMPTS_DIR="$WORK/att-RK" RUYI_PICK_SKIP_DEFERRED=1; wait_http "http://127.0.0.1:18242/healthz"
+post_login rk "http://127.0.0.1:18242" "$CODE" -c "$WORK/jarRK"
+get pk6 "http://127.0.0.1:18242/api/practice/new?source=$PSRC&n=3&mode=wrong_only" -b "$WORK/jarRK"
+expect "R16b RUYI_PICK_SKIP_DEFERRED=1: deferred picks are dropped (1 left)" "$CODE_HTTP $(jq -c '[.count,.deferred]' "$WORK/resp/pk6.b")" '200 [1,0]'
+get pk7 "$RB/api/practice/$(jq -r .set_id "$WORK/resp/pk5.b")" -b "$WORK/jarR"
+expect "R16c pick items carry origin and a deferred mark, never an answer; question text came from lookup" "$(jq -c '[.items[]|[.origin,(.ref_pending // false)]]' "$WORK/resp/pk7.b")" '[["wrong",false],["wrong","pending_key"],["wrong","unsupported_qtype"]]'
+# --- startup: the two tokens must differ, and the message never prints either
+run_bad x "${FULL[@]}" RUYI_BRAIN_GRADE_TOKEN="$TOKEN"
+[ "$RC" != 0 ] && echo "$OUT" | grep -q RUYI_BRAIN_GRADE_TOKEN && ! echo "$OUT" | grep -qF "$TOKEN" && ok "R17 RUYI_BRAIN_GRADE_TOKEN == RUYI_BRAIN_TOKEN is refused at startup (no value printed)" || bad "R17" "rc=$RC"
+for kv in RUYI_BRAIN_LOOKUP_PATH=nope RUYI_BRAIN_PICK_PATH=a/b RUYI_PICK_SKIP_DEFERRED=maybe; do
+  run_bad x "${FULL[@]}" "$kv"; [ "$RC" != 0 ] && echo "$OUT" | grep -q "${kv%%=*}" && ok "R17b ${kv%%=*} invalid -> refused, variable named" || bad "R17b ${kv%%=*}" "rc=$RC"
+done
+cat "$WORK/rlogs0" "$WORK/RK.log" > "$WORK/rlogs"
+for pair in "bearer token:$TOKEN" "grade token:$GTOKEN" "family code:$CODE" "answer text:自由作答" "answer text 2:\"x\",\"y\""; do
+  name="${pair%%:*}"; val="${pair#*:}"; grep -qF -- "$val" "$WORK/rlogs" && bad "R18 $name appears in the R site logs" || ok "R18 $name not in the R site logs"
+done
+for p in "$PID_R" "$PID_RK"; do kill "$p" 2>/dev/null; done
+
 if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/dev/null; then
   section "L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow"
   start_site BR 18199 "http://127.0.0.1:$PORT_MOCK"; wait_http "http://127.0.0.1:18199/healthz"
@@ -574,6 +705,7 @@ if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/d
   cat "$WORK/browser2.out" | tee -a "$RESULTS"
   [ "$BRC" = 0 ] && ok "L2 brain-down page shows readable notice (all passed)" || bad "L2 brain-down browser checks"
   kill "$PID_BRD" 2>/dev/null
+  nextday
   start_site PB 18211 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-PB" "RUYI_GRADE_MAX_PER_HOUR=200"; wait_http "http://127.0.0.1:18211/healthz"
   BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18211" "$SHOTS" > "$WORK/browser4.out" 2>&1; BRC=$?
   cat "$WORK/browser4.out" | tee -a "$RESULTS"
@@ -586,6 +718,18 @@ if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/d
   cat "$WORK/browser5.out" | tee -a "$RESULTS"
   [ "$BRC" = 0 ] && ok "L6 degraded (archive-only) submit flow: the page never claims the brain recorded it (all passed)" || bad "L6 archive-only browser checks"
   kill "$PID_PBA" 2>/dev/null
+  start_mock mockRC 18250 "MOCK_GRADE_TOKEN=$GTOKEN"; wait_http "http://127.0.0.1:18250/_mock/stats"
+  start_site PC 18251 "http://127.0.0.1:18250" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-PC" "RUYI_GRADE_MAX_PER_HOUR=200" "RUYI_AUTO_SOURCES=$PSRC" "RUYI_AUTO_TTL=60s"; wait_http "http://127.0.0.1:18251/healthz"
+  MOCK_URL="http://127.0.0.1:18250" BROWSER_FLOW=contract BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18251" "$SHOTS" > "$WORK/browser6.out" 2>&1; BRC=$?
+  cat "$WORK/browser6.out" | tee -a "$RESULTS"
+  [ "$BRC" = 0 ] && ok "L7 final-contract page states in headless Chrome: rev refresh, new-id retry, 429, recorded:false, picked-set tags (all passed)" || bad "L7 contract browser checks"
+  grep -qiE "$CODE|$TOKEN|$GTOKEN" "$WORK/PC.log" && bad "L7b secrets in the log of the contract browser run" || ok "L7b no code/token in the log of the contract browser run"
+  kill "$PID_PC" 2>/dev/null
+  start_site PN 18252 "http://127.0.0.1:18221" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-PN" "RUYI_GRADE_MAX_PER_HOUR=200"; wait_http "http://127.0.0.1:18252/healthz"
+  BROWSER_FLOW=notready BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18252" "$SHOTS" > "$WORK/browser7.out" 2>&1; BRC=$?
+  cat "$WORK/browser7.out" | tee -a "$RESULTS"
+  [ "$BRC" = 0 ] && ok "L8 grade endpoint not deployed: the page says 暂未判分 / 大脑接口还没准备好, never 已提交到大脑 (all passed)" || bad "L8 not-ready browser checks"
+  kill "$PID_PN" 2>/dev/null
 fi
 
 kill "$PID_P" 2>/dev/null

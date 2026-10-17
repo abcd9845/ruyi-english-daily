@@ -2,30 +2,30 @@
   "sets": [
     {
       "id": "qa-practice-1",
-      "title": "联调1（联调用，非线上）",
-      "source": "math-intake.bsd-g7a-err",
+      "title": "联调1（联调用，非线上；占位值，需替换）",
+      "source": "<qa-practice-source>",
       "qrefs": [
-        "bsd-g7a-err.ch4.q7",
-        "bsd-g7a-err.ch4.q6"
+        "<qref-lowercase-1>",
+        "<qref-lowercase-2>"
       ]
     },
     {
       "id": "qa-practice-2",
-      "title": "联调2（联调用，非线上）",
-      "source": "en.exam.tj-ernankai.7a.yuekao1",
+      "title": "联调2（联调用，非线上；占位值，需替换）",
+      "source": "<qa-practice-source-2>",
       "qrefs": [
-        "en.exam.tj-ernankai.7a.yuekao1:english:54",
-        "en.exam.tj-ernankai.7a.yuekao1:english:53"
+        "<qref-lowercase-3>",
+        "<qref-lowercase-4>"
       ]
     },
     {
       "id": "qa-practice-alt",
-      "title": "联调备选（联调用，非线上）",
-      "source": "gen.chatgpt.2026-10-14.busy-sunday",
+      "title": "联调备选（联调用，非线上；占位值，需替换）",
+      "source": "<qa-practice-source-3>",
       "qrefs": [
-        "gen.chatgpt.2026-10-14.busy-sunday:english:busy-sunday-1",
-        "gen.chatgpt.2026-10-14.busy-sunday:english:busy-sunday-2",
-        "gen.chatgpt.2026-10-14.busy-sunday:english:busy-sunday-3"
+        "<qref-lowercase-5>",
+        "<qref-lowercase-6>",
+        "<qref-lowercase-7>"
       ]
     }
   ]

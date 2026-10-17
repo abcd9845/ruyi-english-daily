@@ -87,7 +87,7 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 
 套配置（样例 `deploy/sets.example.json`，只有占位 qref；真实套的 qref 只放在部署环境的文件里，不进仓库）：
 
-联调用的另一份样例 `deploy/sets.qa-practice.example.json`（**联调用，非线上**）：只含大脑测试库的标识（套 `qa-practice-1/2/alt`），配合 `RUYI_BRAIN_ID=qa-practice` 使用；题目都是 pending_key，只验提交 / 落库 / 幂等 / 每日 3 次上限，不验判对错；`qa-practice` 的选题预期返回空。不要用于线上。
+联调用的另一份样例 `deploy/sets.qa-practice.example.json`（**联调用，非线上**）：套 `qa-practice-1/2/alt`，其中 source 与 qref 全是**占位值**（`<qa-practice-source>` / `<qref-lowercase-N>`，不是合法值，原样加载会启动失败）——**使用前需替换成大脑给的真实 source key 和小写 qref**，真实标识只放在部署环境的文件里，不进公开仓库；配合 `RUYI_BRAIN_ID=qa-practice` 使用；题目都是 pending_key，只验提交 / 落库 / 幂等 / 每日 3 次上限，不验判对错；`qa-practice` 的选题预期返回空。不要用于线上。
 
 ```json
 {"sets":[{"id":"demo-1","title":"示例套","source":"<大脑 source key>","qrefs":["<qref>","<qref>"]}]}

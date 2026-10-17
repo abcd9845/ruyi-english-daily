@@ -5,6 +5,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -141,23 +142,57 @@ func TestExampleFileParses(t *testing.T) {
 	}
 }
 
-// The integration-testing sets file (qa-practice; "联调用，非线上") loads through the real validation.
+// The integration-testing sets file (qa-practice; "联调用，非线上") is a TEMPLATE: its source keys and qrefs are
+// <placeholders> (real brain identifiers never go into this public repo). The test checks the template's structure
+// (set ids, field shape, placeholder counts), then swaps the placeholders for fixture values and loads the result
+// through the real validation.
 func TestQAPracticeExampleFileParses(t *testing.T) {
 	b, err := os.ReadFile("../../deploy/sets.qa-practice.example.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := parse(string(b))
+	raw := string(b)
+
+	// structure of the template itself
+	if _, err := parse(raw); err == nil {
+		t.Error("the template with <placeholders> must not load as-is (a real source key is required)")
+	}
+	phSrc := regexp.MustCompile(`<qa-practice-source(-[0-9]+)?>`)
+	phRef := regexp.MustCompile(`<qref-lowercase-([0-9]+)>`)
+	if n := len(phSrc.FindAllString(raw, -1)); n != 3 {
+		t.Errorf("source placeholders: %d, want 3 (one per set)", n)
+	}
+	refs := phRef.FindAllStringSubmatch(raw, -1)
+	if len(refs) != 7 {
+		t.Fatalf("qref placeholders: %d, want 7", len(refs))
+	}
+	for i, m := range refs {
+		if m[1] != strconv.Itoa(i+1) {
+			t.Errorf("qref placeholder %d is numbered %s (must be 1..7 in order, all distinct)", i+1, m[1])
+		}
+	}
+
+	// placeholders -> fixture values, then the real validation
+	fixed := phSrc.ReplaceAllStringFunc(raw, func(m string) string {
+		return "qa-fixture.src" + strings.TrimSuffix(strings.TrimPrefix(m, "<qa-practice-source"), ">")
+	})
+	fixed = phRef.ReplaceAllString(fixed, "qa-fixture.src:q:$1")
+	if strings.ContainsAny(fixed, "<>") {
+		t.Fatalf("unreplaced placeholder left in the sample file")
+	}
+	r, err := parse(fixed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r.Len() != 3 {
 		t.Fatalf("sets: %d", r.Len())
 	}
-	for _, id := range []string{"qa-practice-1", "qa-practice-2", "qa-practice-alt"} {
+	want := map[string]int{"qa-practice-1": 2, "qa-practice-2": 2, "qa-practice-alt": 3}
+	for id, n := range want {
 		s, _ := r.Get(id)
-		if s == nil || len(s.QRefs) < 2 || !strings.Contains(s.Title, "联调用，非线上") {
+		if s == nil || len(s.QRefs) != n || !strings.Contains(s.Title, "联调用，非线上") || !strings.HasPrefix(s.Source, "qa-fixture.src") {
 			t.Errorf("%s: %+v", id, s)
+			continue
 		}
 		for _, q := range s.QRefs {
 			if q != strings.ToLower(q) {

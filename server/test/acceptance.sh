@@ -884,8 +884,16 @@ get t0n "http://127.0.0.1:18279/api/practice/new?source=$PSRC&n=2&wrong_only=1" 
 expect "U4g ... and the mock received 0 pick requests from it" "$(( $(mstat pick 18270) - P0 ))" 0
 grep -qF -e "$TOKEN" -e "$GTOKEN" "$WORK/T0.log" "$WORK/T0N.log" "$WORK/resp/t0n.b" && bad "U4h a token appears in the site logs / responses" || ok "U4h no token in the T site logs or the 501 response"
 kill "$PID_T0N" 2>/dev/null
-OUT=$(env -i PATH="$PATH" "${FULL[@]}" RUYI_SETS_FILE="$SRV/deploy/sets.qa-practice.example.json" RUYI_LISTEN=127.0.0.1:18278 timeout 2 "$BIN" 2>&1); RC=$?
-[ "$RC" = 124 ] && ok "U4i deploy/sets.qa-practice.example.json is accepted at startup (kept running until the 2 s timeout)" || bad "U4i qa-practice sets file" "rc=$RC $OUT"
+# the qa-practice sample is a TEMPLATE with <placeholders> (no real brain identifiers in the public repo): check its shape,
+# swap in fixture values, then it must load and start
+QAX="$SRV/deploy/sets.qa-practice.example.json"
+expect "U4i the sample is a template: ids, 3 source placeholders, 7 numbered qref placeholders, a real set titled 联调用，非线上" "$(jq -c '[(.sets|map(.id)),(.sets|map(.source)|map(test("^<qa-practice-source(-[0-9]+)?>$"))|all),([.sets[].qrefs[]]),(.sets|map(.title|contains("联调用，非线上"))|all)]' "$QAX")" '[["qa-practice-1","qa-practice-2","qa-practice-alt"],true,["<qref-lowercase-1>","<qref-lowercase-2>","<qref-lowercase-3>","<qref-lowercase-4>","<qref-lowercase-5>","<qref-lowercase-6>","<qref-lowercase-7>"],true]'
+OUT=$(env -i PATH="$PATH" "${FULL[@]}" RUYI_SETS_FILE="$QAX" RUYI_LISTEN=127.0.0.1:18277 timeout 2 "$BIN" 2>&1); RC=$?
+[ "$RC" != 0 ] && [ "$RC" != 124 ] && echo "$OUT" | grep -q RUYI_SETS_FILE && ok "U4j the template with <placeholders> is refused at startup (names RUYI_SETS_FILE)" || bad "U4j template accepted or wrong error" "rc=$RC $OUT"
+sed -E -e 's/<qa-practice-source(-[0-9]+)?>/qa-fixture.src\1/' -e 's/<qref-lowercase-([0-9]+)>/qa-fixture.src:q:\1/' "$QAX" > "$WORK/sets-qa.json"
+grep -q '[<>]' "$WORK/sets-qa.json" && bad "U4k placeholder left after substitution" || ok "U4k all placeholders substituted with fixture values"
+OUT=$(env -i PATH="$PATH" "${FULL[@]}" RUYI_SETS_FILE="$WORK/sets-qa.json" RUYI_LISTEN=127.0.0.1:18278 timeout 2 "$BIN" 2>&1); RC=$?
+[ "$RC" = 124 ] && ok "U4l the sample (placeholders replaced by fixture values) is accepted at startup (kept running until the 2 s timeout)" || bad "U4l qa-practice sets file" "rc=$RC $OUT"
 # U-B: RUYI_BRAIN_ID=qa-practice against a mock that serves only qa-practice
 start_mock mockT1 18272 "MOCK_GRADE_TOKEN=$GTOKEN" MOCK_BRAIN_ID=qa-practice; wait_http "http://127.0.0.1:18272/_mock/stats"
 start_site T1 18273 "http://127.0.0.1:18272" "${TENV[@]}" "RUYI_ATTEMPTS_DIR=$WORK/att-T1" RUYI_BRAIN_ID=qa-practice; wait_http "http://127.0.0.1:18273/healthz"

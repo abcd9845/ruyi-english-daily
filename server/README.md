@@ -63,7 +63,7 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 | `RUYI_LOG_LEVEL` | 否 | `debug`/`info`（默认）/`warn`/`error` |
 | `RUYI_NTFY_TOPIC` | 否 | 动态页提交用的 ntfy topic，登录后由 `/api/config` 下发；未设则按钮显示「提交通道未配置」 |
 | `RUYI_ALLOWED_SOURCES` | 否 | 逗号分隔的 source 白名单 |
-| `RUYI_BRAIN_GRADE_TOKEN` | 否 | **练习站令牌**，只在服务端，用于 `POST /v1/bank/grade` 以及 `GET /v1/brain/pick-practice`（读题/lookup/列表/媒体仍用 `RUYI_BRAIN_TOKEN`）。契约要目标练习脑的 write 权限，`bank:read` 令牌调它是 403）。**要用 `mode=due_first|wrong_only` 选题就必须配判分令牌**；没配 → 选题返回 501 `due_first_unavailable`/`wrong_only_unavailable`「大脑接口未就绪（选题需要配置判分令牌）」，**不会**偷偷改用读令牌；令牌被大脑 403 拒 → 502 `pick_forbidden`「选题令牌无权限」。大脑侧要给它「读题库 + 只写 ruyi 一个脑」的范围；**scope 名由大脑定，本站不写死**（以后可能换成更窄的 `bank:grade`，换令牌即可，代码不用改）。**不能等于 `RUYI_BRAIN_TOKEN`**（启动即校验，报错只写变量名）。空 = 不判分，提交走降级（只归档 + 提醒）。令牌绝不下发浏览器、不入归档、不进日志/响应/ntfy |
+| `RUYI_BRAIN_GRADE_TOKEN` | 否 | **练习站令牌**，只在服务端，用于 `POST /v1/bank/grade` 以及 `GET /v1/brain/pick-practice`（读题/lookup/列表/媒体仍用 `RUYI_BRAIN_TOKEN`）。契约要目标练习脑的 write 权限，`bank:read` 令牌调它是 403）。**要用 `mode=due_first|wrong_only` 选题就必须配判分令牌**；没配 → 选题返回 501 `due_first_unavailable`/`wrong_only_unavailable`「大脑接口未就绪（选题需要配置判分令牌）」，**不会**偷偷改用读令牌；令牌被大脑 **401 或 403** 拒 → 502 `pick_forbidden`「选题令牌无权限」（401 与 403 都得到 `pick_forbidden`；仅 `due_first` / `wrong_only` 这类大脑选题模式，随机套不走此映射）。大脑侧要给它「读题库 + 只写 ruyi 一个脑」的范围；**scope 名由大脑定，本站不写死**（以后可能换成更窄的 `bank:grade`，换令牌即可，代码不用改）。**不能等于 `RUYI_BRAIN_TOKEN`**（启动即校验，报错只写变量名）。空 = 不判分，提交走降级（只归档 + 提醒）。令牌绝不下发浏览器、不入归档、不进日志/响应/ntfy |
 | `RUYI_BRAIN_GRADE_PATH` | 否 | 判分接口路径，默认 `/v1/bank/grade`（契约见 `internal/brain/grade.go`） |
 | `RUYI_BRAIN_LOOKUP_PATH` | 否 | 按 qref 取题文，默认 `/v1/bank/questions/lookup`（用读令牌） |
 | `RUYI_BRAIN_PICK_PATH` | 否 | 选题接口，默认 `/v1/brain/pick-practice`（用判分令牌 `RUYI_BRAIN_GRADE_TOKEN`） |

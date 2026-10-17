@@ -10,7 +10,7 @@
 | # | 事项 | 谁确认 | 说明 |
 |---|---|---|---|
 | 1 | **大脑 #35 部署后复核契约** | 大脑 PM | 站点按「最终契约」对接：`POST /v1/bank/grade`（`{brain:"ruyi",client_attempt_id,items:[{qref,answer,rev?,attempt_kind?,answered_at?,session_ref?,payload?}]}`，≤50 题、qref 不重复、填空 ≤10 格；回复逐题 `{qref,status,correct?,attempt_id,recorded,duplicate}`；状态 `graded/pending_key/needs_review/unsupported`），错误 404（带 `details.qrefs` 的才是未知 qref，整批不写；不带 details 的兜底 `not_found` = 路由未部署）/409 `rev_mismatch`（`details` 为 qref/rev/current_rev）·`idempotency_conflict`/429 `rate_limited`（同题同脑每个上海日 >3 次，带 `details.qrefs` 与 `Retry-After`）；成功 201（新写入）/200（全是重放）。契约集中在 `server/internal/brain/grade.go`、`contract.go`，路径可用 `RUYI_BRAIN_GRADE_PATH` / `RUYI_BRAIN_LOOKUP_PATH` / `RUYI_BRAIN_PICK_PATH` 改。已按大脑开发的契约核对结论修正（见 PR 描述）：404 靠 `details.qrefs`/消息/哪个接口区分、严格 400 在站点发送前自校验、`answered_at` 不同 → 409、qref 小写上线并按发送串匹配回显、选题 `n` ≤10。 |
-| 2 | **练习站令牌（`RUYI_BRAIN_GRADE_TOKEN`）的范围** | 大脑 PM / 家长 | 必须是**单独**的令牌（站点启动时拒绝它与 `RUYI_BRAIN_TOKEN` 相同）。按最终契约它是「`bank:read` + 只写 ruyi 一个脑」的练习站令牌；**scope 名由大脑定，本站不写死**——以后若换成更窄的 `bank:grade`，只需换令牌值，代码不用改。站点只拿它调 `POST /v1/bank/grade`（读题/选题仍用 `RUYI_BRAIN_TOKEN`），令牌只在服务端：不下发浏览器、不入归档、不进日志/响应/ntfy（有测试 grep 令牌标记串）。不能 `include_answer`、不能写题库/答案/解析。 |
+| 2 | **练习站令牌（`RUYI_BRAIN_GRADE_TOKEN`）的范围** | 大脑 PM / 家长 | 必须是**单独**的令牌（站点启动时拒绝它与 `RUYI_BRAIN_TOKEN` 相同）。按最终契约它是「`bank:read` + 只写 ruyi 一个脑」的练习站令牌；**scope 名由大脑定，本站不写死**——以后若换成更窄的 `bank:grade`，只需换令牌值，代码不用改。站点拿它调 `POST /v1/bank/grade` 和 `GET /v1/brain/pick-practice`（选题）——**这两个接口都要目标练习脑的 write 权限，`bank:read` 读令牌调它们会得到 403**；读题 / lookup / 列表 / 媒体仍用 `RUYI_BRAIN_TOKEN`，令牌只在服务端：不下发浏览器、不入归档、不进日志/响应/ntfy（有测试 grep 令牌标记串）。不能 `include_answer`、不能写题库/答案/解析。 |
 | 3 | **`client_attempt_id` 契约** | 大脑 PM | 站点生成 UUID（页面里 `crypto.randomUUID`；契约允许 1–160 位 `[A-Za-z0-9._:-]`），**同一份答案重试用同一个 id（`answered_at` 也一起固定），用户改了答案换新 id**。大脑幂等键是 `ps:<client_attempt_id>:<qref>`：同 id 同答案 → 200 `duplicate:true` + 同一个 `attempt_id`；同 id 不同答案/结果 → 409 `idempotency_conflict`（站点先自查，页面收到后换新 id 自动重发一次）。站点自己也按 id 去重（内存 + 重启后从归档恢复），双保险。「已记入大脑」只看逐题 `recorded:true`；`unsupported`（`recorded:false`）、`pending_key`/`needs_review`（只记答案，页面「待核对」）都不会被说成判过分。 |
 | 4 | **选题能力**（`mode=due_first\|wrong_only`） | 大脑 PM | 走大脑 `GET /v1/brain/pick-practice`（题文用 lookup）。**接口没部署时**返回 **501**「大脑接口未就绪」（`wrong_only_unavailable` / `due_first_unavailable`），不自己编"错题"逻辑；不带 `mode` 的随机套照旧。带 `deferred:*` 的题默认保留并标「参考答案待核，不自动判」，`RUYI_PICK_SKIP_DEFERRED=1` 则跳过。`/api/practice/new` 仍**默认关**（`RUYI_AUTO_SOURCES` 为空）。 |
 | 5 | **ntfy**：`RUYI_NTFY_TOPIC` 是否沿用旧 topic | 家长 | 旧页里的 topic 是公开的；env 样例已要求用**新** topic。这个 topic 现在**同时**用于：①登录后 `/api/config` 下发给动态页（旧功能）；②服务端提交后"打招呼"推送（本期）。ECS 到 `ntfy.sh` 的出网需要通（不通也不影响判分，见下）。 |
@@ -22,6 +22,7 @@
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `RUYI_BRAIN_GRADE_TOKEN` | 空 | 练习站令牌（见上 §0-2）。**空 = 不判分**（`mode:"archive_only"`），同时**不能用 `mode=due_first|wrong_only` 选题**（选题也用这枚令牌）。必须 ≠ `RUYI_BRAIN_TOKEN`（启动校验）。写进 `/etc/ruyi-site/ruyi-site.env`，同样 600 root:root。日志里的 `[redacted]` 过滤器已包含它 |
+| `RUYI_BRAIN_ID` | `ruyi` | 发给大脑 `grade` 请求体 `brain` 和 `pick-practice` 查询串 `brain` 的练习脑 id；联调时可指向测试脑（如 `qa-practice`，样例套见 `deploy/sets.qa-practice.example.json`，联调用，非线上）。格式 `^[a-z0-9][a-z0-9_-]{0,63}$`；**空或纯空白按未设处理（= `ruyi`）**；不合规则启动即退出，只报变量名、不回显值。两枚令牌的 scope 必须与它指向的脑一致 |
 | `RUYI_BRAIN_GRADE_PATH` | `/v1/bank/grade` | 判分接口路径。必须以 `/` 开头 |
 | `RUYI_BRAIN_LOOKUP_PATH` | `/v1/bank/questions/lookup` | 按 qref 取题文（读令牌） |
 | `RUYI_BRAIN_PICK_PATH` | `/v1/brain/pick-practice` | 大脑选题。**用判分令牌 `RUYI_BRAIN_GRADE_TOKEN`**（契约要目标练习脑的 write 权限；读令牌调它是 403）。没配判分令牌 → 选题 501「大脑接口未就绪（选题需要配置判分令牌）」，不会改用读令牌；大脑回 401/403 → 502 `pick_forbidden`「选题令牌无权限」 |
@@ -131,7 +132,7 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
 
 ### 8.1 怎么部署
 
-1. 部署带本功能的二进制（`ruyi-site-smoke-linux-amd64`，含 #11+#12+#13；**不含 #14 ntfy 修复**，与 #14 合并后需一起部署，见 PR 描述）。
+1. 部署带本功能的二进制：**集成版（`release/integ-1017` 构建的 `ruyi-site-integ-linux-amd64`）已包含 #14 ntfy 修复，直接用集成二进制即可**，不再需要单独的 smoke 二进制，也不需要另行合并 #14（集成版内容见 `INTEGRATION.md`）。
 2. 把下面这个条目**追加**到 `/opt/ruyi-site/sets.json` 顶层 `"sets"` 数组末尾（该文件在 ECS 上，不进仓库；条目本身只有假值，同 `deploy/sets.smoke-entry.json`）：
 
 ```json

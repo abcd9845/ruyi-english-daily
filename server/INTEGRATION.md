@@ -53,7 +53,7 @@ merge 之后的提交（都不改功能）：
 新增（来自 #13、#16、#17；#11/#12/#14 的内容线上已有）：
 
 - **契约适配（#13）**：判分 `POST /v1/bank/grade`、取题 `POST /v1/bank/questions/lookup`、选题 `GET /v1/brain/pick-practice` 按大脑「最终契约」对接；错误码映射（401/403/404/409 `rev_mismatch`/409 `idempotency_conflict`/429 当日上限/501/5xx → 页面状态，永不 5xx、不谎称「已记入大脑」）；`rev` 过期提示「题目已更新，请刷新」；同一份答案重试沿用同一 `client_attempt_id` 与 `answered_at`；`unsupported` 的题 `recorded:false`；接口未部署时（404/501）按 not_ready 降级为仅留档。
-- **pick 改用判分令牌（#13）**：`due_first` / `wrong_only` 的 pick-practice 请求用 `RUYI_BRAIN_GRADE_TOKEN`（大脑对 pick 要 write scope，只读令牌会 403）；**没配判分令牌时 pick 直接 501「not ready」，不会退回用只读令牌**。lookup / 列表 / 图片仍用 `RUYI_BRAIN_TOKEN`。
+- **pick 改用判分令牌（#17，`f4631e3`）**：`due_first` / `wrong_only` 的 pick-practice 请求用 `RUYI_BRAIN_GRADE_TOKEN`（大脑对 pick 要 write scope，只读令牌会 403）；**没配判分令牌时 pick 直接 501「not ready」，不会退回用只读令牌**。lookup / 列表 / 图片仍用 `RUYI_BRAIN_TOKEN`。
 - **`RUYI_BRAIN_ID`（#17）**：判分 body 的 `brain` 与 pick 查询的 `brain` 可配，默认 `ruyi`，联调用 `qa-practice`；非法值启动即退出且不回显。站点 URL 上的 `?brain=` 一律忽略。
 - **本地测试套（#16）**：`sets.json` 支持 `"local": true` + `questions`（`smoke-test` 套，题干「测试题，随便填」）；新增 `POST /api/practice/<id>/check`（服务端判对错，答案不下发）；提交固定 `archive_only` / `brain_note: test_set`，**提交时 0 次调大脑**；归档行 `test:true`；ntfy 标题/正文带「【测试】」；保留 source `local.smoke`（写进 `RUYI_AUTO_SOURCES` / `RUYI_ALLOWED_SOURCES` 会启动即退出）。
 - **启动探测**：配了 `RUYI_SETS_FILE` 时，启动后异步做 1 次只读 lookup 探测（明显不存在的 qref），只写日志，不影响启动。
@@ -68,7 +68,13 @@ merge 之后的提交（都不改功能）：
 | `RUYI_BRAIN_PICK_PATH` | `/v1/brain/pick-practice` | pick 路径，同上 |
 | `RUYI_PICK_SKIP_DEFERRED` | `0` | `1` = 丢掉大脑标 `deferred:*` 的选题；默认保留并标注 |
 
-已有变量的语义变化：`RUYI_BRAIN_GRADE_TOKEN` 现在**同时**用于判分和 pick-practice（见上），其范围须同时满足两者，且仍必须与 `RUYI_BRAIN_TOKEN` 不同。
+已有变量的语义变化（来自 #17）：`RUYI_BRAIN_GRADE_TOKEN` 现在**同时**用于判分和 pick-practice（见上；#13 的 pick 用的是读令牌，#17 才改），其范围须同时满足两者，且仍必须与 `RUYI_BRAIN_TOKEN` 不同。
+
+## 5.1 上线 / 回滚注意
+
+- **`ntfy_url` 依赖线上 `RUYI_NTFY_BASE_URL`（#14）**：登录后 `/api/config` 返回的 `ntfy_url` 是 `RUYI_NTFY_BASE_URL` + topic。线上要显示 `ntfy-me.com` 那个地址，必须在线上 env 里已设 `RUYI_NTFY_BASE_URL`（`ntfy-me.com` 只是本仓库测试里的占位基址）；**不设则默认 `https://ntfy.sh/`**，`ntfy_url` 就会指向 ntfy.sh。上线前先核对线上 env。
+- **回滚前必须先删 `sets.json` 里的 `smoke-test` 条目**：旧二进制不认识 `local` / `questions` 字段，会启动即退出（`DEPLOY-P3.md` §6 / §8.3）。
+- **回滚后浏览器若还开着集成版页面**：集成版页面提交时会带 `answered_at`（和 `rev`），旧二进制严格解析、不认识这些字段，返回 400「提交内容格式不对」（已用旧二进制 `1cc0c775…` 实测）；**刷新页面**（加载旧二进制自带的旧版页面）即可。
 
 ## 6. 验证摘要
 

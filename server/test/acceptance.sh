@@ -44,7 +44,9 @@ cp "$ROOT/m/numberline-4y/index.html" "$STATIC/m/numberline-4y/index.html"
 echo "JUNK-LOG-MARKER" > "$STATIC/server.log"; echo 1234 > "$STATIC/server.pid"
 printf '#!/bin/sh\necho JUNK-SH-MARKER\n' > "$STATIC/start-server.sh"; cp "$STATIC/start-server.sh" "$STATIC/stop-server.sh"
 echo "JUNK-ENV-MARKER=1" > "$STATIC/.env"; printf '[core]\n\tJUNK-GIT-MARKER\n' > "$STATIC/.git/config"
-MAIN_FILES="$(git -C "$ROOT" ls-tree -r --name-only "$MAIN_REF")"
+# the "old pages": everything on main that the static allowlist serves, except the m/ dynamic pages
+# (server code, docs and git housekeeping are not served; m/numberline-4y has its own checks)
+MAIN_FILES="$(git -C "$ROOT" ls-tree -r --name-only "$MAIN_REF" | grep -v -E '^(server/|docs/|\.gitignore$|\.github/|m/)')"
 
 start_mock() { # name port [env...]
   local name=$1 port=$2; shift 2
@@ -299,6 +301,78 @@ grep -q 'figure_status ok but media empty qref=math:intake' "$WORK/alllogs" || g
 grep -q 'login failed' "$WORK/alllogs" && grep -q 'brain request failed' "$WORK/alllogs" && ok "K5 failure events are logged (sanity: logs are not empty)" || bad "K5 sanity"
 say "     sample log lines (verbatim):"; { grep 'login failed' "$WORK/alllogs" | head -1; grep 'brain request failed' "$WORK/alllogs" | head -1; grep 'msg=request' "$WORK/alllogs" | head -1; } | sed 's/^/       /' | tee -a "$RESULTS"
 
+section "P. P0 practice page (Issue #10) — sets file, /api/practice, embedded page + KaTeX"
+PSRC="math.synthetic.p0-demo"
+cat > "$WORK/sets.json" <<JSON
+{"sets":[
+ {"id":"demo-1","title":"演示套","source":"$PSRC","qrefs":["example.set:math:1","example.set:math:2","example.set:math:3"]},
+ {"id":"reorder-2","title":"乱序套","source":"$PSRC","qrefs":["example.set:math:3","example.set:math:99","example.set:math:1"]},
+ {"id":"free-3","title":"自由作答","source":"$PSRC","qrefs":["example.set:math:4"]}
+]}
+JSON
+# P0: without RUYI_SETS_FILE (site A4 is still running) nothing changes except /api/practice -> 404
+get s "$A/api/practice/demo-1" -b "$WORK/jar2"; expect "P1 no RUYI_SETS_FILE: /api/practice/demo-1 -> 404 (even logged in)" "$CODE_HTTP" 404
+get s "$A/api/sets/$SOURCE" -b "$WORK/jar2"; expect "P2 no RUYI_SETS_FILE: old /api/sets still 200" "$CODE_HTTP" 200
+start_site P 18210 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json"; PA="http://127.0.0.1:18210"; wait_http "$PA/healthz"
+post_login p1 "$PA" "$CODE" -c "$WORK/jarP"
+get s "$PA/api/practice/demo-1"; expect "P3 anonymous /api/practice/demo-1 -> 401" "$CODE_HTTP" 401
+get s "$PA/api/practice/Bad%20Id" ; expect "P3b anonymous + illegal id -> still 401 (login first)" "$CODE_HTTP" 401
+get s "$PA/api/practice/Bad%20Id" -b "$WORK/jarP"; expect "P4 illegal set id -> 400" "$CODE_HTTP" 400
+get s "$PA/api/practice/no-such-set" -b "$WORK/jarP"; expect "P5 unknown set id -> 404" "$CODE_HTTP" 404
+get s "$PA/api/practice/..%2f..%2fetc%2fpasswd" -b "$WORK/jarP"; [ "$CODE_HTTP" = 400 ] || [ "$CODE_HTTP" = 404 ] && ok "P5b traversal-shaped id refused ($CODE_HTTP)" || bad "P5b" "$CODE_HTTP"
+get d1 "$PA/api/practice/demo-1" -b "$WORK/jarP"; expect "P6 demo-1 -> 200" "$CODE_HTTP" 200
+expect "P7 whitelist + config order (3 questions of 5 in the brain; alternates excluded)" "$(jq -r '[.items[].qref]|join(",")' "$WORK/resp/d1.b")" "example.set:math:1,example.set:math:2,example.set:math:3"
+expect "P7b ordinals 1..N, set_id/title, empty missing_qrefs" "$(jq -c '[[.items[].ordinal],.set_id,.title,.missing_qrefs]' "$WORK/resp/d1.b")" '[[1,2,3],"demo-1","演示套",[]]'
+expect "P8 blanks counted by the server (3 / none / 2, full-width included)" "$(jq -c '[.items[]|(.blanks // 0)]' "$WORK/resp/d1.b")" '[3,0,2]'
+expect "P8b options delivered as {key,text_md}" "$(jq -c '[.items[1].options[]|.key]' "$WORK/resp/d1.b")" '["A","B","C","D"]'
+get d2 "$PA/api/practice/reorder-2" -b "$WORK/jarP"
+expect "P9 config order beats brain order; configured-but-absent qref -> missing_qrefs (200, not 500)" "$(jq -c '[[.items[].qref],.missing_qrefs]' "$WORK/resp/d2.b")" '[["example.set:math:3","example.set:math:1"],["example.set:math:99"]]'
+for f in d1 d2; do
+  if grep -qiE '"(answer|explanation|solution|correct|is_correct|include_answer)"|MOCK-(ANSWER|EXPLANATION|SOLUTION)-MARKER' "$WORK/resp/$f.b"; then bad "P10 $f carries an answer/explanation/solution field"; else ok "P10 $f has no answer/explanation/solution (mock sends all three on every question)"; fi
+done
+grep -q 'MOCK-ANSWER-MARKER' <(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT_MOCK/v1/bank/questions?source=$PSRC&limit=500") && ok "P10b control: the mock really does send the answer marker upstream" || bad "P10b control"
+expect "P11 allowed item keys only" "$(jq -c '[.items[]|keys[]]|unique' "$WORK/resp/d1.b")" '["blanks","figure_status","media","options","ordinal","qref","qtype","stem_md"]'
+if grep -qiE 'bearer|'"$TOKEN"'|ticket' "$WORK/resp/d1.b" "$WORK/resp/d1.h"; then bad "P12 token/Bearer/ticket in practice response"; else ok "P12 no token / Bearer / ticket in the practice response or headers"; fi
+expect "P13 mock saw the practice source list requests (only source/limit/cursor accepted by the mock, else 400)" "$(MSTAT | jq '.list_practice >= 1')" true
+
+# embedded page + KaTeX: served although the static dir has no copy of them
+[ ! -e "$STATIC/m/practice" ] && ok "P14 the static dir has no m/practice (nothing hand-copied to the server)" || bad "P14"
+get pg "$PA/m/practice/"; expect "P15 /m/practice/ -> 200 without login (page holds no data)" "$CODE_HTTP" 200
+grep -qi '^content-type: text/html' "$WORK/resp/pg.h" && grep -qi "^content-security-policy: default-src 'none'" "$WORK/resp/pg.h" && ok "P15b html content-type + restrictive CSP" || bad "P15b headers"
+get s "$PA/m/practice"; expect "P15c /m/practice -> 301" "$CODE_HTTP" 301
+for f in katex.min.js katex.min.css LICENSE fonts/KaTeX_Main-Regular.woff2 fonts/KaTeX_Math-Italic.woff2; do get s "$PA/vendor/katex/$f"; expect "P16 /vendor/katex/$f" "$CODE_HTTP" 200; done
+for f in "" katex/ katex/fonts/ katex/fonts/KaTeX_Main-Regular.ttf katex/fonts/KaTeX_Main-Regular.woff katex/nope.js katex/../katex/katex.min.js katex/%2e%2e/katex.min.js other/x.js modules.txt; do
+  get s "$PA/vendor/$f"; [ "$CODE_HTTP" = 404 ] && ok "P17 /vendor/$f -> 404" || bad "P17 /vendor/$f" "got $CODE_HTTP"; done
+# the page as delivered: no external references at all
+if grep -oiE '(https?:)?//[a-z0-9][^"'"'"' )<>]*' "$WORK/resp/pg.b" | grep -viE '^//(localhost|127\.0\.0\.1)' | grep -q .; then bad "P18 page references an external URL" "$(grep -oiE '(https?:)?//[a-z0-9][^"'"'"' )<>]*' "$WORK/resp/pg.b" | head -3 | tr '\n' ' ')"; else ok "P18 page source: no http(s):// or protocol-relative references (only site-relative paths)"; fi
+get css "$PA/vendor/katex/katex.min.css"
+grep -qiE 'https?:|@import' "$WORK/resp/css.b" && bad "P19 css references something external" || ok "P19 katex css: no external references; fonts only /vendor/katex/fonts/*.woff2"
+[ "$(grep -o 'url([^)]*)' "$WORK/resp/css.b" | grep -vc '^url(/vendor/katex/fonts/[A-Za-z0-9_-]*\.woff2)$')" = 0 ] && ok "P19b every css url() is an embedded woff2" || bad "P19b css urls"
+# regressions: old pages untouched, numberline page + API unchanged
+fails=0; while IFS= read -r f; do
+  want=$(git -C "$ROOT" show "$MAIN_REF:$f" | sha256sum | cut -d' ' -f1); get f "$PA/$f"; got=$(sha256sum < "$WORK/resp/f.b" | cut -d' ' -f1)
+  [ "$CODE_HTTP" = 200 ] && [ "$got" = "$want" ] || fails=$((fails+1)); done <<< "$MAIN_FILES"
+expect "P20 all $(echo "$MAIN_FILES" | wc -l) old static files still byte-identical to $MAIN_REF (diffs)" "$fails" 0
+get f "$PA/m/numberline-4y/"; expect "P21 numberline page still served" "$CODE_HTTP" 200
+[ "$(sha256sum < "$WORK/resp/f.b" | cut -d' ' -f1)" = "$(sha256sum < "$ROOT/m/numberline-4y/index.html" | cut -d' ' -f1)" ] && ok "P21b numberline page byte-identical to the repo file" || bad "P21b"
+get f "$PA/api/sets/$SOURCE" -b "$WORK/jarP"; expect "P22 numberline API unchanged: 60 questions" "$(jq '.items|length' "$WORK/resp/f.b")" 60
+get f "$PA/api/sets/$PSRC" -b "$WORK/jarP"; expect "P23 a set-only source is NOT listable through the old /api/sets" "$CODE_HTTP" 404
+get f "$PA/server.log"; expect "P24 junk files still 404" "$CODE_HTTP" 404
+# startup validation of the sets file
+printf '{"sets":[{"id":"BAD-ID","title":"t","source":"%s","qrefs":["SECRET-QREF-MARK"]}]}' "$PSRC" > "$WORK/badsets.json"
+run_bad x "${FULL[@]}" RUYI_SETS_FILE="$WORK/badsets.json"
+[ "$RC" != 0 ] && echo "$OUT" | grep -q RUYI_SETS_FILE && ! echo "$OUT" | grep -q -e SECRET-QREF-MARK -e BAD-ID && ok "P25 invalid sets file -> exit $RC, names RUYI_SETS_FILE, echoes none of its content" || bad "P25" "rc=$RC out=$OUT"
+run_bad x "${FULL[@]}" RUYI_SETS_FILE="$WORK/does-not-exist.json"
+[ "$RC" != 0 ] && echo "$OUT" | grep -q RUYI_SETS_FILE && ok "P26 missing sets file -> refused" || bad "P26"
+OUT=$(env -i PATH="$PATH" "${FULL[@]}" RUYI_SETS_FILE="$SRV/deploy/sets.example.json" RUYI_LISTEN=127.0.0.1:18215 timeout 2 "$BIN" 2>&1); RC=$?
+[ "$RC" = 124 ] && ok "P27 deploy/sets.example.json is accepted at startup (kept running until the 2 s timeout)" || bad "P27 example sets file" "rc=$RC $OUT"
+sleep 0.3
+cat "$WORK/P.log" > "$WORK/plogs"
+for pair in "bearer token:$TOKEN" "family code:$CODE" "session secret:$SECRET" "ntfy topic:$TOPIC" "qref:example.set:math" "answer marker:MOCK-ANSWER" "stem text:dfrac"; do
+  name="${pair%%:*}"; val="${pair#*:}"; grep -qF -- "$val" "$WORK/plogs" && bad "P28 $name appears in the practice-site log" || ok "P28 $name not in the practice-site log"
+done
+grep -q 'practice sets loaded' "$WORK/plogs" && grep -q 'practice set has qrefs the brain did not return' "$WORK/plogs" && ok "P29 log has the set count and a count-only warning for the missing qref" || bad "P29"
+
 if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/dev/null; then
   section "L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow"
   start_site BR 18199 "http://127.0.0.1:$PORT_MOCK"; wait_http "http://127.0.0.1:18199/healthz"
@@ -319,7 +393,14 @@ if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/d
   cat "$WORK/browser2.out" | tee -a "$RESULTS"
   [ "$BRC" = 0 ] && ok "L2 brain-down page shows readable notice (all passed)" || bad "L2 brain-down browser checks"
   kill "$PID_BRD" 2>/dev/null
+  start_site PB 18211 "http://127.0.0.1:$PORT_MOCK" "RUYI_SETS_FILE=$WORK/sets.json"; wait_http "http://127.0.0.1:18211/healthz"
+  BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18211" "$SHOTS" > "$WORK/browser4.out" 2>&1; BRC=$?
+  cat "$WORK/browser4.out" | tee -a "$RESULTS"
+  [ "$BRC" = 0 ] && ok "L4 practice page in headless Chrome (all passed)" || bad "L4 practice browser checks"
+  grep -qiE "$CODE|$TOKEN" "$WORK/PB.log" && bad "L5 secrets in the log of the browser-driven run" || ok "L5 no code/token in the log of the browser-driven practice run"
+  kill "$PID_PB" 2>/dev/null
 fi
 
+kill "$PID_P" 2>/dev/null
 say ""; say "TOTAL: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

@@ -17,6 +17,7 @@ import (
 	"github.com/abcd9845/ruyi-english-daily/server/internal/auth"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/brain"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/config"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/embedded"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/server"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/staticfiles"
 )
@@ -54,14 +55,24 @@ func run() error {
 		log.Warn("brain TLS verification is DISABLED (loopback address only)")
 	}
 
+	emb, err := embedded.New(ruyisite.Pages(), ruyisite.KaTeX())
+	if err != nil {
+		return errors.New("embedded files unreadable")
+	}
+	if cfg.Sets != nil {
+		log.Info("practice sets loaded", "sets", cfg.Sets.Len())
+	}
+
 	app := server.New(server.Deps{
-		Auth:    auth.New(cfg.FamilyCode, cfg.SessionSecret, cfg.SessionTTL, cfg.CookieSecure, nil),
-		Limiter: server.NewLimiter(),
-		Brain:   bc,
-		Static:  static,
-		Log:     log,
-		Sources: cfg.AllowedSource,
-		Topic:   cfg.NtfyTopic,
+		Auth:     auth.New(cfg.FamilyCode, cfg.SessionSecret, cfg.SessionTTL, cfg.CookieSecure, nil),
+		Limiter:  server.NewLimiter(),
+		Brain:    bc,
+		Static:   static,
+		Log:      log,
+		Sources:  cfg.AllowedSource,
+		Topic:    cfg.NtfyTopic,
+		Sets:     cfg.Sets,
+		Embedded: emb,
 	})
 	srv := &http.Server{
 		Addr:              cfg.Listen,

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/abcd9845/ruyi-english-daily/server/internal/sets"
 )
 
 // DefaultAllowedSource is the only source the page needs in the 18082 trial.
@@ -39,6 +41,8 @@ type Config struct {
 	LogLevel      slog.Level
 	NtfyTopic     string
 	AllowedSource []string
+	// Sets is the practice-set registry from RUYI_SETS_FILE (nil when unset).
+	Sets *sets.Registry
 }
 
 var (
@@ -177,6 +181,28 @@ func Load(getenv func(string) string) (*Config, error) {
 				break
 			}
 			c.AllowedSource = append(c.AllowedSource, s)
+		}
+	}
+
+	if p := strings.TrimSpace(getenv("RUYI_SETS_FILE")); p != "" {
+		st, err := os.Stat(p)
+		switch {
+		case err != nil || !st.Mode().IsRegular():
+			bad("RUYI_SETS_FILE", "is not a readable regular file")
+		case st.Size() > sets.MaxFileBytes:
+			bad("RUYI_SETS_FILE", "file too large")
+		default:
+			data, err := os.ReadFile(p)
+			if err != nil {
+				bad("RUYI_SETS_FILE", "is not a readable regular file")
+				break
+			}
+			reg, err := sets.Parse(data, sourceRe.MatchString)
+			if err != nil {
+				bad("RUYI_SETS_FILE", err.Error())
+			} else {
+				c.Sets = reg
+			}
 		}
 	}
 

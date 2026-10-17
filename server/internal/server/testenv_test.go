@@ -19,13 +19,22 @@ import (
 	"testing"
 	"time"
 
+	ruyisite "github.com/abcd9845/ruyi-english-daily/server"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/auth"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/brain"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/config"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/embedded"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/server"
+	"github.com/abcd9845/ruyi-english-daily/server/internal/sets"
 	"github.com/abcd9845/ruyi-english-daily/server/internal/staticfiles"
 )
 
 const testSource = "math-intake.zz-yuekao-numberline-4y"
+
+// practiceSrc is the synthetic source behind the practice-set tests.
+const practiceSrc = "math.synthetic.p0-demo"
+const shaP1 = "7777777777777777777777777777777777777777777777777777777777777777"
+const shaP4 = "8888888888888888888888888888888888888888888888888888888888888888"
 
 func rnd(t testing.TB, prefix string) string {
 	b := make([]byte, 12)
@@ -68,6 +77,11 @@ func newFakeBrain(t *testing.T) *fakeBrain {
 		f.mu.Unlock()
 		if r.Header.Get("Authorization") != "Bearer "+f.token {
 			jerr(w, 401, "unauthorized")
+			return
+		}
+		if r.URL.Query().Get("source") == practiceSrc {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": f.practiceItems(), "next_cursor": nil})
 			return
 		}
 		var items []map[string]any
@@ -144,6 +158,32 @@ func newFakeBrain(t *testing.T) *fakeBrain {
 	return f
 }
 
+// practiceItems: 5 synthetic questions in scrambled order. Every one carries
+// answer/explanation/solution fields (and an answer flag inside an option) that
+// the site must strip. q1 and q4 have a figure.
+func (f *fakeBrain) practiceItems() []map[string]any {
+	mk := func(n int, qtype, stem string, opts any) map[string]any {
+		q := map[string]any{"qref": fmt.Sprintf("example.set:math:%d", n), "source": practiceSrc, "number": strconv.Itoa(n),
+			"qtype": qtype, "stem": stem, "media": []any{},
+			"answer": "SECRET-ANSWER-MARK", "explanation": "SECRET-EXPLANATION-MARK", "solution": "SECRET-SOLUTION-MARK",
+			"include_answer": true, "figure_status": "unknown"}
+		if opts != nil {
+			q["options"] = opts
+		}
+		return q
+	}
+	q1 := mk(1, "short_answer", "a ________ b ____ c $x_____y$ d\n\n＿＿＿＿ e ___ f", nil)
+	q1["media"] = []any{map[string]any{"sha256": shaP1, "mime": "image/png", "ordinal": 1, "slot": "stem"}}
+	q1["figure_status"] = "ok"
+	q2 := mk(2, "single_choice", "choose（ ）", []map[string]any{
+		{"key": "A", "text": "$\\dfrac{1}{2}$", "answer": true}, {"key": "B", "text": "two", "is_correct": false}})
+	q3 := mk(3, "calculation", "plain $|x|<2$ text", nil)
+	q4 := mk(4, "short_answer", "alt ________", nil)
+	q4["media"] = []any{map[string]any{"sha256": shaP4, "mime": "image/png", "ordinal": 1, "slot": "stem"}}
+	q5 := mk(5, "short_answer", "alt2", nil)
+	return []map[string]any{q4, q2, q5, q3, q1}
+}
+
 // fakeNumber is the number of the question at sorted position n: "1(1)", "1(2)", "1(3)", "2(1)" …
 // with a circled suffix on position 12 ("4(3)③") to look like the real exam.
 func fakeNumber(n int) string {
@@ -185,6 +225,7 @@ type opts struct {
 	secure   bool
 	noTopic  bool
 	brainURL string // override (e.g. dead address)
+	sets     string // RUYI_SETS_FILE content; "" = no sets
 }
 
 func newEnv(t *testing.T, o opts) *env {
@@ -215,8 +256,15 @@ func newEnv(t *testing.T, o opts) *env {
 	log := slog.New(slog.NewTextHandler(server.NewRedactWriter(e.logs, nil), &slog.HandlerOptions{Level: slog.LevelDebug}))
 	_ = secrets // logs are captured RAW (no redaction) so tests prove the code itself never logs secrets
 	e.au = auth.New(e.code, e.secret, time.Hour, o.secure, nil)
+	var reg *sets.Registry
+	if o.sets != "" {
+		reg, err = sets.Parse([]byte(o.sets), config.SourceRe().MatchString)
+		must(t, err)
+	}
+	emb, err := embedded.New(ruyisite.Pages(), ruyisite.KaTeX())
+	must(t, err)
 	app := server.New(server.Deps{Auth: e.au, Limiter: server.NewLimiter(), Brain: bc, Static: h, Log: log,
-		Sources: []string{testSource}, Topic: e.topic})
+		Sources: []string{testSource}, Topic: e.topic, Sets: reg, Embedded: emb})
 	e.ts = httptest.NewServer(app)
 	t.Cleanup(e.ts.Close)
 	return e

@@ -3,7 +3,7 @@
 // (Node built-ins only). Usage:
 //   BROWSER_CODE=<family code> node test/browser.js <base-url> <out-dir> [chrome-binary]
 // Logs in through the real login form, checks the DOM, stubs the ntfy POST (nothing
-// is ever sent to ntfy.sh), and writes screenshots to <out-dir>.
+// is ever sent to ntfy.sh or ntfy-me.com), and writes screenshots to <out-dir>.
 const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -62,7 +62,7 @@ const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); 
   await send('Page.addScriptToEvaluateOnNewDocument', { source: `
     window.__ntfy = []; window.confirm = () => true; window.alert = () => {};
     const _f = window.fetch.bind(window);
-    window.fetch = (u, o) => { if (String(u).startsWith('https://ntfy.sh/')) { window.__ntfy.push({url: String(u), headers: o && o.headers, body: o && o.body}); return Promise.resolve(new Response('{}', {status: 200})); } return _f(u, o); };` }, sid);
+    window.fetch = (u, o) => { if (['https://ntfy.sh/', 'https://ntfy-me.com/'].some(h => String(u).startsWith(h))) { window.__ntfy.push({url: String(u), headers: o && o.headers, body: o && o.body}); return Promise.resolve(new Response('{}', {status: 200})); } return _f(u, o); };` }, sid);
 
   const pageUrl = base + '/m/numberline-4y/';
   await send('Page.navigate', { url: pageUrl }, sid);
@@ -147,7 +147,7 @@ const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail }); 
       p.type === 'ruyi-mi-numberline-4y-submit' && p.learner === '如意' && p.set.source === 'math-intake.zz-yuekao-numberline-4y' &&
       p.answers.length === 60 && p.answers.every(a => a.qref && 'typed' in a) && !JSON.stringify(p).includes(code) && p.answers.find(a => a.ordinal === 31).typed === '3' && p.answers.find(a => a.ordinal === 38).n === '11(2)③',
       'answered=' + p.answered);
-    check('ntfy url came from /api/config (https://ntfy.sh/…)', /^https:\/\/ntfy\.sh\/[A-Za-z0-9_-]+$/.test(url));
+    check('ntfy url came from /api/config (https://ntfy.sh/… or https://ntfy-me.com/…)', /^https:\/\/(ntfy\.sh|ntfy-me\.com)\/[A-Za-z0-9_-]+$/.test(url));
   } else {
     check('submit disabled with notice when no ntfy topic', btn.includes('提交通道未配置'), btn);
   }

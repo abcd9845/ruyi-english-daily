@@ -115,3 +115,31 @@ func TestOtherValidation(t *testing.T) {
 		t.Fatalf("secrets: %d", len(c.Secrets()))
 	}
 }
+
+func TestFamilyCodeMinLength(t *testing.T) {
+	// 5 characters pass; 4 fail, and the error never echoes the value.
+	for _, ok := range []string{"a1b2c", "测试家庭码五", "12345"} {
+		m := valid(t)
+		m["RUYI_FAMILY_CODE"] = ok
+		if _, err := Load(env(m)); err != nil {
+			t.Errorf("len %d should pass: %v", len([]rune(ok)), err)
+		}
+	}
+	for _, bad := range []string{"qz9k", "测试家庭", "1234", "x"} {
+		m := valid(t)
+		m["RUYI_FAMILY_CODE"] = bad
+		_, err := Load(env(m))
+		if err == nil || !strings.Contains(err.Error(), "RUYI_FAMILY_CODE") || !strings.Contains(err.Error(), "min 5") {
+			t.Errorf("%d-char code must fail naming the variable and min 5: %v", len([]rune(bad)), err)
+			continue
+		}
+		if strings.Contains(err.Error(), bad) {
+			t.Errorf("error echoes the code value: %v", err)
+		}
+	}
+	m := valid(t)
+	m["RUYI_FAMILY_CODE"] = ""
+	if _, err := Load(env(m)); err == nil {
+		t.Error("empty must fail")
+	}
+}

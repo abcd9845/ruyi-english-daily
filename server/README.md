@@ -51,7 +51,7 @@ GET  /v1/media/{sha256}?ticket=…                         不带 Authorization
 |---|---|---|
 | `RUYI_LISTEN` | 否 | 默认 `:18082` |
 | `RUYI_STATIC_DIR` | 是 | 静态目录（仓库检出/拷贝）。只读 |
-| `RUYI_FAMILY_CODE` | 是 | 家庭码（≥6 位）。改它 → 旧 cookie 全部失效 |
+| `RUYI_FAMILY_CODE` | 是 | 家庭码（≥5 个字符）。改它 → 旧 cookie 全部失效。**码较短**：安全上依赖限速（同 IP 每分钟 5 次失败）；以后可换更长的码，换码只需改 env 并重启 |
 | `RUYI_SESSION_SECRET` | 是 | cookie 签名密钥（≥16 位，建议 `openssl rand -hex 32`）。改它 → 旧 cookie 失效 |
 | `RUYI_SESSION_TTL` | 否 | 默认 `720h` |
 | `RUYI_COOKIE_SECURE` | 否 | `0`（默认）/`1`。http 下必须 0 |
@@ -90,6 +90,8 @@ make acceptance  # 起 mock 大脑 + 新服务，跑 test/acceptance.sh（含无
 5. 回滚：`systemctl stop ruyi-site`。
 
 ## 已知限制
+
+- 家庭码最短 5 个字符，较短，防护主要靠登录限速（同 IP 每分钟最多 5 次失败，之后 429）。建议后续换更长的码；换码只改 env 文件并 `systemctl restart ruyi-site`，旧 cookie 随之全部失效。
 
 - 来源 IP 取自 TCP 对端地址，不信任 `X-Forwarded-For`。若以后放在反向代理后面，限速会变成"所有人共用一个 IP"，需要先加可信代理配置。
 - 目前是明文 http；家庭码与 cookie 可被链路窃听（方案已记录）。

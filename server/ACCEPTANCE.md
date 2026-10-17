@@ -55,6 +55,8 @@ SHOTS=/some/dir test/acceptance.sh   # 约 12 秒；SHOTS 非空且有 node + go
 | 无答案 | D8b（输出无 answer/explanation 键）；服务端代码从不引用 `include_answer` |
 | `options` 缺省整键省略 | D8a |
 
+家庭码最短长度为 5 个字符：单元 `TestFamilyCodeMinLength`（5 字符通过，4 字符报错，报错只含变量名与 "min 5"，不回显值）。
+
 附加：A（白名单与目录遍历 404）、I（对大脑的 TLS 三种模式）、J（启动校验，报错不含值）、G5（优雅关闭）。
 
 ## 构建产物
@@ -65,7 +67,7 @@ dist/ruyi-site-linux-amd64: ELF 64-bit LSB executable, x86-64, version 1 (SYSV),
 $ ldd dist/ruyi-site-linux-amd64
 not a dynamic executable
 $ sha256sum dist/ruyi-site-linux-amd64
-b906d62997a8aa64d790921483f244b6846e2d3b00a8d777550e3e06df4c91d0  dist/ruyi-site-linux-amd64
+cc43ee284d021f89cda73a85fe27e36a298541835b9e1c2390e5391515594ae9  dist/ruyi-site-linux-amd64
 ```
 
 同一源码、两次干净构建（`make clean && make build`）的 sha256 相同（`-trimpath -buildvcs=false`）。工具链 Go 1.26.9，`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`。
@@ -136,7 +138,7 @@ PASS  C6 brain not contacted by any unauthenticated request (=0)
 PASS  C7 wrong code -> 401 (=401)
 PASS  C8 wrong code: no Set-Cookie header
 PASS  C9 right code -> 200 (=200)
-     Set-Cookie (value elided): ruyi_sess=<value>; Path=/; Expires=Mon, 16 Nov 2026 08:16:14 GMT; Max-Age=2592000; HttpOnly; SameSite=Lax
+     Set-Cookie (value elided): ruyi_sess=<value>; Path=/; Expires=Mon, 16 Nov 2026 08:39:33 GMT; Max-Age=2592000; HttpOnly; SameSite=Lax
 PASS  C10 cookie name ruyi_sess
 PASS  C11 HttpOnly
 PASS  C12 SameSite=Lax
@@ -251,9 +253,9 @@ PASS  K4b the request itself was logged (path only)
 PASS  K6 inconsistent figure_status=ok/no media produced a warn log (qref only)
 PASS  K5 failure events are logged (sanity: logs are not empty)
      sample log lines (verbatim):
-       time=2026-10-17T16:16:14.807+08:00 level=WARN msg="login failed" ip=127.0.0.1
-       time=2026-10-17T16:16:15.577+08:00 level=WARN msg="brain request failed" op=media-lookup err="media not in source"
-       time=2026-10-17T16:16:14.247+08:00 level=DEBUG msg=request method=GET path=/healthz status=200 ms=0 ip=127.0.0.1
+       time=2026-10-17T16:39:33.862+08:00 level=WARN msg="login failed" ip=127.0.0.1
+       time=2026-10-17T16:39:34.623+08:00 level=WARN msg="brain request failed" op=media-lookup err="media not in source"
+       time=2026-10-17T16:39:33.256+08:00 level=DEBUG msg=request method=GET path=/healthz status=200 ms=0 ip=127.0.0.1
 
 == L. Browser (headless Chrome, mobile viewport) — criteria 1, 5, 9, submit flow ==
 PASS gate shown when not logged in

@@ -11,11 +11,17 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // DefaultAllowedSource is the only source the page needs in the 18082 trial.
+// minFamilyCodeLen is the shortest accepted family code, in characters. The code
+// is short by design; protection relies on the per-IP failed-login limiter.
+const minFamilyCodeLen = 5
+
 const DefaultAllowedSource = "math-intake.zz-yuekao-numberline-4y"
 
 // Config is the validated runtime configuration.
@@ -75,8 +81,8 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.FamilyCode = getenv("RUYI_FAMILY_CODE") // not trimmed: compared verbatim
 	if c.FamilyCode == "" {
 		bad("RUYI_FAMILY_CODE", "required but not set")
-	} else if len(c.FamilyCode) < 6 {
-		bad("RUYI_FAMILY_CODE", "too short (min 6 characters)")
+	} else if utf8.RuneCountInString(c.FamilyCode) < minFamilyCodeLen {
+		bad("RUYI_FAMILY_CODE", "too short (min "+strconv.Itoa(minFamilyCodeLen)+" characters)")
 	}
 
 	c.SessionSecret = req("RUYI_SESSION_SECRET")

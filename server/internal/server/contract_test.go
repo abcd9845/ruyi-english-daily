@@ -190,7 +190,7 @@ func TestContractBrainErrorsMapToPageStates(t *testing.T) {
 		archived               bool
 	}
 	for _, c := range []tc{
-		{"429", "429", "daily_cap", "今天这题提交次数到上限", false},
+		{"rl-other", "429", "brain_rate_limited", "大脑这会儿请求太多", false},
 		{"rev", "409", "rev_mismatch", "题目已更新，请刷新", false},
 		{"idem", "409", "idempotency_conflict", "换新编号", false},
 		{"unknown", "404", "unknown_qref", "找不到了", false},

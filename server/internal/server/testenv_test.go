@@ -445,6 +445,10 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "3600")
 		jerrd(w, 429, "rate_limited", "daily grade limit reached", map[string]any{"qrefs": []string{"example.set:math:1"}})
 		return
+	case "rl-other": // a 429 that is NOT the daily cap: no details, another message
+		w.Header().Set("Retry-After", "30")
+		jerrd(w, 429, "rate_limited", "slow down", nil)
+		return
 	case "rev":
 		jerrd(w, 409, "rev_mismatch", "rev mismatch", map[string]any{"qref": "example.set:math:2", "rev": 1, "current_rev": 2, "index": 0})
 		return
@@ -527,6 +531,26 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(string(body), `"qref":"example.set:math:99"`) { // an unknown question, with the real 404 shape
 		jerrd(w, 404, "not_found", "question not found", map[string]any{"qrefs": []string{"example.set:math:99"}})
 		return
+	}
+	if f.gradeMode == "cap3" { // the real rule: >3 new writes of one question per day refuses the whole batch
+		var capped []string
+		for _, it := range req.Items {
+			ref := fakeCanon(it.QRef)
+			if _, dup := f.gradeIDs["ps:"+req.CID+":"+ref]; !dup && ref != "example.set:math:4" && f.gradeDayCnt[ref] >= 3 {
+				capped = append(capped, it.QRef)
+			}
+		}
+		if len(capped) > 0 {
+			w.Header().Set("Retry-After", "3600")
+			jerrd(w, 429, "rate_limited", "daily grade limit reached", map[string]any{"qrefs": capped})
+			return
+		}
+		for _, it := range req.Items {
+			ref := fakeCanon(it.QRef)
+			if _, dup := f.gradeIDs["ps:"+req.CID+":"+ref]; !dup && ref != "example.set:math:4" {
+				f.gradeDayCnt[ref]++
+			}
+		}
 	}
 	var items []map[string]any
 	newWrites := false

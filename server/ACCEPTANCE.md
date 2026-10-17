@@ -124,7 +124,8 @@ Go 单测另覆盖：判分线上契约编解码与"必须有大脑确认"（见
 | 限额校验：≤50 题、qref 不重复、填空 ≤10 格、`attempt_kind` 只能 correction/variant、`rev` 须整数（都不到达大脑） | R7–R7c；单测 `TestValidateGradeRequest`、`TestContractFillOverTenBlanksIsNotSentToTheBrain`（>10 格） | 通过 |
 | 幂等：同 id 同答案 → 站点重放（不再调大脑）；同 id 换答案 → 409 `idempotency_conflict`+`retry_new_id`，用户改答案换新 id 成功 | R3、R3b、R4d；浏览器 L7 | 通过 |
 | 网络重试沿用同一个 id：站点归档丢失、大脑已有 → `duplicate:true` + 同一批 `attempt_id`，大脑不新增写入 | R9、R9b；单测 `TestGradeRetriesOnlyTransientFailuresWithTheSameBody` | 通过 |
-| 429（同题每天 >3 次）：整批拒绝，页面文案「今天这题提交次数到上限」，不归档、不提醒 | R4、R4b、R4c；浏览器 L7 | 通过 |
+| 429（同题每天 >3 次）：整批拒绝，页面文案「今天这题的次数已用完，已留档，未记入大脑」，**归档**（`archive_only`/`daily_cap`，`recorded:false`）、不提醒、重放仍 429 | R4、R4b、R4c、R4c2、R4c3；浏览器 L7、L10 | 见本次验收 |
+| 「今天约还剩 N 次」估算、提交前确认（取消不丢草稿）、其它 429 文案区分、「（不入大脑）」徽章 | 单测 `dailylimit_test.go`；浏览器 L10 | 见本次验收 |
 | 409 `rev_mismatch`：文案「题目已更新，请刷新」，页面重新取题（带新 `rev`）、答案保留、换新 id | R5–R5c；浏览器 L7 | 通过 |
 | 404 未知 qref：整批不写、不调判分口；套页面里缺的题只进 `missing_qrefs`，不崩 | R6、R6b；单测 | 通过 |
 | `attempt_kind=correction` 透传 | R8 | 通过 |

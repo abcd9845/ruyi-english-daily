@@ -49,11 +49,17 @@ func TestDocRateLimitedKeepsRetryAfterAndOneMessage(t *testing.T) {
 	e, n, ck := contractEnv(t, opts{})
 	e.brain.setGradeMode("429")
 	resp, b, _ := e.submit(t, ck, "demo-1", answersJSON(cid1, goodAnswers))
-	if resp.StatusCode != 429 || resp.Header.Get("Retry-After") != "3600" || !strings.Contains(string(b), "今天这题提交次数到上限") || strings.Contains(string(b), "example.set") {
+	var body struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(b, &body)
+	if resp.StatusCode != 429 || resp.Header.Get("Retry-After") != "3600" || body.Error != "daily_cap" || !strings.Contains(body.Message, "今天这题的次数已用完，已留档，未记入大脑") || strings.Contains(body.Message, "example.set") {
 		t.Fatalf("%d %v %s", resp.StatusCode, resp.Header, b)
 	}
-	if countLines(t, e.attDir) != 0 || n.count() != 0 {
-		t.Error("a refused batch must leave no trace")
+	// since daily-limit-ux the refused attempt IS archived (archive_only, brain_note daily_cap) but never announced
+	if countLines(t, e.attDir) != 1 || n.count() != 0 {
+		t.Errorf("daily cap: archive=%d ntfy=%d", countLines(t, e.attDir), n.count())
 	}
 }
 

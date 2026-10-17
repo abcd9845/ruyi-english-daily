@@ -142,6 +142,14 @@ func run() error {
 		if err := srv.Shutdown(sctx); err != nil {
 			_ = srv.Close()
 		}
+		// Parent notifications still in flight: one attempt takes at most 10 s
+		// (server.ntfyAttemptTimeout), so wait up to 12 s; retries that are only
+		// waiting for their turn are abandoned (logged), not sent early.
+		dctx, dcancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer dcancel()
+		if err := app.Drain(dctx); err != nil {
+			log.Warn("ntfy sends still running at exit were dropped")
+		}
 	}
 	log.Info("stopped")
 	return nil

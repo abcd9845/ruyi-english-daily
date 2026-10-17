@@ -31,7 +31,7 @@
 | `RUYI_GRADE_MAX_PER_HOUR` | `5` | 1–1000 |
 | `RUYI_NTFY_TOPIC` | 空 | 同旧变量；空则不推送（`notify:"off"`），其它照常 |
 | `RUYI_NTFY_BASE_URL` | `https://ntfy.sh/` | 一般不用配；测试用 |
-| `RUYI_NTFY_RETRY_DELAY` | `1m` | 推送失败后异步重试一次的等待时间；一般不用配 |
+| `RUYI_NTFY_RETRY_DELAY` | `1m` | 推送失败后第一次重试前的等待（第二次翻倍；最多 3 次尝试，单次 10 秒超时）；一般不用配 |
 | `RUYI_AUTO_SOURCES` | 空 | 允许自动出题的 source，逗号分隔 |
 | `RUYI_AUTO_TTL` | `6h` | 自动套有效期（内存里，重启即失效） |
 
@@ -174,7 +174,7 @@ curl -s -o /dev/null -w '%{http_code}\n' $B/server.log                       # 4
 
 - **归档**（`/var/lib/ruyi-site/attempts/attempts.jsonl`）：该行有 `"test":true`，`mode:"archive_only"`、`brain_note:"test_set"`、`source:"local.smoke"`、`set_id:"smoke-test"`、`items[].recorded:false`。真题提交的行**没有** `test` 字段。
   `jq -c 'select(.test==true)' /var/lib/ruyi-site/attempts/attempts.jsonl`
-- **ntfy**：标题以「【测试】」开头（HTTP 头按 RFC 2047 编码，ntfy 会解码；真题标题仍是原来的 `Ruyi practice`），正文第一行以「【测试】如意练习：…」开头、含「未记入大脑」，正文 JSON 带 `"test":true`。
+- **ntfy**：标题以「【测试】」开头（HTTP 头按 RFC 2047 编码，ntfy 会解码；真题标题仍是原来的 `Ruyi practice`），正文以「【测试】如意练习：…」开头、含「未记入大脑」（正文不再附 JSON）。
 - **大脑侧**：这次提交**没有**任何请求到大脑（判分/取题/选题全是 0）。
 - 注意：sets 文件非空时，每次重启有 1 次只读 lookup 探测（启动后异步发一个明显不存在的 qref，只写日志、不写任何数据、不影响启动）；这不是测试提交产生的请求。
 

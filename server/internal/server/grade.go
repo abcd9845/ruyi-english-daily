@@ -2,14 +2,12 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"regexp"
 	"sort"
@@ -33,7 +31,6 @@ const (
 	modeGraded     = "graded"
 	modeArchive    = "archive_only"
 	idemCap        = 5000
-	ntfyMsgMax     = 3500
 )
 
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -644,11 +641,15 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 	rec.Archived = s.Attempts != nil && s.Attempts.Append(rec) == nil
 	out.Archived = rec.Archived
 
-	rec.Notify = s.notify(rec)
-	out.Notify = rec.Notify
-
+	// The parent notification is sent in the background (notify.go). It is
+	// started before the attempt is published to the idempotency store, which
+	// is finished right away, so a concurrent duplicate request is never held
+	// up by ntfy; only THIS response waits (at most ntfyRequestWait) to report
+	// how the first send went. A replay of this attempt never notifies again.
+	job, nstatus := s.startNotify(rec)
 	s.idem.finish(e, rec)
 	finished = true
+	out.Notify = job.wait(nstatus, s.ntfyWait)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -707,146 +708,4 @@ func clip(s string, n int) string {
 		s = strings.ToValidUTF8(s[:n], "")
 	}
 	return s
-}
-
-// ---- parent notification (a heads-up, not an approval step) ---------------------
-
-// testTag starts the ntfy title and summary of a local test set's submission.
-const testTag = "【测试】"
-
-func summaryLine(r *attempts.Record) string {
-	answered := r.Summary.Total - r.Summary.Unanswered
-	wrong := r.Summary.Graded - r.Summary.Correct
-	var b strings.Builder
-	if r.Test {
-		return testSummaryLine(r, answered, wrong)
-	}
-	fmt.Fprintf(&b, "如意练习：%s %d 题，", r.SetTitle, answered)
-	if r.Mode == modeGraded {
-		fmt.Fprintf(&b, "对 %d，", r.Summary.Correct)
-		if wrong > 0 {
-			fmt.Fprintf(&b, "错 %d，", wrong)
-		}
-	}
-	if r.Summary.Pending > 0 || r.Mode != modeGraded {
-		fmt.Fprintf(&b, "待核对 %d，", r.Summary.Pending)
-	}
-	if r.Summary.Unsupport > 0 {
-		fmt.Fprintf(&b, "不自动判 %d，", r.Summary.Unsupport)
-	}
-	if r.Summary.Unanswered > 0 {
-		fmt.Fprintf(&b, "未答 %d，", r.Summary.Unanswered)
-	}
-	switch {
-	case r.Mode != modeGraded:
-		b.WriteString("已提交（未判分）。")
-	case r.Summary.Recorded == 0:
-		b.WriteString("已提交（未记入大脑，仅留档）。")
-	case r.Summary.Recorded < answered:
-		fmt.Fprintf(&b, "已提交（%d 题记入大脑，其余仅留档）。", r.Summary.Recorded)
-	default:
-		b.WriteString("已提交。")
-	}
-	fmt.Fprintf(&b, "attempt %s。", r.ClientAttemptID[:8])
-	return b.String()
-}
-
-// testSummaryLine: the summary of a local test set submission. It says plainly
-// that nothing went to the brain.
-func testSummaryLine(r *attempts.Record, answered, wrong int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s如意练习：%s %d 题，对 %d，", testTag, r.SetTitle, answered, r.Summary.Correct)
-	if wrong > 0 {
-		fmt.Fprintf(&b, "错 %d，", wrong)
-	}
-	if r.Summary.Unanswered > 0 {
-		fmt.Fprintf(&b, "未答 %d，", r.Summary.Unanswered)
-	}
-	b.WriteString("已提交（测试，仅留档，未记入大脑）。")
-	fmt.Fprintf(&b, "attempt %s。", r.ClientAttemptID[:8])
-	return b.String()
-}
-
-// ntfyTitle is the ntfy Title header. A test submission gets 【测试】 in front;
-// the value is RFC 2047 encoded because HTTP headers are ASCII (ntfy decodes it).
-// A real set's title stays the plain, unchanged "Ruyi practice".
-func ntfyTitle(r *attempts.Record) string {
-	if r.Test {
-		return mime.QEncoding.Encode("utf-8", testTag+"Ruyi practice")
-	}
-	return "Ruyi practice"
-}
-
-func ntfyBody(r *attempts.Record) string {
-	head := summaryLine(r)
-	fullM := map[string]any{"client_attempt_id": r.ClientAttemptID, "set_id": r.SetID, "mode": r.Mode, "items": r.Items}
-	if r.Test {
-		fullM["test"] = true
-	}
-	full, _ := json.Marshal(fullM)
-	if len(head)+2+len(full) <= ntfyMsgMax {
-		return head + "\n\n" + string(full)
-	}
-	type slim struct {
-		QRef    string `json:"q"`
-		Answer  any    `json:"a,omitempty"`
-		Correct *bool  `json:"c"`
-	}
-	var sl []slim
-	for _, it := range r.Items {
-		sl = append(sl, slim{it.QRef, it.Answer, it.Correct})
-	}
-	smallM := map[string]any{"client_attempt_id": r.ClientAttemptID, "set_id": r.SetID, "mode": r.Mode, "items": sl}
-	if r.Test {
-		smallM["test"] = true
-	}
-	small, _ := json.Marshal(smallM)
-	if len(head)+2+len(small) <= ntfyMsgMax {
-		return head + "\n\n" + string(small)
-	}
-	return head + "\n\n（作答较长，完整内容见服务器 attempts 存档）"
-}
-
-// notify posts the summary once; on failure one asynchronous retry follows.
-// It returns "sent", "retrying" or "off". Failures never affect the grade.
-func (s *Server) notify(r *attempts.Record) string {
-	if s.Topic == "" {
-		return "off"
-	}
-	body, title := ntfyBody(r), ntfyTitle(r)
-	if s.postNtfy(title, body) {
-		return "sent"
-	}
-	go func() {
-		time.Sleep(s.NtfyRetryDelay)
-		if !s.postNtfy(title, body) {
-			s.Log.Warn("ntfy notification failed after retry", "attempt", r.ClientAttemptID[:8])
-		}
-	}()
-	return "retrying"
-}
-
-func (s *Server) postNtfy(title, body string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.ntfyURL(), strings.NewReader(body))
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
-	req.Header.Set("Title", title)
-	req.Header.Set("Tags", "memo")
-	resp, err := s.ntfyClient.Do(req)
-	if err != nil {
-		// err's text contains the URL (topic): log only that it failed
-		s.Log.Warn("ntfy unreachable")
-		return false
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode/100 != 2 {
-		s.Log.Warn("ntfy rejected the message", "status", resp.StatusCode)
-		return false
-	}
-	return true
 }

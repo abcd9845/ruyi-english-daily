@@ -38,6 +38,10 @@ type Config struct {
 	BrainToken    string
 	BrainInsecure bool
 	BrainCAFile   string
+	// BrainID is the "brain" value sent to the brain's grade and pick-practice
+	// endpoints (RUYI_BRAIN_ID). Empty = unset: the brain package uses its
+	// default, "ruyi". The brain tokens must be scoped to the same brain.
+	BrainID       string
 	LogLevel      slog.Level
 	NtfyTopic     string
 	AllowedSource []string
@@ -68,8 +72,9 @@ const DefaultAttemptsDir = "/var/lib/ruyi-site/attempts"
 var gradePathRe = regexp.MustCompile(`^/[A-Za-z0-9/_.-]{1,100}$`)
 
 var (
-	topicRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
-	sourceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.:-]{1,127}$`)
+	brainIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	topicRe   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
+	sourceRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9_.:-]{1,127}$`)
 )
 
 // SourceRe is the source-key syntax shared with the brain's contract
@@ -169,6 +174,14 @@ func Load(getenv func(string) string) (*Config, error) {
 	if c.BrainCAFile != "" {
 		if st, err := os.Stat(c.BrainCAFile); err != nil || st.IsDir() {
 			bad("RUYI_BRAIN_CA_FILE", "is not a readable file")
+		}
+	}
+
+	if v := strings.TrimSpace(getenv("RUYI_BRAIN_ID")); v != "" {
+		if !brainIDRe.MatchString(v) {
+			bad("RUYI_BRAIN_ID", "invalid (lowercase letters, digits, _ and -; 1 to 64 characters; must start with a letter or digit)")
+		} else {
+			c.BrainID = v
 		}
 	}
 

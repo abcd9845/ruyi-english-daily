@@ -165,6 +165,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "MOCK_TOKEN required")
 		os.Exit(1)
 	}
+	// MOCK_BRAIN_ID is the one brain this mock serves (default "ruyi"): pick-practice and grade
+	// accept only that id and reject every other, like a real brain's token scope.
+	brainID := os.Getenv("MOCK_BRAIN_ID")
+	if brainID == "" {
+		brainID = "ruyi"
+	}
+	// The grade token (write scope of the brain): accepted by grade AND pick-practice. The
+	// read token (bank:read) is refused by both with 403, like the real brain.
+	gradeToken := os.Getenv("MOCK_GRADE_TOKEN")
+	if gradeToken == "" {
+		gradeToken = "grade-" + token
+	}
 	listen := os.Getenv("MOCK_LISTEN")
 	if listen == "" {
 		listen = "127.0.0.1:18090"
@@ -527,13 +539,19 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "missing": missing})
 	})
 
-	// GET /v1/brain/pick-practice?source=&n=&mode=due_first|wrong_only&brain=ruyi
+	// GET /v1/brain/pick-practice?source=&n=&mode=due_first|wrong_only&brain=<MOCK_BRAIN_ID, default ruyi>
 	mux.HandleFunc("GET /v1/brain/pick-practice", func(w http.ResponseWriter, r *http.Request) {
 		bump("pick")
 		if blocked("pick", w, r) {
 			return
 		}
-		if !bearer(r) {
+		switch r.Header.Get("Authorization") {
+		case "Bearer " + gradeToken:
+		case "Bearer " + token: // bank:read only: no write scope on the target brain
+			bump("pick_with_bank_read_token")
+			cerr(w, 403, "forbidden", "forbidden", nil, nil)
+			return
+		default:
 			cerr(w, 401, "unauthorized", "unauthorized", nil, nil)
 			return
 		}
@@ -555,7 +573,7 @@ func main() {
 		if mode == "" {
 			mode = "due_first"
 		}
-		if qv.Get("brain") != "ruyi" { // an unknown brain / source is a real 404 with its own message
+		if qv.Get("brain") != brainID { // an unknown brain / source is a real 404 with its own message
 			cerr(w, 404, "not_found", "brain not found", nil, nil)
 			return
 		}
@@ -616,10 +634,6 @@ func main() {
 	})
 
 	// POST /v1/bank/grade (grade token, NOT the bank:read token).
-	gradeToken := os.Getenv("MOCK_GRADE_TOKEN")
-	if gradeToken == "" {
-		gradeToken = "grade-" + token
-	}
 	var lastGrade []byte
 	type stored struct {
 		answer     string // canonical JSON of the answer
@@ -713,7 +727,7 @@ func main() {
 			return
 		}
 		bad := func(msg string) { cerr(w, 400, "validation_failed", msg, nil, nil); bump("grade_400") }
-		if req.Brain != "ruyi" || !mockCIDRe.MatchString(req.CID) || len(req.Items) == 0 || len(req.Items) > 50 {
+		if req.Brain != brainID || !mockCIDRe.MatchString(req.CID) || len(req.Items) == 0 || len(req.Items) > 50 {
 			bad("invalid request")
 			return
 		}

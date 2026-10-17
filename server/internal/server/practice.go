@@ -124,7 +124,8 @@ func (s *Server) getSet(id string) (*sets.Set, bool) {
 //
 // The old draft query flags wrong_only=1 / due_first=1 are still accepted as
 // aliases of mode (when mode is absent). If the brain has no pick-practice
-// endpoint yet the answer is 501 "大脑接口未就绪"; nothing is faked.
+// endpoint yet, or no grade token is configured (pick-practice is sent with it), the answer
+// is 501 "大脑接口未就绪"; a 401/403 from it is 502 pick_forbidden. Nothing is faked.
 func (s *Server) autoNew(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	source := q.Get("source")
@@ -192,13 +193,26 @@ func (s *Server) autoNew(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "pick_source_ambiguous", "这个题库名在大脑里对应多个题库，请改用精确的题库 key")
 		return
 	}
-	if errors.Is(err, brain.ErrUnsupported) {
+	if errors.Is(err, brain.ErrUnsupported) || errors.Is(err, brain.ErrPickNoToken) {
 		code := "wrong_only_unavailable"
 		if opts.Mode == brain.ModeDueFirst {
 			code = "due_first_unavailable"
 		}
-		s.Log.Warn("pick-practice not available on the brain", "mode", opts.Mode)
-		writeErr(w, http.StatusNotImplemented, code, "大脑接口未就绪（选题接口还没上线），暂时不能这样出题")
+		msg := "大脑接口未就绪（选题接口还没上线），暂时不能这样出题"
+		if errors.Is(err, brain.ErrPickNoToken) {
+			// same shape and code as "not deployed"; nothing was sent to the brain
+			s.Log.Warn("pick-practice needs the grade token (RUYI_BRAIN_GRADE_TOKEN is not set)", "mode", opts.Mode)
+			msg = "大脑接口未就绪（选题需要配置判分令牌），暂时不能这样出题，请通知家长"
+		} else {
+			s.Log.Warn("pick-practice not available on the brain", "mode", opts.Mode)
+		}
+		writeErr(w, http.StatusNotImplemented, code, msg)
+		return
+	}
+	if errors.As(err, &be) && be.Kind == brain.KindAuth && opts.Mode != brain.ModeRandom {
+		// 401/403 from pick-practice: the grade token lacks the target brain's write scope
+		s.Log.Warn("pick-practice refused the grade token (wrong scope?)", "mode", opts.Mode, "status", be.Status)
+		writeErr(w, http.StatusBadGateway, "pick_forbidden", "选题令牌无权限，请通知家长检查判分令牌的范围（需要目标练习脑的写权限）")
 		return
 	}
 	if err != nil {

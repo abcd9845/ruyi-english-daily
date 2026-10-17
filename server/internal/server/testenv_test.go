@@ -87,6 +87,17 @@ type fakeBrain struct {
 	pickMode   string         // "" ok | "off" | "501" | "fail"
 	pickQuery  []url.Values
 	pickAuths  []string
+	pickBank   int // pick-practice calls that used the bank:read token (refused with 403)
+
+	// brainID is the one brain this fake serves (the real brain's token scope); "" = "ruyi".
+	brainID string
+}
+
+func (f *fakeBrain) wantBrain() string {
+	if f.brainID == "" {
+		return "ruyi"
+	}
+	return f.brainID
 }
 
 func newFakeBrain(t *testing.T) *fakeBrain {
@@ -315,7 +326,15 @@ func (f *fakeBrain) handlePick(w http.ResponseWriter, r *http.Request) {
 	if switchReply(w, r, f.pickMode) {
 		return
 	}
-	if r.Header.Get("Authorization") != "Bearer "+f.token {
+	// like the real brain: pick-practice needs the target brain's write scope (the grade token);
+	// the bank:read token is refused with 403
+	switch r.Header.Get("Authorization") {
+	case "Bearer " + f.gradeToken:
+	case "Bearer " + f.token:
+		f.pickBank++
+		jerrf(w, 403, "forbidden")
+		return
+	default:
 		jerrf(w, 401, "unauthorized")
 		return
 	}
@@ -335,7 +354,7 @@ func (f *fakeBrain) handlePick(w http.ResponseWriter, r *http.Request) {
 		jerrf(w, 400, "ambiguous_source")
 		return
 	}
-	if q.Get("brain") != "ruyi" || n < 1 || n > 10 || (q.Get("mode") != "due_first" && q.Get("mode") != "wrong_only") || q.Get("source") != practiceSrc {
+	if q.Get("brain") != f.wantBrain() || n < 1 || n > 10 || (q.Get("mode") != "due_first" && q.Get("mode") != "wrong_only") || q.Get("source") != practiceSrc {
 		jerrf(w, 400, "validation_failed")
 		return
 	}
@@ -459,7 +478,7 @@ func (f *fakeBrain) handleGrade(w http.ResponseWriter, r *http.Request) {
 		jerrf(w, 400, "invalid_json")
 		return
 	}
-	if r.URL.RawQuery != "" || req.Brain != "ruyi" || !gradeCIDRe.MatchString(req.CID) || len(req.Items) == 0 || len(req.Items) > 50 {
+	if r.URL.RawQuery != "" || req.Brain != f.wantBrain() || !gradeCIDRe.MatchString(req.CID) || len(req.Items) == 0 || len(req.Items) > 50 {
 		jerrf(w, 400, "validation_failed")
 		return
 	}
@@ -640,6 +659,10 @@ type opts struct {
 
 	lookup       string // fake brain lookup mode ("" ok | "off" | "501" | "fail")
 	skipDeferred bool   // RUYI_PICK_SKIP_DEFERRED
+
+	gradeAsRead bool   // configure the site's grade token as the fake's bank:read token (a token without the write scope)
+	brainID     string // the site's configured brain id (RUYI_BRAIN_ID); "" = unset
+	fakeBrainID string // the only brain id the fake brain serves; "" = ruyi
 }
 
 func newEnv(t *testing.T, o opts) *env {
@@ -653,6 +676,9 @@ func newEnv(t *testing.T, o opts) *env {
 		e.topic = ""
 	}
 	e.brain.setLookupMode(o.lookup)
+	if o.reuse == nil {
+		e.brain.brainID = o.fakeBrainID
+	}
 	e.staticD = t.TempDir()
 	must(t, os.WriteFile(filepath.Join(e.staticD, "index.html"), []byte("<h1>home</h1>"), 0o644))
 	must(t, os.WriteFile(filepath.Join(e.staticD, "server.log"), []byte("SECRET-LOG"), 0o644))
@@ -673,7 +699,10 @@ func newEnv(t *testing.T, o opts) *env {
 	if o.grade {
 		gt = e.brain.gradeToken
 	}
-	bc, err := brain.New(brain.Config{BaseURL: u, Token: e.brain.token, GradeToken: gt})
+	if o.gradeAsRead {
+		gt = e.brain.token
+	}
+	bc, err := brain.New(brain.Config{BaseURL: u, Token: e.brain.token, GradeToken: gt, BrainID: o.brainID})
 	must(t, err)
 	e.attDir = o.attemptsDir
 	if e.attDir == "" {

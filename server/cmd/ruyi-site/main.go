@@ -31,6 +31,14 @@ func main() {
 	}
 }
 
+// brainIDOrDefault is the effective brain id for the startup summary (not a secret).
+func brainIDOrDefault(id string) string {
+	if id == "" {
+		return brain.DefaultBrainID
+	}
+	return id
+}
+
 func run() error {
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
@@ -48,7 +56,7 @@ func run() error {
 		log.Warn("allowlisted file missing from static dir (will 404)", "file", m)
 	}
 
-	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, GradeToken: cfg.BrainGradeToken, GradePath: cfg.BrainGradePath, LookupPath: cfg.BrainLookupPath, PickPath: cfg.BrainPickPath, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile})
+	bc, err := brain.New(brain.Config{BaseURL: cfg.BrainBaseURL, Token: cfg.BrainToken, GradeToken: cfg.BrainGradeToken, GradePath: cfg.BrainGradePath, LookupPath: cfg.BrainLookupPath, PickPath: cfg.BrainPickPath, BrainID: cfg.BrainID, InsecureTLS: cfg.BrainInsecure, CAFile: cfg.BrainCAFile})
 	if err != nil {
 		return err
 	}
@@ -120,7 +128,7 @@ func run() error {
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Info("listening", "addr", cfg.Listen, "static_files", len(entries), "cookie_secure", cfg.CookieSecure,
 		"ntfy_configured", cfg.NtfyTopic != "", "grading_configured", cfg.BrainGradeToken != "",
-		"auto_sources", len(cfg.AutoSources), "grade_max_per_hour", cfg.GradeMaxPerHour)
+		"auto_sources", len(cfg.AutoSources), "grade_max_per_hour", cfg.GradeMaxPerHour, "brain_id", brainIDOrDefault(cfg.BrainID))
 
 	select {
 	case err := <-errc:

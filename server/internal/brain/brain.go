@@ -66,6 +66,11 @@ const (
 	KindNotFound                    // 404
 	KindTicket                      // ticket rejected twice (401 after refresh)
 	KindTooLarge
+	KindNotReady    // 501/405: the endpoint is not deployed on this brain (yet)
+	KindRateLimited // 429
+	KindConflict    // 409 (Code says which: rev_mismatch, idempotency_conflict, …)
+	KindBadRequest  // refused locally before sending (contract limits)
+	KindRejected    // the brain answered 400 (a request it did not accept)
 )
 
 // Error is a safe, classified error.
@@ -74,7 +79,38 @@ type Error struct {
 	Status int    // upstream HTTP status, 0 if none
 	Code   string // upstream error code (e.g. ticket_expired), only [a-z_] chars
 	What   string // short fixed description
+	// Parsed from the brain's error body {"code","message","details"} (all sanitized):
+	Message    string        // short upstream message, e.g. "not found", "question not found"
+	Qrefs      []string      // details.qrefs (grade 404 / 429): the offending qrefs
+	Qref       string        // details.qref (409 rev_mismatch)
+	Rev        int           // details.rev
+	CurrentRev int           // details.current_rev
+	RetryAfter time.Duration // Retry-After header (429), capped; 0 = absent
+	// details.index is deliberately NOT parsed: it must not be used to locate an item.
 }
+
+// genericNotFoundMsg is the message of the brain's catch-all 404 (route not deployed).
+const genericNotFoundMsg = "not found"
+
+// IsRouteNotFound: a 404 that is the catch-all for a route the brain does not
+// have: code not_found (or no code), message "not found" (or none), no details.
+// A deployed endpoint's own 404 carries another message and/or details
+// (grade: details.qrefs + "question not found"; pick: a source/brain message).
+func (e *Error) IsRouteNotFound() bool {
+	if e == nil || e.Kind != KindNotFound {
+		return false
+	}
+	if len(e.Qrefs) > 0 || e.Qref != "" {
+		return false
+	}
+	if e.Code != "" && e.Code != "not_found" {
+		return false
+	}
+	return e.Message == "" || strings.EqualFold(e.Message, genericNotFoundMsg)
+}
+
+// HasQrefs: a 404 that names qrefs, i.e. the grade endpoint's "question not found".
+func (e *Error) HasQrefs() bool { return e != nil && e.Kind == KindNotFound && len(e.Qrefs) > 0 }
 
 func (e *Error) Error() string {
 	s := e.What
@@ -110,6 +146,20 @@ type Question struct {
 	// FigureStatus is the brain's read-only derived field: ok / missing / none /
 	// unknown. It may be absent (not live yet); absent is treated as unknown.
 	FigureStatus *string `json:"figure_status"`
+	// Rev is the question revision the brain served (lookup contract). It is
+	// forwarded verbatim with the answer so the brain can detect "the student saw
+	// an older version" (409 rev_mismatch). Absent/odd values mean "unknown".
+	Rev json.RawMessage `json:"rev"`
+}
+
+// RevInt returns the question revision as a positive integer, or 0 if the
+// brain did not send one (or sent something that is not a small integer).
+func (q Question) RevInt() int {
+	var n int64
+	if len(q.Rev) == 0 || json.Unmarshal(q.Rev, &n) != nil || n < 1 || n > 1_000_000_000 {
+		return 0
+	}
+	return int(n)
 }
 
 // Figure statuses as delivered to the page.
@@ -144,6 +194,11 @@ type Config struct {
 	// GradeToken means grading is not configured (Grade reports ErrGradeDisabled).
 	GradeToken string
 	GradePath  string
+	// LookupPath / PickPath override the batch-lookup and pick-practice paths;
+	// BrainID is the "brain" value sent to grade and pick-practice (default "ruyi").
+	LookupPath string
+	PickPath   string
+	BrainID    string
 }
 
 type ticket struct {
@@ -162,13 +217,19 @@ type Client struct {
 	token      string
 	gradeToken string
 	gradePath  string
+	lookupPath string
+	pickPath   string
+	brainID    string
 	hc         *http.Client
 	now        func() time.Time
 
-	mu      sync.Mutex
-	tickets map[string]ticket
-	lists   map[string]*listEntry
-	listMu  map[string]*sync.Mutex
+	retryDelay time.Duration // pause before the single upstream retry of a grade call
+
+	mu              sync.Mutex
+	lookupDownUntil time.Time // lookup endpoint answered "not deployed": use the list fallback until then
+	tickets         map[string]ticket
+	lists           map[string]*listEntry
+	listMu          map[string]*sync.Mutex
 }
 
 // New builds a Client. It does not contact the brain.
@@ -209,6 +270,7 @@ func New(c Config) (*Client, error) {
 	}
 	return &Client{
 		base: c.BaseURL, token: c.Token, now: now, gradeToken: c.GradeToken, gradePath: c.GradePath,
+		lookupPath: c.LookupPath, pickPath: c.PickPath, brainID: c.BrainID, retryDelay: 200 * time.Millisecond,
 		hc: &http.Client{
 			Transport:     tr,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -245,32 +307,78 @@ func (c *Client) do(ctx context.Context, method, rawURL string, bearer bool, bod
 	return resp, nil
 }
 
-var codeRe = regexp.MustCompile(`^[a-z_]{1,40}$`)
+var (
+	codeRe = regexp.MustCompile(`^[a-z_]{1,40}$`)
+	msgRe  = regexp.MustCompile(`^[A-Za-z0-9 .,_:'\-]{1,100}$`)
+)
 
-// upstreamErr maps a non-2xx reply to an Error. It reads at most 2 KiB of the
-// body, only to extract {"error":{"code":…}} or {"code":…}.
+const maxErrQrefs = 100
+
+// upstreamErr maps a non-2xx reply to an Error. It reads at most 4 KiB of the
+// body, only to extract the sanitized {"code","message","details"} (also
+// accepted under a nested "error" object) and the Retry-After header.
 func upstreamErr(resp *http.Response) *Error {
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-	code := ""
-	var v struct {
-		Code  string `json:"code"`
-		Error any    `json:"error"`
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	type body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Details struct {
+			QRefs      []string        `json:"qrefs"`
+			QRef       string          `json:"qref"`
+			Rev        json.RawMessage `json:"rev"`
+			CurrentRev json.RawMessage `json:"current_rev"`
+		} `json:"details"`
 	}
+	var v struct {
+		body
+		Error json.RawMessage `json:"error"`
+	}
+	var in body
 	if json.Unmarshal(b, &v) == nil {
-		code = v.Code
-		if m, ok := v.Error.(map[string]any); ok {
-			if s, ok := m["code"].(string); ok {
-				code = s
+		in = v.body
+		if len(v.Error) > 0 {
+			var nested body
+			var str string
+			if json.Unmarshal(v.Error, &nested) == nil && (nested.Code != "" || nested.Message != "") {
+				in = nested
+			} else if json.Unmarshal(v.Error, &str) == nil && in.Code == "" {
+				in.Code = str
 			}
-		} else if s, ok := v.Error.(string); ok && code == "" {
-			code = s
 		}
 	}
+	code := in.Code
 	if !codeRe.MatchString(code) {
 		code = ""
 	}
 	e := &Error{Status: resp.StatusCode, Code: code, What: "brain error"}
+	if msgRe.MatchString(in.Message) {
+		e.Message = in.Message
+	}
+	for _, q := range in.Details.QRefs {
+		if len(e.Qrefs) >= maxErrQrefs {
+			break
+		}
+		if q != "" && len(q) <= maxQRefLen {
+			e.Qrefs = append(e.Qrefs, q)
+		}
+	}
+	if q := in.Details.QRef; q != "" && len(q) <= maxQRefLen {
+		e.Qref = q
+	}
+	atoi := func(raw json.RawMessage) int {
+		var n int
+		if json.Unmarshal(raw, &n) == nil && n > 0 && n < 1<<31 {
+			return n
+		}
+		return 0
+	}
+	e.Rev, e.CurrentRev = atoi(in.Details.Rev), atoi(in.Details.CurrentRev)
+	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
+		if n, err := strconv.Atoi(ra); err == nil && n >= 0 {
+			e.RetryAfter = time.Duration(min(n, 86400)) * time.Second
+		}
+	}
 	switch {
 	case resp.StatusCode == 404:
 		e.Kind = KindNotFound
@@ -278,6 +386,18 @@ func upstreamErr(resp *http.Response) *Error {
 	case resp.StatusCode == 401 || resp.StatusCode == 403:
 		e.Kind = KindAuth
 		e.What = "brain rejected credentials"
+	case resp.StatusCode == 501 || resp.StatusCode == 405:
+		e.Kind = KindNotReady
+		e.What = "endpoint not available"
+	case resp.StatusCode == 429:
+		e.Kind = KindRateLimited
+		e.What = "rate limited"
+	case resp.StatusCode == 409:
+		e.Kind = KindConflict
+		e.What = "conflict"
+	case resp.StatusCode == 400:
+		e.Kind = KindRejected
+		e.What = "request rejected"
 	default:
 		e.Kind = KindUnavailable
 	}
@@ -357,6 +477,20 @@ func (c *Client) fetchSource(ctx context.Context, source string) ([]Question, er
 	return nil, &Error{Kind: KindUnavailable, What: "too many pages"}
 }
 
+// normalizeQuestion drops invalid media entries and orders media by ordinal.
+func normalizeQuestion(q Question) Question {
+	var ms []Media
+	for _, m := range q.Media {
+		if !ValidSHA(m.SHA256) || !allowedMime[m.Mime] || !slots[m.Slot] {
+			continue
+		}
+		ms = append(ms, m)
+	}
+	sort.SliceStable(ms, func(i, j int) bool { return ms[i].Ordinal < ms[j].Ordinal })
+	q.Media = ms
+	return q
+}
+
 // normalize drops foreign-source rows, invalid media entries and sorts.
 func normalize(in []Question, source string) []Question {
 	out := make([]Question, 0, len(in))
@@ -364,16 +498,7 @@ func normalize(in []Question, source string) []Question {
 		if q.QRef == "" || (q.Source != nil && *q.Source != source) {
 			continue
 		}
-		var ms []Media
-		for _, m := range q.Media {
-			if !ValidSHA(m.SHA256) || !allowedMime[m.Mime] || !slots[m.Slot] {
-				continue
-			}
-			ms = append(ms, m)
-		}
-		sort.SliceStable(ms, func(i, j int) bool { return ms[i].Ordinal < ms[j].Ordinal })
-		q.Media = ms
-		out = append(out, q)
+		out = append(out, normalizeQuestion(q))
 	}
 	SortQuestions(out)
 	return out

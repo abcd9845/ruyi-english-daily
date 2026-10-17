@@ -23,6 +23,9 @@ type pItem struct {
 	Options      []pOption `json:"options"`
 	Blanks       int       `json:"blanks"`
 	FigureStatus string    `json:"figure_status"`
+	Rev          int       `json:"rev"`
+	Origin       string    `json:"origin"`
+	RefPending   string    `json:"ref_pending"`
 	Media        []struct {
 		URL  string `json:"url"`
 		Slot string `json:"slot"`
@@ -189,7 +192,13 @@ func TestPracticeShapeBlanksOptionsMedia(t *testing.T) {
 // The fake brain sends answer / explanation / solution (and flags inside options);
 // none of it may reach the browser, and the site never asks for include_answer.
 func TestPracticeStripsAnswersAndNeverAsksForThem(t *testing.T) {
-	e := newEnv(t, opts{sets: setsJSON})
+	for _, lk := range []string{"", "off", "501"} { // lookup endpoint live, and not deployed (list fallback)
+		t.Run("lookup="+lk, func(t *testing.T) { stripsAnswers(t, lk) })
+	}
+}
+
+func stripsAnswers(t *testing.T, lk string) {
+	e := newEnv(t, opts{sets: setsJSON, lookup: lk})
 	for _, id := range []string{"demo-1", "reorder_2"} {
 		_, _, body := getPractice(t, e, e.session(t), id)
 		s := string(body)
@@ -207,7 +216,7 @@ func TestPracticeStripsAnswersAndNeverAsksForThem(t *testing.T) {
 			}
 		}
 		allowedItem := map[string]bool{"ordinal": true, "qref": true, "qtype": true, "stem_md": true, "options": true,
-			"blanks": true, "figure_status": true, "media": true}
+			"blanks": true, "figure_status": true, "media": true, "rev": true}
 		for _, it := range generic["items"].([]any) {
 			for k, v := range it.(map[string]any) {
 				if !allowedItem[k] {
@@ -227,6 +236,20 @@ func TestPracticeStripsAnswersAndNeverAsksForThem(t *testing.T) {
 	}
 	e.brain.mu.Lock()
 	defer e.brain.mu.Unlock()
+	if lk == "" {
+		// contract path: only POST lookup {"qrefs":[…]} (read token), no list, no include_answer
+		if len(e.brain.lookupReqs) == 0 || len(e.brain.listQueries) != 0 {
+			t.Fatalf("lookup=%d list=%d", len(e.brain.lookupReqs), len(e.brain.listQueries))
+		}
+		for _, b := range e.brain.lookupReqs {
+			var m map[string]any
+			must(t, json.Unmarshal(b, &m))
+			if len(m) != 1 || m["qrefs"] == nil || strings.Contains(string(b), "include_answer") {
+				t.Errorf("lookup body: %s", b)
+			}
+		}
+		return
+	}
 	if len(e.brain.listQueries) == 0 {
 		t.Fatal("brain was not queried")
 	}

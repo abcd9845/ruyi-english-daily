@@ -58,6 +58,8 @@ type Deps struct {
 	// AutoSources enables dynamic sets (GET /api/practice/new) for these sources.
 	AutoSources []string
 	AutoTTL     time.Duration
+	// SkipDeferred drops brain picks flagged deferred:* instead of marking them.
+	SkipDeferred bool
 	// Now is for tests (nil = time.Now).
 	Now func() time.Time
 }

@@ -36,6 +36,9 @@ import (
 
 const source = "math-intake.zz-yuekao-numberline-4y"
 
+// maxAnswerRunes mirrors the brain: answers (and each blank) are at most 2000 Unicode code points.
+const maxAnswerRunes = 2000
+
 var mockCIDRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,160}$`)
 
 // practiceSource is a second, purely synthetic source with 5 math questions in
@@ -748,7 +751,7 @@ func main() {
 			seen[cq[i]] = true
 			switch a := it.Answer.(type) {
 			case string:
-				if len([]rune(a)) > 500 {
+				if len([]rune(a)) > maxAnswerRunes {
 					bad("answer too long")
 					return
 				}
@@ -758,7 +761,7 @@ func main() {
 					return
 				}
 				for _, e := range a {
-					if es, ok := e.(string); !ok || len([]rune(es)) > 500 {
+					if es, ok := e.(string); !ok || len([]rune(es)) > maxAnswerRunes {
 						bad("invalid answer")
 						return
 					}

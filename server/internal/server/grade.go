@@ -28,7 +28,7 @@ import (
 const (
 	maxGradeBody   = 64 << 10
 	maxBlankLen    = 200
-	maxFreeLen     = 2000
+	maxFreeLen     = brain.MaxAnswerLen // the free-text cap IS the brain's cap: one constant
 	statusUnanswer = "unanswered"
 	modeGraded     = "graded"
 	modeArchive    = "archive_only"
@@ -165,8 +165,10 @@ const (
 )
 
 // answerFitsBrain: the brain accepts answer strings of at most brain.MaxAnswerLen
-// characters. A longer one is not sent (archived as "unsupported" by this site),
-// never truncated, never sent to be refused.
+// characters (Unicode code points, counted with utf8.RuneCountInString, like the
+// brain does). A longer one is not sent (archived as "unsupported" by this site),
+// never truncated, never sent to be refused. (Free text is already capped at the
+// same number by parseAnswer, so this is a second guard that should never trigger.)
 //
 // (A 404 from the grade URL is told apart by its details, not by an error code:
 // details.qrefs = the brain's "question not found"; any other 404 = the route is

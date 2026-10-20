@@ -9,6 +9,7 @@
 // BROWSER_FLOW=smoke: the local test set ?set=smoke-test (needs a sets file with it): answer, 检查, submit; archive-only wording, never 已提交到大脑.
 // BROWSER_FLOW=dailylimit (needs the mock brain with the real daily cap + a site with grading): 「今天约还剩N次」, the confirm
 // dialog, 3 successes then a 429 daily_cap (archived, not recorded), rate_limited wording, 「不入大脑」 badges.
+// BROWSER_FLOW=images (MOCK_URL = mock brain with MOCK_QUEUE=1 MOCK_QUEUE_IMAGES=1; site with queue + RUYI_ANSWER_IMAGES_ENABLED=1): 选图上传.
 // BROWSER_FLOW=queue (needs MOCK_URL = a mock brain started with MOCK_QUEUE=1, and a site with RUYI_QUEUE_ENABLED=1): the AI first-pass
 // status under each queued answer: 待解答 → AI 判卷中 → AI初评·待家长核 (full text, escaped), timeout copy, purged, polling schedule, reload.
 // Against the mock brain's synthetic questions. Logs in through the real form, fills
@@ -604,6 +605,68 @@ async function smokeFlow(base) {
   return finish();
 }
 
+
+// 作答选图上传 (大脑 #57): mock brain with MOCK_QUEUE=1 MOCK_QUEUE_IMAGES=1; site with RUYI_QUEUE_ENABLED=1 RUYI_ANSWER_IMAGES_ENABLED=1.
+// Set free-3 = one free-text question (example.set:math:4, unsupported -> queued with its images).
+function makePNG(w, h, rgb) {
+  const zlib = require('zlib');
+  const crcT = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crcT[n] = c >>> 0; }
+  const crc = b => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (t, d) => { const l = Buffer.alloc(4); l.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([l, td, c]); };
+  const ih = Buffer.alloc(13); ih.writeUInt32BE(w, 0); ih.writeUInt32BE(h, 4); ih[8] = 8; ih[9] = 2;
+  const row = Buffer.alloc(1 + w * 3); for (let x = 0; x < w; x++) { row[1 + x * 3] = rgb[0]; row[2 + x * 3] = rgb[1]; row[3 + x * 3] = rgb[2]; }
+  const raw = Buffer.concat(Array.from({ length: h }, () => row));
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ih), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+const mockGet = p => new Promise((res, rej) => { require('http').get(process.env.MOCK_URL + p, r => { let b = ''; r.on('data', d => b += d); r.on('end', () => res(JSON.parse(b))); }).on('error', rej); });
+async function imagesFlow(base) {
+  const Q = 'example.set:math:4';
+  const fdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ruyi-img-'));
+  const f = (name, buf) => { const p = path.join(fdir, name); fs.writeFileSync(p, buf); return p; };
+  const p1 = f('a.png', makePNG(40, 30, [200, 30, 30])), p2 = f('b.png', makePNG(30, 40, [30, 200, 30]));
+  const gif = f('c.gif', Buffer.from('GIF89a\x01\x00\x01\x00\x00\x00\x00;', 'binary'));
+  const big = f('big.png', Buffer.concat([makePNG(4, 4, [1, 2, 3]), Buffer.alloc(31 * 1024 * 1024)]));
+  const many = Array.from({ length: 7 }, (_, i) => f('m' + i + '.png', makePNG(8, 8, [i * 30, 0, 0])));
+  const resultShown = `getComputedStyle(document.getElementById('resultCard')).display==='block'`;
+  const msg = `(document.querySelector('#q1 .imsg')||{}).textContent||''`;
+  const thumbs = `document.querySelectorAll('#q1 .imgpick .th').length`;
+  const setFiles = async files => {
+    const { root } = await send('DOM.getDocument', {}, sid);
+    const { nodeId } = await send('DOM.querySelector', { nodeId: root.nodeId, selector: '#q1 input[type=file]' }, sid);
+    await send('DOM.setFileInputFiles', { nodeId, files }, sid);
+  };
+  for (const vp of [{ tag: 'mobile', width: 390, height: 844, mobile: true }, { tag: 'desktop', width: 1280, height: 900, mobile: false }]) {
+    await send('Emulation.setDeviceMetricsOverride', { width: vp.width, height: vp.height, deviceScaleFactor: vp.mobile ? 2 : 1, mobile: vp.mobile }, sid);
+    const T = '[images ' + vp.tag + '] ';
+    check(T + 'free-3 loads', await loginAndLoad(base + '/m/practice/?set=free-3', 1));
+    await ev(`localStorage.clear(); 1`); await send('Page.reload', {}, sid); await waitFor(`document.querySelectorAll('#qs section.card').length===1`);
+    check(T + 'one picker: accept jpeg/png, multiple, NO capture attribute (no camera entry)', await ev(`(() => { const l = document.querySelectorAll('input[type=file]'); return l.length === 1 && l[0].accept === 'image/jpeg,image/png' && l[0].multiple && !l[0].hasAttribute('capture'); })()`));
+    await setFiles([gif]);
+    check(T + 'gif refused with a clear Chinese message', await waitFor(`(${msg}).includes('只支持 JPG 或 PNG')`), await ev(msg));
+    await setFiles([big]);
+    check(T + 'oversized file refused with a clear Chinese message', await waitFor(`(${msg}).includes('太大')`), await ev(msg));
+    await setFiles(many);
+    check(T + '7 images refused: at most 6', await waitFor(`(${msg}).includes('最多 6 张')`), await ev(msg));
+    await setFiles([p1, p2]);
+    check(T + 'two images picked at once are uploaded and shown', await waitFor(`${thumbs}===2 && !(${msg})`), await ev(msg));
+    await shotEl('images-' + vp.tag + '-picked.png', '#q1');
+    await ev(`window.confirm = () => true; document.getElementById('btnSubmit').click(); 1`);
+    check(T + 'images without text: asks for a short text answer, nothing sent', await waitFor(`document.getElementById('submitMsg').textContent.includes('写一句文字作答')`));
+    await ev(`(() => { const t = document.querySelector('#q1 textarea'); t.value = '见图'; t.dispatchEvent(new Event('input', {bubbles: true})); return 1; })()`);
+    await sleep(400);
+    await ev(`document.getElementById('btnSubmit').click(); 1`);
+    check(T + 'submit with images: result card', await waitFor(resultShown));
+    const li = await mockGet('/_mock/last-images');
+    check(T + 'the brain enqueue got the 2 image sha256s', Array.isArray(li.images) && li.images.length === 2 && li.images.every(x => /^[0-9a-f]{64}$/.test(x)), JSON.stringify(li));
+    check(T + 'after submit the picker is locked', await ev(`document.querySelector('#q1 input[type=file]').disabled && [...document.querySelectorAll('#q1 .imgrm')].every(b => b.disabled)`));
+    await shotEl('images-' + vp.tag + '-done.png', '#q1');
+    await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300);
+    check(T + '再做一次 clears the images', await ev(`${thumbs}===0`));
+  }
+  fs.rmSync(fdir, { recursive: true, force: true });
+  return finish();
+}
+
 (async () => {
   const { targetInfos } = await send('Target.getTargets');
   const page = targetInfos.find(t => t.type === 'page');
@@ -617,6 +680,7 @@ async function smokeFlow(base) {
   if (flow === 'contract') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return contractFlow(base); }
   if (flow === 'dailylimit') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return dailyLimitFlow(base); }
   if (flow === 'queue') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return queueFlow(base); }
+  if (flow === 'images') { await send('Page.navigate', { url: base + '/m/practice/' }, sid); await sleep(300); return imagesFlow(base); }
   if (flow === 'notready') { return notReadyFlow(base); }
   if (flow === 'smoke') { return smokeFlow(base); }
   if (flow === 'archive') {

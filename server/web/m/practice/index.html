@@ -75,6 +75,13 @@ a{color:var(--accent)}
 .resbox.done{border:2px solid #14b8a6}.resbox.soft2{border:2px solid #f59e0b}
 .submitcard button{width:100%;max-width:340px}
 footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:18px}
+.imgpick{margin-top:8px}.imgpick .imgbtn{display:inline-block;padding:8px 14px;border:1.5px dashed #94a3b8;border-radius:10px;cursor:pointer;color:#334155;font-size:.92rem}
+.imgpick input[type=file]{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}
+.imgpick .thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.imgpick .th{position:relative;width:84px;height:84px;border-radius:8px;overflow:hidden;background:#f1f5f9;font-size:.72rem;color:#475569;display:flex;align-items:center;justify-content:center;text-align:center;word-break:break-all}
+.imgpick .th img{width:100%;height:100%;object-fit:cover}
+.imgpick .th button{position:absolute;min-width:0;min-height:0;max-width:none;top:2px;right:2px;width:22px;height:22px;border-radius:50%;border:0;background:rgba(0,0,0,.6);color:#fff;font-size:14px;line-height:22px;padding:0;cursor:pointer}
+.imgpick .imsg{margin-top:6px;font-size:.88rem;color:#b91c1c}.imgpick .imsg.ok{color:#57534e}
 @media (max-width:480px){body{padding:10px 10px 96px}header,.card{padding:16px 14px}input.blank{width:7.5em}}
 </style>
 </head>
@@ -131,8 +138,10 @@ var quota=null;
 // The queue switch of the server (/api/config "queue":true, only present when it is on). It decides the wording:
 // with the queue off nothing is ever "queued" and there is no AI first pass to promise.
 var QUEUE_ON=false, NOTIFY_ON=false, cfgP=null;
+// Answer images (/api/config "images", only present when the server has them on): {max_count,max_bytes,max_total_bytes}
+var IMG_CFG=null, imgs={}, imgBusy=0;
 function loadCfg(){
-  if(!cfgP) cfgP=api('GET','/api/config').then(function(r){ if(r.status===200){ QUEUE_ON=!!(r.json && r.json.queue===true); NOTIFY_ON=QUEUE_ON && !!(r.json && r.json.notify===true); } else cfgP=null; }).catch(function(){ cfgP=null; });
+  if(!cfgP) cfgP=api('GET','/api/config').then(function(r){ if(r.status===200){ QUEUE_ON=!!(r.json && r.json.queue===true); NOTIFY_ON=QUEUE_ON && !!(r.json && r.json.notify===true); IMG_CFG=(QUEUE_ON && r.json && r.json.images && typeof r.json.images==='object')?r.json.images:null; } else cfgP=null; }).catch(function(){ cfgP=null; });
   return cfgP;
 }
 function capText(){ return QUEUE_ON?'今天这题已经交满 3 次，这次答案先存档，没有 AI 初评；明天再交一次才会排队。':'今天这题已经交满 3 次，这次答案先存档；明天再交一次才会记入大脑。'; }
@@ -340,11 +349,14 @@ function load0(note){
 
 // ---- draft (never contains the family code) ---------------------------------
 function loadDraft(){
-  answers={}; cid=null; cidSig=null; cidAt=null; result=null;
+  answers={}; imgs={}; cid=null; cidSig=null; cidAt=null; result=null;
   try{
     var d=JSON.parse(localStorage.getItem(DRAFT_KEY)||'{}');
     if(d && d.a && typeof d.a==='object'){
       items.forEach(function(q){ if(Object.prototype.hasOwnProperty.call(d.a,q.qref)) answers[q.qref]=d.a[q.qref]; });
+    }
+    if(d && d.im && typeof d.im==='object'){   // uploaded images: sha + size + name only (no preview after a reload)
+      items.forEach(function(q){ var l=d.im[q.qref]; if(Array.isArray(l)) imgs[q.qref]=l.filter(function(x){ return x && /^[0-9a-f]{64}$/.test(x.sha) && x.bytes>0; }).map(function(x){ return {sha:x.sha,bytes:+x.bytes,name:String(x.name||'图片').slice(0,40)}; }); });
     }
     if(d && typeof d.cid==='string' && UUID_RE.test(d.cid)){
       cid=d.cid; cidSig=typeof d.sig==='string'?d.sig:null; cidAt=typeof d.at==='string'?d.at:null;
@@ -356,10 +368,86 @@ function loadDraft(){
 function saveDraftNow(){
   if(!DRAFT_KEY) return;
   try{
-    localStorage.setItem(DRAFT_KEY,JSON.stringify({v:1,set:SET_ID,a:answers,t:new Date().toISOString(),cid:cid,sig:cidSig,at:cidAt,res:result}));
+    localStorage.setItem(DRAFT_KEY,JSON.stringify({v:1,set:SET_ID,a:answers,im:imgsForDraft(),t:new Date().toISOString(),cid:cid,sig:cidSig,at:cidAt,res:result}));
     $('savedHint').textContent='已自动保存 · '+new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
   }catch(e){}
   updateProgress();
+}
+function imgsForDraft(){
+  var o={}; Object.keys(imgs).forEach(function(k){ if(imgs[k].length) o[k]=imgs[k].map(function(x){ return {sha:x.sha,bytes:x.bytes,name:x.name}; }); }); return o;
+}
+// ---- answer images: pick 1..6 local images per free-text question (no camera entry: no capture attribute) ----
+// Each picked image is decoded and re-encoded in the browser (long edge ≤ 2560, EXIF incl. GPS dropped),
+// then uploaded at once to /api/practice/{set}/images; the answer carries only the sha256s.
+var IMG_LONG=2560, IMG_RAW_MAX=30*1024*1024;
+function fmtMB(n){ return (n/1048576).toFixed(1)+'MB'; }
+function imgTotal(ref){ return (imgs[ref]||[]).reduce(function(a,x){ return a+x.bytes; },0); }
+function prepImage(file){
+  return new Promise(function(res,rej){
+    var t=(file.type||'').toLowerCase();
+    if(t!=='image/jpeg' && t!=='image/png' && t!=='image/jpg') return rej('只支持 JPG 或 PNG 图片（「'+file.name+'」不是）。');
+    if(file.size>IMG_RAW_MAX) return rej('「'+file.name+'」太大了（'+fmtMB(file.size)+'），每张不能超过 '+fmtMB(IMG_CFG.max_bytes)+'。');
+    var url=URL.createObjectURL(file), im=new Image();
+    im.onload=function(){
+      var w=im.naturalWidth, h=im.naturalHeight, k=Math.min(1,IMG_LONG/Math.max(w,h));
+      var c=document.createElement('canvas'); c.width=Math.max(1,Math.round(w*k)); c.height=Math.max(1,Math.round(h*k));
+      c.getContext('2d').drawImage(im,0,0,c.width,c.height); URL.revokeObjectURL(url);
+      var png=t==='image/png' && file.size<=IMG_CFG.max_bytes && k===1;
+      c.toBlob(function(b){
+        if(!b) return rej('「'+file.name+'」处理失败，请换一张。');
+        if(b.size>IMG_CFG.max_bytes) return rej('「'+file.name+'」压缩后仍超过 '+fmtMB(IMG_CFG.max_bytes)+'，请换一张。');
+        res(b);
+      }, png?'image/png':'image/jpeg', 0.85);
+    };
+    im.onerror=function(){ URL.revokeObjectURL(url); rej('「'+file.name+'」打不开，请换一张 JPG 或 PNG 图片。'); };
+    im.src=url;
+  });
+}
+function uploadBlob(b){
+  return fetch('/api/practice/'+SET_ID+'/images',{method:'POST',credentials:'same-origin',headers:{'Content-Type':b.type},body:b}).then(function(r){
+    return r.text().then(function(t){ var j=null; try{ j=JSON.parse(t); }catch(e){} return {status:r.status,json:j}; });
+  });
+}
+function imgPicker(q){
+  var box=el('div','imgpick'); var id='f'+q.ordinal;
+  var lab=el('label','imgbtn','＋ 选图片（JPG/PNG，最多 '+IMG_CFG.max_count+' 张）'); lab.htmlFor=id;
+  var inp=document.createElement('input'); inp.type='file'; inp.id=id; inp.accept='image/jpeg,image/png'; inp.multiple=true;
+  inp.setAttribute('aria-label','第 '+q.ordinal+' 题选图片');
+  var th=el('div','thumbs'), msg=el('div','imsg');
+  function paint(){
+    th.innerHTML='';
+    (imgs[q.qref]||[]).forEach(function(x,i){
+      var d=el('div','th'); if(x.url){ var im=document.createElement('img'); im.src=x.url; im.alt=x.name; d.appendChild(im); } else d.textContent=x.name;
+      var rm=document.createElement('button'); rm.type='button'; rm.className='imgrm'; rm.textContent='×'; rm.setAttribute('aria-label','删掉这张');
+      rm.onclick=function(){ imgs[q.qref].splice(i,1); paint(); saveDraft(); };
+      d.appendChild(rm); th.appendChild(d);
+    });
+  }
+  function say(t,ok){ msg.textContent=t||''; msg.className='imsg'+(ok?' ok':''); }
+  inp.onchange=function(){
+    var files=Array.prototype.slice.call(inp.files||[]); inp.value='';
+    if(!files.length) return;
+    var have=(imgs[q.qref]||[]).length;
+    if(have+files.length>IMG_CFG.max_count){ say('每题最多 '+IMG_CFG.max_count+' 张图片，现在已有 '+have+' 张。'); return; }
+    imgs[q.qref]=imgs[q.qref]||[]; imgBusy++; say('图片上传中…',true);
+    var errs=[];
+    files.reduce(function(p,f){
+      return p.then(function(){ return prepImage(f); }).then(function(b){
+        if(imgTotal(q.qref)+b.size>IMG_CFG.max_total_bytes) throw '这题图片加起来不能超过 '+fmtMB(IMG_CFG.max_total_bytes)+'（「'+f.name+'」没加上）。';
+        return uploadBlob(b).then(function(r){
+          if(r.status===200 && r.json && /^[0-9a-f]{64}$/.test(r.json.sha256)){
+            if(!imgs[q.qref].some(function(x){ return x.sha===r.json.sha256; }))
+              imgs[q.qref].push({sha:r.json.sha256,bytes:+r.json.bytes||b.size,name:f.name.slice(0,40),url:URL.createObjectURL(b)});
+            paint(); saveDraftNow(); return;
+          }
+          if(r.status===401) throw '登录已过期，请刷新页面重新输入家庭码。';
+          throw (r.json && typeof r.json.message==='string' ? r.json.message : '图片暂时传不上去，请稍后再试。')+'（「'+f.name+'」）';
+        }, function(){ throw '连不上练习站服务，「'+f.name+'」没传上去。'; });
+      }).catch(function(e){ errs.push(typeof e==='string'?e:'「'+f.name+'」没传上去。'); });
+    }, Promise.resolve()).then(function(){ imgBusy--; say(errs.join(' ')); });
+  };
+  box.appendChild(lab); box.appendChild(inp); box.appendChild(th); box.appendChild(msg); paint();
+  return box;
 }
 function saveDraft(){
   document.querySelectorAll('#qs .vd.chk').forEach(function(n){ n.remove(); });   // an old 「检查」 verdict is stale once the answer changes
@@ -450,6 +538,7 @@ function render(){
         ta.value=typeof answers[q.qref]==='string'?answers[q.qref]:'';
         ta.oninput=function(){ answers[q.qref]=ta.value; saveDraft(); };
         card.appendChild(ta);
+        if(IMG_CFG && !isLocal) card.appendChild(imgPicker(q));
       }
     }
     root.appendChild(card);
@@ -552,6 +641,7 @@ function payloadAnswers(){
     } else a=v;
     var it={qref:q.qref,answer:a};
     if(typeof q.rev==='number' && q.rev>0) it.rev=q.rev;
+    if(IMG_CFG && imgs[q.qref] && imgs[q.qref].length) it.images=imgs[q.qref].map(function(x){ return x.sha; });
     list.push(it);
   });
   return list;
@@ -563,7 +653,8 @@ function showSubmitArea(){
   $('resultCard').style.display=result?'block':'none';
 }
 function setLocked(on){
-  document.querySelectorAll('#qs input,#qs textarea').forEach(function(x){ x.disabled=!!on; });
+  document.querySelectorAll('#qs input,#qs textarea,#qs .imgrm').forEach(function(x){ x.disabled=!!on; });
+  document.querySelectorAll('#qs .imgpick .imgbtn').forEach(function(x){ x.style.display=on?'none':''; });
 }
 // 「已提交到大脑」 only when the brain itself confirmed it recorded the answers
 // (brain_recorded + per-question recorded:true). Anything else is worded as
@@ -615,6 +706,10 @@ function applyResult(noStart){
     box.appendChild(el('div','sum','共 '+total+' 题 · 已作答 '+asked+' · 未作答 '+un));
     box.appendChild(el('p','meta',result.brain_note==='not_ready'?'大脑接口还没准备好，答案先存档，现在不显示对错。':'答案先存档，现在不显示对错。'));
     if(result.archived===false) box.appendChild(el('p','msg bad','这次提交没能保存下来，请告诉家长。'));
+  }
+  if(Array.isArray(result.images_not_sent) && result.images_not_sent.length){
+    var nos=items.filter(function(q){ return result.images_not_sent.indexOf(q.qref)>=0; }).map(function(q){ return q.ordinal; });
+    box.appendChild(el('p','meta','第 '+nos.join('、')+' 题的图片这次没有交给大脑（这题已自动判分或还在排队），文字答案已提交。'));
   }
   if(result.replayed) box.appendChild(el('p','meta','这份提交之前已经收到过，下面是当时的结果。'));
   var again=el('button','btn-primary','再做一次'); again.type='button'; again.id='btnAgain'; again.style.marginTop='10px';
@@ -731,7 +826,7 @@ document.addEventListener('visibilitychange',function(){
 });
 function resetAll(){
   qStop();
-  answers={}; cid=null; cidSig=null; cidAt=null; result=null;
+  answers={}; imgs={}; cid=null; cidSig=null; cidAt=null; result=null;
   try{ localStorage.removeItem(DRAFT_KEY); }catch(e){}
   render(); $('savedHint').textContent=''; submitMsg('');
   window.scrollTo(0,0);
@@ -741,6 +836,9 @@ function resetAll(){
 function submit(retriedOnce){
   if(submitting || result) return;
   var list=payloadAnswers();
+  if(imgBusy>0){ submitMsg('图片还在上传，等传完再提交。'); return; }
+  var noText=items.filter(function(q){ return imgs[q.qref] && imgs[q.qref].length && !filled(q); });
+  if(noText.length){ submitMsg('第 '+noText.map(function(q){ return q.ordinal; }).join('、')+' 题传了图片，请也写一句文字作答（例如“见图”）。'); return; }
   if(!list.length){ submitMsg('还没有作答，先做几道题再提交。'); return; }
   if(!retriedOnce && !isLocal && !window.confirm(confirmText(list))) return;   // cancel: nothing sent, draft untouched
   document.querySelectorAll('#qs .vd.cap').forEach(function(n){ n.remove(); });

@@ -89,6 +89,10 @@ type Deps struct {
 	// QueueHook is a test-only fault injector for the poller: it is called with a
 	// stage name and returns true to simulate a crash right there.
 	QueueHook func(stage string) bool
+
+	// Answer image upload (images.go). Off unless ImagesEnabled, Media set and the queue on.
+	ImagesEnabled bool
+	Media         AnswerMediaUploader
 }
 
 // Server is the top-level http.Handler.
@@ -97,6 +101,7 @@ type Server struct {
 	srcRe interface{ MatchString(string) bool }
 	allow map[string]bool
 
+	ups        uploads
 	auto       map[string]bool
 	dyn        *dynSets
 	gradeSess  *auth.Limiter
@@ -274,6 +279,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		case strings.HasSuffix(rest, "/check"):
 			id := strings.TrimSuffix(rest, "/check")
 			s.need(w, r, http.MethodPost, s.authed(func(w http.ResponseWriter, r *http.Request) { s.checkLocal(w, r, id) }))
+		case strings.HasSuffix(rest, "/images"):
+			id := strings.TrimSuffix(rest, "/images")
+			s.need(w, r, http.MethodPost, s.authed(func(w http.ResponseWriter, r *http.Request) { s.uploadImage(w, r, id) }))
 		case strings.HasSuffix(rest, "/quota"):
 			id := strings.TrimSuffix(rest, "/quota")
 			s.need(w, r, http.MethodGet, s.authed(func(w http.ResponseWriter, r *http.Request) { s.quota(w, r, id) }))
@@ -371,6 +379,10 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 		out["queue"] = true // only when on: with the queue off the answer stays byte-identical to #22
 		if s.poll != nil {
 			out["notify"] = true // the completion notice poller runs: only then may the page promise a parent notice
+		}
+		if s.imagesOn() {
+			out["images"] = map[string]any{"max_count": brain.MaxAnswerImages, "max_bytes": brain.MaxAnswerImageBytes,
+				"max_total_bytes": brain.MaxAnswerImagesTotal, "types": []string{"image/jpeg", "image/png"}}
 		}
 	}
 	writeJSON(w, http.StatusOK, out)

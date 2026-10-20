@@ -71,6 +71,7 @@ type linkItem struct {
 	Created     bool      `json:"created,omitempty"`
 	Tries       int       `json:"tries,omitempty"`
 	NextTry     time.Time `json:"next_try,omitzero"`
+	Images      []string  `json:"images,omitempty"` // answer image sha256s, resent on retries
 }
 
 type link struct {

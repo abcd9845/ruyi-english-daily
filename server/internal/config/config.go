@@ -71,6 +71,9 @@ type Config struct {
 	// S1: the pending-answer queue. Everything is OFF by default; with
 	// QueueEnabled=false the site behaves exactly as before.
 	QueueEnabled bool
+	// AnswerImagesEnabled (RUYI_ANSWER_IMAGES_ENABLED=1) lets the answer page upload
+	// images to the brain (write token). Needs QueueEnabled.
+	AnswerImagesEnabled bool
 	// QueueNotifyEnabled starts the poller that tells the parent when a set has
 	// been processed (needs BrainNotifyToken and NtfyTopic).
 	QueueNotifyEnabled bool
@@ -396,6 +399,14 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if c.QueueEnabled && c.BrainGradeToken == "" {
 		qbad("RUYI_QUEUE_ENABLED", "needs RUYI_BRAIN_GRADE_TOKEN (the write token queues the answers)")
+	}
+	// answer image upload (大脑 #57): default off; only meaningful with the queue on
+	if c.AnswerImagesEnabled, ok = flag01(getenv("RUYI_ANSWER_IMAGES_ENABLED")); !ok {
+		qbad("RUYI_ANSWER_IMAGES_ENABLED", "must be 0 or 1")
+	}
+	if !c.QueueEnabled && c.AnswerImagesEnabled {
+		c.Warnings = append(c.Warnings, "RUYI_ANSWER_IMAGES_ENABLED=1 is ignored: RUYI_QUEUE_ENABLED is off")
+		c.AnswerImagesEnabled = false
 	}
 	if !c.QueueEnabled && c.QueueNotifyEnabled {
 		c.Warnings = append(c.Warnings, "RUYI_QUEUE_NOTIFY_ENABLED=1 is ignored: RUYI_QUEUE_ENABLED is off")

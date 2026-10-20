@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -200,6 +201,30 @@ func newFakeBrain(t *testing.T) *fakeBrain {
 	f.notifyToken = rnd(t, "ntok-")
 	f.q = mockqueue.New(mockqueue.Config{Brain: "ruyi", WriteToken: f.gradeToken, NotifyToken: f.notifyToken, Env: fakeQueueEnv{f}})
 	f.q.Register(mux)
+	// answer images (大脑 #57 PR-I1 contract): write token, jpeg/png, sha must match; "QUOTA..." → 429
+	mux.HandleFunc("PUT /v1/brains/{slug}/answer-media/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		f.bump("answer_media")
+		if r.Header.Get("Authorization") != "Bearer "+f.gradeToken {
+			jerr(w, 403, "forbidden")
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		if bytes.Contains(b, []byte("QUOTA")) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(429)
+			_, _ = io.WriteString(w, `{"error":{"code":"media_daily_quota","message":"quota","details":{"unit":"images","limit":60,"used":60,"retry_after_s":60}}}`)
+			return
+		}
+		sum := sha256.Sum256(b)
+		if hex.EncodeToString(sum[:]) != r.PathValue("sha") || r.PathValue("slug") != "ruyi" {
+			jerr(w, 422, "sha_mismatch")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "sha256": r.PathValue("sha"), "mime": r.Header.Get("Content-Type"), "bytes": len(b), "created": true})
+	})
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Server.Close)
 	return f
@@ -770,6 +795,7 @@ type opts struct {
 	queueHook        func(stage string) bool
 	queueNoHint      bool   // the fake's grade carries no queueable hints
 	queueNotifyToken string // overrides the notify token the site is configured with
+	images           bool   // answer image upload on (ImagesEnabled + Media)
 }
 
 func newEnv(t *testing.T, o opts) *env {
@@ -860,7 +886,7 @@ func newEnv(t *testing.T, o opts) *env {
 		Sources: []string{testSource}, Topic: e.topic, Sets: reg, Embedded: emb,
 		Attempts: att, NtfyBase: ntfy, NtfyRetryDelay: retry, NtfyAttemptTimeout: o.ntfyTimeout, NtfyRequestWait: o.ntfyWait, GradeMaxPerHour: o.maxPerHour, AutoSources: o.auto, AutoTTL: o.autoTTL, SkipDeferred: o.skipDeferred, Now: o.now,
 		Queue: bc, QueueEnabled: o.queue, QueueNotify: o.queueNotify, QueueDir: e.qDir, QueuePoll: o.queuePoll, QueueSweep: o.queueSweep, QueueQuiet: o.queueQuiet, QueueHook: o.queueHook, QueueViewTTL: time.Nanosecond,
-		QueueJitter: func() float64 { return 0 }})
+		QueueJitter: func() float64 { return 0 }, ImagesEnabled: o.images, Media: bc})
 	e.app = app
 	if o.queue {
 		t.Cleanup(app.CloseQueue)

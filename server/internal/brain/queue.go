@@ -140,6 +140,8 @@ type EnqueueItem struct {
 	Rev         int
 	AttemptKind string
 	AnsweredAt  time.Time
+	// Images: sha256 of answer images already PUT to the brain (≤6). Empty = not sent.
+	Images []string
 }
 
 // EnqueueRequest is one batch (all or nothing at the brain). SessionRef is
@@ -331,6 +333,14 @@ func ValidateEnqueue(r EnqueueRequest) error {
 	}
 	g := GradeRequest{ClientAttemptID: r.ClientAttemptID}
 	for _, it := range r.Items {
+		if len(it.Images) > MaxAnswerImages {
+			return &Error{Kind: KindBadRequest, What: "too many images"}
+		}
+		for _, h := range it.Images {
+			if !ValidSHA256(h) {
+				return &Error{Kind: KindBadRequest, What: "bad image sha"}
+			}
+		}
 		g.Items = append(g.Items, GradeItem{QRef: it.QRef, Answer: it.Answer, Rev: it.Rev, AttemptKind: it.AttemptKind})
 	}
 	return ValidateGradeRequest(g)
@@ -343,10 +353,12 @@ func encodeEnqueue(r EnqueueRequest, brainID string, now time.Time) ([]byte, err
 		Rev         int    `json:"rev,omitempty"`
 		AttemptKind string `json:"attempt_kind,omitempty"`
 		AnsweredAt  string `json:"answered_at,omitempty"`
+		// 待联调 M-a (PR-I2): field name/shape assumed from Issue #57.
+		Images []string `json:"images,omitempty"`
 	}
 	items := make([]item, 0, len(r.Items))
 	for _, it := range r.Items {
-		o := item{QRef: WireQRef(it.QRef), Answer: it.Answer, AttemptKind: it.AttemptKind}
+		o := item{QRef: WireQRef(it.QRef), Answer: it.Answer, AttemptKind: it.AttemptKind, Images: it.Images}
 		if it.Rev >= 1 {
 			o.Rev = it.Rev
 		}

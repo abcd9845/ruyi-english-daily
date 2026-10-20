@@ -100,7 +100,10 @@ type Mock struct {
 	Stats    map[string]int
 	reqs     [][]byte // every enqueue body (secrets never in it; the answers are synthetic)
 
-	judged       bool
+	judged bool
+	images bool // switch "images": accept items[].images (大脑 ② PR-I2); off = ①a (images_not_enabled)
+	// LastImages: the images[] of the last enqueued item that carried some (tests).
+	LastImages   []string
 	mismatch422  bool   // session_total_mismatch as the contract's 422 instead of a 400
 	enqueueMode  string // "" | "500" | "slow" | "off" | "auth" | "queue_full"
 	batchOff     bool
@@ -137,6 +140,15 @@ func (m *Mock) kindOf(q string) string {
 	defer m.cfgMu.Unlock()
 	return m.kinds[strings.ToLower(q)]
 }
+func (m *Mock) imagesOn() bool { m.cfgMu.Lock(); defer m.cfgMu.Unlock(); return m.images }
+
+// Images returns the images[] of the last enqueued item that carried some.
+func (m *Mock) Images() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.LastImages...)
+}
+
 func (m *Mock) judgedOn() bool { m.cfgMu.Lock(); defer m.cfgMu.Unlock(); return m.judged }
 
 // ---- helpers -------------------------------------------------------------------------
@@ -361,8 +373,13 @@ func (m *Mock) enqueueInner(w http.ResponseWriter, r *http.Request) {
 		if !hasAns && !hasImg {
 			vs[i].reasons = append(vs[i].reasons, "answer_required")
 		}
-		if hasImg {
+		if hasImg && !m.imagesOn() {
 			vs[i].reasons = append(vs[i].reasons, "images_not_enabled")
+		}
+		if hasImg && m.imagesOn() {
+			var shas []string
+			_ = json.Unmarshal(it.Images, &shas)
+			m.LastImages = shas // m.mu is held by enqueue
 		}
 		status, known := m.cfg.Env.Lookup(q)
 		if !known {
@@ -734,7 +751,7 @@ func (m *Mock) handleCaps(w http.ResponseWriter, r *http.Request) {
 	j := m.judgedOn()
 	jok(w, 200, map[string]any{"brain": m.cfg.Brain,
 		"kinds":     map[string]any{"absolute": map[string]any{"enabled": true, "deadline_hours": 24}, "judged": map[string]any{"enabled": j, "deadline_hours": 48}},
-		"images":    map[string]any{"enabled": false, "max_per_item": 6},
+		"images":    map[string]any{"enabled": m.imagesOn(), "max_per_item": 6},
 		"limits":    map[string]any{"enqueue_items_max": 100, "session_total_max": 100, "open_cap": m.openCap, "daily_writes_per_question": 3, "batch_read_max": 100, "events_page_max": 200, "events_poll_min_s": 30},
 		"reanalyze": map[string]any{"enabled": false}})
 }
@@ -966,6 +983,10 @@ func (m *Mock) Set(k, v string) {
 	case "judged":
 		m.cfgMu.Lock()
 		m.judged = b
+		m.cfgMu.Unlock()
+	case "images":
+		m.cfgMu.Lock()
+		m.images = b
 		m.cfgMu.Unlock()
 	case "enqueue_mode":
 		m.enqueueMode = v

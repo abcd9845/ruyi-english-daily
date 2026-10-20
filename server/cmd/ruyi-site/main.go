@@ -132,6 +132,9 @@ func run() error {
 	}
 	if cfg.QueueEnabled {
 		deps.Queue = bc
+		if cfg.AnswerImagesEnabled {
+			deps.ImagesEnabled, deps.Media = true, bc
+		}
 	}
 	app := server.New(deps)
 	defer app.CloseQueue()

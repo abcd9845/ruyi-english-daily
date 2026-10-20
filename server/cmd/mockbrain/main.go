@@ -544,6 +544,51 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "missing": missing})
 	})
 
+	// PUT /v1/brains/{slug}/answer-media/{sha} (大脑 #57 PR-I1): write token, jpeg/png ≤5 MiB, sha must match.
+	// A body starting with "QUOTA" answers 429 media_daily_quota (to test the page message).
+	var amu sync.Mutex
+	answerMedia := map[string]int{}
+	mux.HandleFunc("PUT /v1/brains/{slug}/answer-media/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		bump("answer_media_put")
+		if r.Header.Get("Authorization") != "Bearer "+gradeToken {
+			cerr(w, 403, "forbidden", "forbidden", nil, nil)
+			return
+		}
+		if r.ContentLength > 5<<20 {
+			cerr(w, 413, "payload_too_large", "payload too large", nil, nil)
+			return
+		}
+		ct := r.Header.Get("Content-Type")
+		if ct != "image/jpeg" && ct != "image/png" {
+			cerr(w, 415, "unsupported_media_type", "unsupported", nil, nil)
+			return
+		}
+		b, _ := io.ReadAll(io.LimitReader(r.Body, 5<<20+1))
+		if bytes.HasPrefix(b, []byte("QUOTA")) {
+			cerr(w, 429, "media_daily_quota", "quota", nil, nil)
+			return
+		}
+		sum := sha256.Sum256(b)
+		sha := hex.EncodeToString(sum[:])
+		if sha != r.PathValue("sha") {
+			cerr(w, 422, "sha_mismatch", "sha mismatch", nil, nil)
+			return
+		}
+		amu.Lock()
+		_, dup := answerMedia[sha]
+		answerMedia[sha] = len(b)
+		n := len(answerMedia)
+		amu.Unlock()
+		code := 201
+		if dup {
+			code = 200
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": n, "sha256": sha, "mime": ct, "bytes": len(b), "width": 1, "height": 1,
+			"expires_at": time.Now().Add(180 * 24 * time.Hour).Format(time.RFC3339), "attached": false, "created": !dup})
+	})
+
 	// GET /v1/brain/pick-practice?source=&n=&mode=due_first|wrong_only&brain=<MOCK_BRAIN_ID, default ruyi>
 	mux.HandleFunc("GET /v1/brain/pick-practice", func(w http.ResponseWriter, r *http.Request) {
 		bump("pick")
@@ -943,6 +988,13 @@ func main() {
 			now: now,
 		}})
 		qmock.Register(mux)
+		if os.Getenv("MOCK_QUEUE_IMAGES") == "1" { // accept items[].images (大脑 ② PR-I2)
+			qmock.Set("images", "1")
+		}
+		mux.HandleFunc("GET /_mock/last-images", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"images": qmock.Images()})
+		})
 	}
 	mux.HandleFunc("GET /_mock/last-grade", func(w http.ResponseWriter, r *http.Request) {
 		gmu.Lock()

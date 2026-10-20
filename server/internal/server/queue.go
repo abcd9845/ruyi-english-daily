@@ -416,7 +416,7 @@ func (s *Server) queueAfterGrade(ctx context.Context, cid, setID, setTitle strin
 		if !eligible {
 			continue
 		}
-		li := linkItem{QRef: res.QRef, Status: res.Status, Rev: gi.Rev, AttemptKind: gi.AttemptKind}
+		li := linkItem{QRef: res.QRef, Status: res.Status, Rev: gi.Rev, AttemptKind: gi.AttemptKind, Images: gi.Images}
 		if h := hints[res.QRef]; h.known && !h.queueable { // the brain says it can never be queued
 			if h.reason == brain.ReasonNotNeeded {
 				continue
@@ -426,7 +426,7 @@ func (s *Server) queueAfterGrade(ctx context.Context, cid, setID, setTitle strin
 			continue
 		}
 		l.Items = append(l.Items, li)
-		send = append(send, brain.EnqueueItem{QRef: res.QRef, Answer: gi.Answer, Rev: gi.Rev, AttemptKind: gi.AttemptKind, AnsweredAt: gi.AnsweredAt})
+		send = append(send, brain.EnqueueItem{QRef: res.QRef, Answer: gi.Answer, Rev: gi.Rev, AttemptKind: gi.AttemptKind, AnsweredAt: gi.AnsweredAt, Images: gi.Images})
 	}
 	if len(l.Items) == 0 {
 		return nil, nil

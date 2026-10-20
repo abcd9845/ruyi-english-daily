@@ -1103,6 +1103,14 @@ if [ -n "$SHOTS" ] && command -v node >/dev/null && command -v google-chrome >/d
   [ "$BRC" = 0 ] && ok "L11 queue status in headless Chrome: 待解答 → AI 判卷中 → AI初评·待家长核 (full escaped text), timeout copy, purged, polling schedule, hidden tab, reload (all passed)" || bad "L11 queue browser checks"
   grep -qiE "$CODE|$TOKEN|$GTOKEN|$NTOKEN|$TOPIC" "$WORK/QB.log" && bad "L11b secrets in the log of the queue browser run" || ok "L11b no code/token in the log of the queue browser run"
   kill "$PID_QB" "$PID_mockQB" 2>/dev/null
+  # 作答选图上传（大脑 #57）：mock 大脑接受 images，站点开队列 + RUYI_ANSWER_IMAGES_ENABLED=1；手机与电脑视口各跑一遍
+  start_mock mockIM 18320 "MOCK_GRADE_TOKEN=$GTOKEN" MOCK_QUEUE=1 MOCK_QUEUE_IMAGES=1 "MOCK_NOTIFY_TOKEN=$NTOKEN"; wait_http "http://127.0.0.1:18320/_mock/stats"
+  start_site IM 18321 "http://127.0.0.1:18320" "RUYI_SETS_FILE=$WORK/sets.json" "RUYI_BRAIN_GRADE_TOKEN=$GTOKEN" "RUYI_NTFY_BASE_URL=$NTFYB" "RUYI_ATTEMPTS_DIR=$WORK/att-IM" "RUYI_GRADE_MAX_PER_HOUR=200" "RUYI_QUEUE_ENABLED=1" "RUYI_QUEUE_STATE_DIR=$WORK/q-IM" "RUYI_ANSWER_IMAGES_ENABLED=1"; wait_http "http://127.0.0.1:18321/healthz"
+  MOCK_URL="http://127.0.0.1:18320" BROWSER_FLOW=images BROWSER_CODE="$CODE" node "$HERE/browser-practice.js" "http://127.0.0.1:18321" "$SHOTS" > "$WORK/browser11.out" 2>&1; BRC=$?
+  cat "$WORK/browser11.out" | tee -a "$RESULTS"
+  [ "$BRC" = 0 ] && ok "L12 answer images in headless Chrome (mobile + desktop): pick 1..n, no capture, format/size/count messages, sha256s reach the enqueue (all passed)" || bad "L12 answer image browser checks"
+  grep -qiE "$CODE|$TOKEN|$GTOKEN|$NTOKEN|$TOPIC" "$WORK/IM.log" && bad "L12b secrets in the log of the image browser run" || ok "L12b no code/token in the log of the image browser run"
+  kill "$PID_IM" "$PID_mockIM" 2>/dev/null
 fi
 
 kill "$PID_P" 2>/dev/null

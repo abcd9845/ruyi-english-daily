@@ -112,6 +112,8 @@ type GradeItem struct {
 	AnsweredAt  time.Time // zero = not sent
 	SessionRef  string
 	Payload     map[string]any
+	// Images (answer image sha256s) are NOT sent with grade; they ride on the enqueue.
+	Images []string
 }
 
 // GradeRequest is what the site asks the brain to grade and record.

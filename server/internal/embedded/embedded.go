@@ -18,7 +18,7 @@ const (
 	PracticePath = "/m/practice/"
 	vendorPrefix = "/vendor/katex/"
 	pageCSP      = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
-		"font-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		"font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 
 type file struct {

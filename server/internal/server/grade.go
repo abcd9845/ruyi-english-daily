@@ -75,6 +75,9 @@ type gradeOut struct {
 	// with HTTP 429 and this full body (the attempt IS archived, see grade()).
 	Error   string `json:"error,omitempty"`
 	Message string `json:"message,omitempty"`
+	// ImagesNotSent: qrefs whose answer images did not reach the brain (the answer was
+	// not queued, or its enqueue is still retrying). Absent when there were no images.
+	ImagesNotSent []string `json:"images_not_sent,omitempty"`
 }
 
 // ---- idempotency by client_attempt_id --------------------------------------
@@ -161,6 +164,8 @@ type gradeAnswer struct {
 	Rev *int `json:"rev"`
 	// AttemptKind: optional "correction" | "variant", per answer.
 	AttemptKind string `json:"attempt_kind"`
+	// Images: sha256s returned by POST /api/practice/{set}/images (≤6). Optional.
+	Images []string `json:"images,omitempty"`
 }
 
 type gradeReq struct {
@@ -414,6 +419,7 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		ans  any
 		rev  int
 		kind string
+		imgs []string
 		skip bool // not sent to the brain (contract limit); archived as unsupported
 	}
 	answered := map[string]given{}
@@ -444,7 +450,15 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 			writeErr(w, http.StatusBadRequest, "bad_answer_shape", "作答格式和题型不匹配")
 			return
 		}
-		g := given{qref: a.QRef}
+		if code, msg := s.checkImages(r, a.Images); code != "" {
+			writeErr(w, http.StatusBadRequest, code, msg)
+			return
+		}
+		if len(a.Images) > 0 && empty {
+			writeErr(w, http.StatusBadRequest, "images_need_answer", msgImgNeedAnswer)
+			return
+		}
+		g := given{qref: a.QRef, imgs: a.Images}
 		if !empty {
 			g.ans = ans
 			// (a local set never goes to the brain, so the brain's contract limits do not apply)
@@ -486,11 +500,12 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		A any
 		R int
 		K string
+		I []string `json:",omitempty"`
 	}
 	var sigItems []sigItem
 	for _, q := range set.QRefs {
 		if g, ok := answered[q]; ok {
-			sigItems = append(sigItems, sigItem{q, g.ans, g.rev, g.kind})
+			sigItems = append(sigItems, sigItem{q, g.ans, g.rev, g.kind, g.imgs})
 		}
 	}
 	sigRaw, _ := json.Marshal(struct {
@@ -564,7 +579,7 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 	var items []brain.GradeItem
 	for _, q := range set.QRefs {
 		if g, ok := answered[q]; ok && g.ans != nil && !g.skip {
-			items = append(items, brain.GradeItem{QRef: q, Answer: g.ans, Rev: g.rev, AttemptKind: g.kind, AnsweredAt: answeredAt, SessionRef: cid})
+			items = append(items, brain.GradeItem{QRef: q, Answer: g.ans, Rev: g.rev, AttemptKind: g.kind, AnsweredAt: answeredAt, SessionRef: cid, Images: g.imgs})
 		}
 	}
 	mode := modeArchive
@@ -709,6 +724,18 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 		out.Queue, anchors = s.queueAfterGrade(r.Context(), cid, set.ID, set.Title, rec, out, items, hints, answeredAt)
 		if out.Queue != nil {
 			rec.V = 3
+		}
+	}
+	// answer images only travel with a queued answer: say which ones did not go
+	inQ := map[string]bool{}
+	if out.Queue != nil {
+		for _, it := range out.Queue.Items {
+			inQ[it.QRef] = it.Enq == enqOK
+		}
+	}
+	for _, q := range set.QRefs {
+		if g, ok := answered[q]; ok && len(g.imgs) > 0 && !inQ[q] {
+			out.ImagesNotSent = append(out.ImagesNotSent, q)
 		}
 	}
 	out.RecordedCount = out.Summary.Recorded

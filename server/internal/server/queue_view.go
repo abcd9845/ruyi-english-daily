@@ -73,7 +73,7 @@ func (s *Server) retryEnqueue(ctx context.Context, cid string, force bool) bool 
 			res[li.QRef] = enqRes{Enq: enqNotQueued, Reason: "archive_unavailable"}
 			continue
 		}
-		send = append(send, brain.EnqueueItem{QRef: li.QRef, Answer: ans, Rev: li.Rev, AttemptKind: li.AttemptKind, AnsweredAt: l.AnsweredAt})
+		send = append(send, brain.EnqueueItem{QRef: li.QRef, Answer: ans, Rev: li.Rev, AttemptKind: li.AttemptKind, AnsweredAt: l.AnsweredAt, Images: li.Images})
 	}
 	if len(send) > 0 {
 		ectx, cancel := context.WithTimeout(ctx, enqueueBudget)

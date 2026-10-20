@@ -145,32 +145,40 @@ func (s *Server) uploadImage(w http.ResponseWriter, r *http.Request, id string) 
 	writeJSON(w, http.StatusOK, map[string]any{"sha256": sha, "bytes": len(body), "mime": real, "created": res.Created})
 }
 
-// imageErr maps the brain's upload refusals to page messages (codes only, never brain text).
+// imageErr maps the brain's upload refusals to page messages BY HTTP STATUS (the brain's error
+// bodies are still being fixed, and nginx answers 413/401 itself with non-JSON bodies). The
+// error code is only used to tell the two 503s apart. Never echoes brain text.
 func (s *Server) imageErr(w http.ResponseWriter, err error) {
 	var qe *brain.QueueError
-	reason := ""
-	retry := 0
+	reason, status, retry := "", 0, 0
 	if errors.As(err, &qe) {
 		reason, retry = qe.Reason, qe.RetryAfterS
+		if qe.Base != nil {
+			status = qe.Base.Status
+		}
 	}
-	s.Log.Warn("answer image upload failed", "reason", nz(reason, "transport"))
+	s.Log.Warn("answer image upload failed", "status", status, "reason", nz(reason, "-"))
 	if retry > 0 {
 		w.Header().Set("Retry-After", fmt.Sprint(retry))
 	}
-	switch reason {
-	case "payload_too_large":
-		writeErr(w, http.StatusRequestEntityTooLarge, reason, msgImgTooBig)
-	case "unsupported_media_type":
-		writeErr(w, http.StatusUnsupportedMediaType, reason, msgImgFormat)
-	case "invalid_image", "sha_mismatch":
-		writeErr(w, http.StatusUnprocessableEntity, reason, msgImgBroken)
-	case "media_daily_quota":
-		writeErr(w, http.StatusTooManyRequests, reason, msgImgDaily)
-	case "brain_media_quota_exceeded", "media_disk_low":
-		writeErr(w, http.StatusConflict, reason, msgImgQuota)
-	case "busy":
-		writeErr(w, http.StatusServiceUnavailable, reason, msgImgBusy)
-	default:
+	switch status {
+	case 413:
+		writeErr(w, http.StatusRequestEntityTooLarge, "payload_too_large", msgImgTooBig)
+	case 415:
+		writeErr(w, http.StatusUnsupportedMediaType, "unsupported_media_type", msgImgFormat)
+	case 400, 422:
+		writeErr(w, http.StatusUnprocessableEntity, "invalid_image", msgImgBroken)
+	case 429:
+		writeErr(w, http.StatusTooManyRequests, "media_daily_quota", msgImgDaily)
+	case 409:
+		writeErr(w, http.StatusConflict, "media_quota", msgImgQuota)
+	case 503:
+		if reason == "media_disk_low" {
+			writeErr(w, http.StatusConflict, "media_quota", msgImgQuota)
+			return
+		}
+		writeErr(w, http.StatusServiceUnavailable, "busy", msgImgBusy)
+	default: // 401/403 (site token problem), 5xx, transport: nothing the child can fix
 		writeErr(w, http.StatusBadGateway, "brain_unavailable", msgImgUnavail)
 	}
 }

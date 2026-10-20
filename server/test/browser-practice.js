@@ -638,7 +638,8 @@ async function imagesFlow(base) {
   for (const vp of [{ tag: 'mobile', width: 390, height: 844, mobile: true }, { tag: 'desktop', width: 1280, height: 900, mobile: false }]) {
     await send('Emulation.setDeviceMetricsOverride', { width: vp.width, height: vp.height, deviceScaleFactor: vp.mobile ? 2 : 1, mobile: vp.mobile }, sid);
     const T = '[images ' + vp.tag + '] ';
-    check(T + 'free-3 loads', await loginAndLoad(base + '/m/practice/?set=free-3', 1));
+    const SET = process.env.IMG_SET || 'free-3';   // IMG_SET: run against a real brain (e.g. 18084 qa-practice) with another one-question set
+    check(T + SET + ' loads', await loginAndLoad(base + '/m/practice/?set=' + SET, 1));
     await ev(`localStorage.clear(); 1`); await send('Page.reload', {}, sid); await waitFor(`document.querySelectorAll('#qs section.card').length===1`);
     check(T + 'one picker: accept jpeg/png, multiple, NO capture attribute (no camera entry)', await ev(`(() => { const l = document.querySelectorAll('input[type=file]'); return l.length === 1 && l[0].accept === 'image/jpeg,image/png' && l[0].multiple && !l[0].hasAttribute('capture'); })()`));
     await setFiles([gif]);
@@ -656,8 +657,12 @@ async function imagesFlow(base) {
     await sleep(400);
     await ev(`document.getElementById('btnSubmit').click(); 1`);
     check(T + 'submit with images: result card', await waitFor(resultShown));
-    const li = await mockGet('/_mock/last-images');
-    check(T + 'the brain enqueue got the 2 image sha256s', Array.isArray(li.images) && li.images.length === 2 && li.images.every(x => /^[0-9a-f]{64}$/.test(x)), JSON.stringify(li));
+    if (process.env.MOCK_URL) {
+      const li = await mockGet('/_mock/last-images');
+      check(T + 'the brain enqueue got the 2 image sha256s', Array.isArray(li.images) && li.images.length === 2 && li.images.every(x => /^[0-9a-f]{64}$/.test(x)), JSON.stringify(li));
+    } else {
+      check(T + 'real brain: the answer was queued (images ride on the enqueue)', await ev(`!!(window.__lastResult = JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k => k.indexOf('ruyi') >= 0 && localStorage.getItem(k).indexOf('"res"') >= 0)) || '{}').res) && __lastResult.queue && __lastResult.queue.enqueue === 'ok' && !__lastResult.images_not_sent`));
+    }
     check(T + 'after submit the picker is locked', await ev(`document.querySelector('#q1 input[type=file]').disabled && [...document.querySelectorAll('#q1 .imgrm')].every(b => b.disabled)`));
     await shotEl('images-' + vp.tag + '-done.png', '#q1');
     await ev(`document.getElementById('btnAgain').click(); 1`); await sleep(300);

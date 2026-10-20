@@ -440,8 +440,10 @@ function imgPicker(q){
               imgs[q.qref].push({sha:r.json.sha256,bytes:+r.json.bytes||b.size,name:f.name.slice(0,40),url:URL.createObjectURL(b)});
             paint(); saveDraftNow(); return;
           }
-          if(r.status===401) throw '登录已过期，请刷新页面重新输入家庭码。';
-          throw (r.json && typeof r.json.message==='string' ? r.json.message : '图片暂时传不上去，请稍后再试。')+'（「'+f.name+'」）';
+          // judged by HTTP status only (an nginx 413/502 page has no JSON body)
+          var byStatus={401:'登录已过期，请刷新页面重新输入家庭码。',413:'图片太大了：每张不能超过 5MB。',415:'只支持 JPG 或 PNG 图片。',422:'这张图片打不开或尺寸太大，请换一张。',429:'今天上传的图片已经到上限了，明天再传。',409:'图片存储空间已满，请告诉家长。',503:'上传的人有点多，请过几秒再试。'};
+          if(r.status===401) throw byStatus[401];
+          throw (byStatus[r.status]||'图片暂时传不上去，请稍后再试。')+'（「'+f.name+'」）';
         }, function(){ throw '连不上练习站服务，「'+f.name+'」没传上去。'; });
       }).catch(function(e){ errs.push(typeof e==='string'?e:'「'+f.name+'」没传上去。'); });
     }, Promise.resolve()).then(function(){ imgBusy--; say(errs.join(' ')); });

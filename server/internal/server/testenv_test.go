@@ -209,6 +209,12 @@ func newFakeBrain(t *testing.T) *fakeBrain {
 			return
 		}
 		b, _ := io.ReadAll(r.Body)
+		if bytes.Contains(b, []byte("HTML413")) { // what nginx does above its body limit
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(413)
+			_, _ = io.WriteString(w, "<html><body>413 Request Entity Too Large</body></html>")
+			return
+		}
 		if bytes.Contains(b, []byte("QUOTA")) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Retry-After", "60")

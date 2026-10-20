@@ -13,9 +13,9 @@ package brain
 // PR-I2, NOT merged yet: see encodeEnqueue). The site never reads answer images
 // back and never asks for a ticket.
 //
-// 待联调（I1 已写约定，I2 未出）：
-//  M-a  入队 items[].images 的字段名与形状（暂按 Issue #57「入队接口 images[sha256…]」= sha 字符串数组）。
-//  M-b  images-only（无文字作答）入队：①a 返回 422 images_not_enabled；站点目前要求同时有文字作答。
+// 联调依据：大脑 docs/media-api.md（PR #82，部署 10db72a3）。入队 items[].images = [{"sha256":…}]。
+// 超 5MiB 时 nginx 直接回 HTML 413（无 JSON code），所以错误按状态码兜底映射。
+// 大脑允许“只有图无文字”入队；站点暂仍要求有文字作答（grade 不收空作答），见交付说明。
 
 import (
 	"bytes"

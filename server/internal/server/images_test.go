@@ -167,3 +167,26 @@ func TestImagesOffRefusesImagesButOldSubmitsUnchanged(t *testing.T) {
 		t.Errorf("plain submit: %+v", q)
 	}
 }
+
+// nginx answers an oversized body with its own HTML 413 (no JSON code): still the size message.
+func TestImageHTML413MappedByStatus(t *testing.T) {
+	e, ck := imgEnv(t)
+	resp, m := upload(t, e, ck, "tri-3", "image/png", []byte("\x89PNG\r\n\x1a\nHTML413"))
+	if resp.StatusCode != 413 || !strings.Contains(fmt.Sprint(m["message"]), "5MB") {
+		t.Errorf("html 413: %d %v", resp.StatusCode, m)
+	}
+}
+
+// Production today: the brain's RUYI_QUEUE_IMAGES_ENABLED is off -> enqueue with images is
+// refused (422 images_not_enabled). The submission still succeeds (grade recorded), the
+// answer is marked not queued and the page is told the images did not go.
+func TestBrainImagesOffDegradesGracefully(t *testing.T) {
+	e, _, ck := queueEnv(t, opts{images: true}) // mock brain images switch stays off
+	_, m := upload(t, e, ck, "tri-3", "image/png", pngN(9))
+	sha := m["sha256"].(string)
+	body := imgAnswers(cid1, map[string][]string{q3: {sha}}, map[string]any{q3: "见图"})
+	resp, b, _ := e.submit(t, ck, "tri-3", body)
+	if resp.StatusCode != 200 || !strings.Contains(string(b), `"images_not_sent":["`+q3+`"]`) || !strings.Contains(string(b), "images_not_enabled") {
+		t.Errorf("%d %s", resp.StatusCode, b)
+	}
+}

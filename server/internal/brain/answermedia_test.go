@@ -14,7 +14,7 @@ func TestEnqueueImagesWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := encodeEnqueue(r, "ruyi", time.Now())
-	if !strings.Contains(string(b), `"images":["`+sha+`"]`) || strings.Count(string(b), `"images"`) != 1 {
+	if !strings.Contains(string(b), `"images":[{"sha256":"`+sha+`"}]`) || strings.Count(string(b), `"images"`) != 1 {
 		t.Errorf("wire: %s", b)
 	}
 	r.Items[0].Images = []string{sha, sha, sha, sha, sha, sha, sha}

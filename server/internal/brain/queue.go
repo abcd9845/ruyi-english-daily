@@ -346,6 +346,10 @@ func ValidateEnqueue(r EnqueueRequest) error {
 	return ValidateGradeRequest(g)
 }
 
+type imageRef struct {
+	SHA256 string `json:"sha256"`
+}
+
 func encodeEnqueue(r EnqueueRequest, brainID string, now time.Time) ([]byte, error) {
 	type item struct {
 		QRef        string `json:"qref"`
@@ -353,12 +357,15 @@ func encodeEnqueue(r EnqueueRequest, brainID string, now time.Time) ([]byte, err
 		Rev         int    `json:"rev,omitempty"`
 		AttemptKind string `json:"attempt_kind,omitempty"`
 		AnsweredAt  string `json:"answered_at,omitempty"`
-		// 待联调 M-a (PR-I2): field name/shape assumed from Issue #57.
-		Images []string `json:"images,omitempty"`
+		// docs/media-api.md (大脑 PR #82): images[] = [{"sha256"}] (id or sha256; the site sends sha256 only).
+		Images []imageRef `json:"images,omitempty"`
 	}
 	items := make([]item, 0, len(r.Items))
 	for _, it := range r.Items {
-		o := item{QRef: WireQRef(it.QRef), Answer: it.Answer, AttemptKind: it.AttemptKind, Images: it.Images}
+		o := item{QRef: WireQRef(it.QRef), Answer: it.Answer, AttemptKind: it.AttemptKind}
+		for _, h := range it.Images {
+			o.Images = append(o.Images, imageRef{SHA256: h})
+		}
 		if it.Rev >= 1 {
 			o.Rev = it.Rev
 		}

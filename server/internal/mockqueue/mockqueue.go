@@ -377,8 +377,14 @@ func (m *Mock) enqueueInner(w http.ResponseWriter, r *http.Request) {
 			vs[i].reasons = append(vs[i].reasons, "images_not_enabled")
 		}
 		if hasImg && m.imagesOn() {
+			var refs []struct {
+				SHA256 string `json:"sha256"`
+			}
+			_ = json.Unmarshal(it.Images, &refs)
 			var shas []string
-			_ = json.Unmarshal(it.Images, &shas)
+			for _, r := range refs {
+				shas = append(shas, r.SHA256)
+			}
 			m.LastImages = shas // m.mu is held by enqueue
 		}
 		status, known := m.cfg.Env.Lookup(q)

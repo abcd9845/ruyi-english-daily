@@ -20,6 +20,9 @@ var ErrUnsupported = errors.New("not supported by the brain yet")
 // the read token is never used instead.
 var ErrPickNoToken = errors.New("pick-practice needs the grade token")
 
+// OriginAssigned marks a pick the parent assigned (brain_assign_questions, 大脑 PR #92).
+const OriginAssigned = "assigned"
+
 // Selection modes understood by pick-practice. The empty mode is the legacy
 // local pick (whole source, library order or shuffled) that needs no brain data.
 const (
@@ -60,8 +63,8 @@ type Pick struct {
 type Bank interface {
 	// ListBySource returns the whole active source in library order (by question number).
 	ListBySource(ctx context.Context, source string) ([]Question, error)
-	// LookupByQrefs returns the questions among qrefs that exist (in source),
-	// and the qrefs that do not.
+	// LookupByQrefs returns the questions among qrefs that exist (in source; "" = any
+	// source, needs the lookup endpoint), and the qrefs that do not.
 	LookupByQrefs(ctx context.Context, source string, qrefs []string) (found map[string]Question, missing []string, err error)
 	// SelectForPractice picks up to n questions of source for a fresh practice set.
 	SelectForPractice(ctx context.Context, source string, n int, opts SelectOpts) ([]Pick, error)

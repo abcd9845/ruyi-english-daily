@@ -404,7 +404,7 @@ func (s *Server) grade(w http.ResponseWriter, r *http.Request, id string) {
 	var found map[string]brain.Question
 	if !set.Local {
 		var err error
-		found, _, err = s.Bank.LookupByQrefs(r.Context(), set.Source, set.QRefs)
+		found, _, err = s.lookupSet(r.Context(), set, s.dyn.metaOf(set.ID))
 		if err != nil {
 			s.brainErr(w, "grade-lookup", err)
 			return

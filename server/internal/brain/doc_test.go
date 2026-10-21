@@ -359,7 +359,7 @@ func TestPickNeverAsksForMoreThanTenAndSendsOnlyKnownQuery(t *testing.T) {
 		t.Errorf("n=%v", q["n"])
 	}
 	for k := range q {
-		if k != "source" && k != "n" && k != "date" && k != "brain" && k != "mode" {
+		if k != "source" && k != "n" && k != "date" && k != "brain" && k != "mode" && k != "assigned" {
 			t.Errorf("query parameter %q is not in the contract", k)
 		}
 	}

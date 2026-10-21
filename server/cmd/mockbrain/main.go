@@ -589,6 +589,19 @@ func main() {
 			"expires_at": time.Now().Add(180 * 24 * time.Hour).Format(time.RFC3339), "attached": false, "created": !dup})
 	})
 
+	// assignments (大脑 PR #92), test hooks: POST /_mock/assign?qref=… adds one, POST /_mock/assign?clear=1 drops all
+	var asgMu sync.Mutex
+	var asgList []string
+	mux.HandleFunc("POST /_mock/assign", func(w http.ResponseWriter, r *http.Request) {
+		asgMu.Lock()
+		defer asgMu.Unlock()
+		if r.URL.Query().Get("clear") == "1" {
+			asgList = nil
+		} else if q := r.URL.Query().Get("qref"); q != "" {
+			asgList = append(asgList, q)
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	})
 	// GET /v1/brain/pick-practice?source=&n=&mode=due_first|wrong_only&brain=<MOCK_BRAIN_ID, default ruyi>
 	mux.HandleFunc("GET /v1/brain/pick-practice", func(w http.ResponseWriter, r *http.Request) {
 		bump("pick")
@@ -607,11 +620,19 @@ func main() {
 		}
 		qv := r.URL.Query()
 		for k := range qv { // the only query parameters of this endpoint
-			if k != "source" && k != "n" && k != "date" && k != "brain" && k != "mode" {
+			if k != "source" && k != "n" && k != "date" && k != "brain" && k != "mode" && k != "assigned" {
 				bump("pick_400")
 				cerr(w, 400, "validation_failed", "unknown query parameter", nil, nil)
 				return
 			}
+		}
+		if a := qv.Get("assigned"); a != "" && a != "1" && a != "true" && a != "0" && a != "false" {
+			bump("pick_400")
+			cerr(w, 400, "validation_failed", "invalid assigned", nil, nil)
+			return
+		}
+		if qv.Get("assigned") == "1" || qv.Get("assigned") == "true" {
+			bump("pick_assigned")
 		}
 		mode, src := qv.Get("mode"), qv.Get("source")
 		n, nerr := strconv.Atoi(qv.Get("n"))
@@ -672,6 +693,25 @@ func main() {
 					all = append(all, mk(ref, origin, reason))
 				}
 			}
+		}
+		// 大脑 PR #92: with assigned=1 the open assignments (any source) come first and take places of n
+		if a := qv.Get("assigned"); a == "1" || a == "true" {
+			asgMu.Lock()
+			var pre []pick
+			seen := map[string]bool{}
+			for _, ref := range asgList {
+				if _, ok := known[ref]; ok && !seen[ref] {
+					seen[ref] = true
+					pre = append(pre, mk(ref, "assigned", "assigned"))
+				}
+			}
+			asgMu.Unlock()
+			for _, p := range all {
+				if !seen[p.QRef] {
+					pre = append(pre, p)
+				}
+			}
+			all = pre
 		}
 		if len(all) > n {
 			all = all[:n]

@@ -350,7 +350,7 @@ func TestContractPickPracticeModes(t *testing.T) {
 		t.Fatalf("%d %s", code, b)
 	}
 	q := e.brain.pickQuery[0]
-	if q.Get("source") != practiceSrc || q.Get("n") != "6" || q.Get("mode") != "due_first" || q.Get("brain") != "ruyi" || len(q) != 4 {
+	if q.Get("source") != practiceSrc || q.Get("n") != "6" || q.Get("mode") != "due_first" || q.Get("brain") != "ruyi" || q.Get("assigned") != "1" || len(q) != 5 {
 		t.Errorf("pick query: %v", q)
 	}
 	if e.brain.pickAuths[0] != "Bearer "+e.brain.gradeToken {

@@ -489,7 +489,7 @@ function render(){
   items.forEach(function(q){
     var card=el('section','card'); card.id='q'+q.ordinal; card.setAttribute('data-qref',q.qref);
     card.appendChild(el('div','qno','第 '+q.ordinal+' 题'));
-    if(q.origin==='wrong'||q.origin==='review'){ var og=el('span','tag',q.origin==='wrong'?'错题':'复习'); card.firstChild.appendChild(og); }
+    if(q.origin==='wrong'||q.origin==='review'||q.origin==='assigned'){ var og=el('span','tag',q.origin==='wrong'?'错题':q.origin==='review'?'复习':'家长布置'); card.firstChild.appendChild(og); }
     if(typeof q.ref_pending==='string' && q.ref_pending){ card.appendChild(el('div','refpend','参考答案待核，不自动判')); }
     var stem=el('div','stem'); card.appendChild(stem);
     var r=mdInto(stem,q.stem_md||'',false);

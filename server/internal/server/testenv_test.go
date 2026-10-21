@@ -88,6 +88,7 @@ type fakeBrain struct {
 	lookupReqs [][]byte
 	revs       map[string]int // qref -> current rev (default 1)
 	pickMode   string         // "" ok | "off" | "501" | "fail"
+	assigned   []string       // open assignments (any source) returned first when assigned=1
 	pickQuery  []url.Values
 	pickAuths  []string
 	pickBank   int // pick-practice calls that used the bank:read token (refused with 403)
@@ -370,6 +371,9 @@ func (f *fakeBrain) handleLookup(w http.ResponseWriter, r *http.Request) {
 	for _, q := range f.practiceItems() {
 		have[q["qref"].(string)] = q
 	}
+	// questions of another source (assignable from anywhere; 大脑 PR #92)
+	have["math:q01"] = map[string]any{"qref": "math:q01", "source": testSource, "number": "1(1)", "qtype": "short_answer", "stem": "assigned stem",
+		"media": []any{map[string]any{"sha256": sha1x, "mime": "image/png", "ordinal": 1, "slot": "stem"}}, "figure_status": "ok"}
 	have["example.set:math:11"] = map[string]any{"qref": "example.set:math:11", "source": practiceSrc, "number": "11", "qtype": "short_answer",
 		"stem": strings.Repeat("x ________ ", 11), "media": []any{}, "figure_status": "none"} // 11 blanks: over the contract's 10
 	items := []map[string]any{}
@@ -420,10 +424,14 @@ func (f *fakeBrain) handlePick(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	n, _ := strconv.Atoi(q.Get("n"))
 	for k := range q {
-		if k != "source" && k != "n" && k != "date" && k != "brain" && k != "mode" {
+		if k != "source" && k != "n" && k != "date" && k != "brain" && k != "mode" && k != "assigned" {
 			jerrf(w, 400, "validation_failed")
 			return
 		}
+	}
+	if a := q.Get("assigned"); a != "" && a != "1" && a != "true" {
+		jerrf(w, 400, "validation_failed")
+		return
 	}
 	if q.Get("source") == "no-such-source" {
 		jerrd(w, 404, "not_found", "source not found", nil)
@@ -453,6 +461,13 @@ func (f *fakeBrain) handlePick(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Get("mode") == "wrong_only" {
 		all = all[1:]
+	}
+	if q.Get("assigned") == "1" && len(f.assigned) > 0 { // 大脑 PR #92: open assignments first
+		var pre []pk
+		for _, a := range f.assigned {
+			pre = append(pre, pk{a, "", "assigned", []string{"assigned"}})
+		}
+		all = append(pre, all...)
 	}
 	if len(all) > n {
 		all = all[:n]

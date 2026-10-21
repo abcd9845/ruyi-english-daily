@@ -15,8 +15,19 @@ const (
 
 // pickMeta is what the brain said about one picked question.
 type pickMeta struct {
-	Origin   string // review | wrong
+	Origin   string // review | wrong | assigned
 	Deferred string // deferred:<code> reason code; "" = gradable
+	// Source: the question's own source when it differs from the set's (an assigned
+	// question may come from any source). "" = the set's source.
+	Source string
+}
+
+// srcOf is the source a question of a dynamic set is looked up (and its figures served) in.
+func srcOf(set *sets.Set, meta map[string]pickMeta, qref string) string {
+	if m, ok := meta[qref]; ok && m.Source != "" {
+		return m.Source
+	}
+	return set.Source
 }
 
 type dynEntry struct {
@@ -104,6 +115,11 @@ func (d *dynSets) hasSource(source string) bool {
 		if e.set.Source == source {
 			return true
 		}
+		for _, m := range e.meta {
+			if m.Source == source {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -113,11 +129,8 @@ func (d *dynSets) allowsQRef(source, qref string) bool {
 	defer d.mu.Unlock()
 	d.purgeLocked()
 	for _, e := range d.m {
-		if e.set.Source != source {
-			continue
-		}
 		for _, q := range e.set.QRefs {
-			if q == qref {
+			if q == qref && srcOf(&e.set, e.meta, q) == source {
 				return true
 			}
 		}

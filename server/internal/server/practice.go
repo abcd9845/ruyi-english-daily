@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -30,7 +31,7 @@ type practiceItem struct {
 	// Rev is the question revision the brain served; the page sends it back with
 	// the answer so the brain can refuse a stale version (409 rev_mismatch).
 	Rev int `json:"rev,omitempty"`
-	// Origin (review|wrong) and RefPending are only set on brain-picked sets.
+	// Origin (review|wrong|assigned) and RefPending are only set on brain-picked sets.
 	// RefPending is the brain's deferred:<code> reason: the page shows
 	// "参考答案待核，不自动判" for such a question.
 	Origin     string `json:"origin,omitempty"`
@@ -55,14 +56,14 @@ func (s *Server) practice(w http.ResponseWriter, r *http.Request, id string) {
 		s.practiceLocal(w, set)
 		return
 	}
-	byRef, missingRefs, err := s.Bank.LookupByQrefs(r.Context(), set.Source, set.QRefs)
+	meta := s.dyn.metaOf(set.ID)
+	byRef, missingRefs, err := s.lookupSet(r.Context(), set, meta)
 	if err != nil {
 		s.brainErr(w, "practice", err)
 		return
 	}
 	items := make([]practiceItem, 0, len(set.QRefs))
 	missing := missingRefs
-	meta := s.dyn.metaOf(set.ID)
 	for _, ref := range set.QRefs {
 		q, ok := byRef[ref]
 		if !ok {
@@ -92,7 +93,7 @@ func (s *Server) practice(w http.ResponseWriter, r *http.Request, id string) {
 				continue
 			}
 			it.Media = append(it.Media, mediaOut{
-				URL:  "/api/media/" + set.Source + "/" + m.SHA256,
+				URL:  "/api/media/" + srcOf(set, meta, ref) + "/" + m.SHA256,
 				Slot: m.Slot, OptionKey: m.OptionKey, Alt: m.Alt, Mime: m.Mime, Ordinal: m.Ordinal,
 			})
 		}
@@ -105,6 +106,34 @@ func (s *Server) practice(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"set_id": set.ID, "title": set.Title, "items": items, "missing_qrefs": missing,
 	})
+}
+
+// lookupSet looks the set's questions up in their sources: the set's own one, plus (in a
+// dynamic set) the sources of assigned questions from elsewhere. Same result shape as
+// LookupByQrefs.
+func (s *Server) lookupSet(ctx context.Context, set *sets.Set, meta map[string]pickMeta) (map[string]brain.Question, []string, error) {
+	groups := map[string][]string{}
+	var order []string
+	for _, q := range set.QRefs {
+		src := srcOf(set, meta, q)
+		if _, ok := groups[src]; !ok {
+			order = append(order, src)
+		}
+		groups[src] = append(groups[src], q)
+	}
+	found := map[string]brain.Question{}
+	missing := []string{}
+	for _, src := range order {
+		f, m, err := s.Bank.LookupByQrefs(ctx, src, groups[src])
+		if err != nil {
+			return nil, nil, err
+		}
+		for k, v := range f {
+			found[k] = v
+		}
+		missing = append(missing, m...)
+	}
+	return found, missing, nil
 }
 
 // practiceLocal serves a local test set from its inline questions: the brain is
@@ -250,13 +279,52 @@ func (s *Server) autoNew(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "no_questions", msg)
 		return
 	}
+	// assigned questions may live in another source: ask the brain where (read-only lookup
+	// without a source filter); one it cannot resolve is left out rather than shown broken
+	var asg []string
+	for _, p := range picks {
+		if p.Origin == brain.OriginAssigned {
+			asg = append(asg, p.QRef)
+		}
+	}
+	asgSrc := map[string]string{}
+	if len(asg) > 0 {
+		found, _, lerr := s.Bank.LookupByQrefs(r.Context(), "", asg)
+		if lerr != nil {
+			s.Log.Warn("assigned questions could not be resolved; left out", "n", len(asg))
+		}
+		for q, bq := range found {
+			if bq.Source != nil && *bq.Source != "" && s.srcRe.MatchString(*bq.Source) {
+				asgSrc[q] = *bq.Source
+			}
+		}
+		kept := picks[:0:0]
+		for _, p := range picks {
+			if p.Origin == brain.OriginAssigned && asgSrc[p.QRef] == "" {
+				continue
+			}
+			kept = append(kept, p)
+		}
+		if len(kept) < len(picks) {
+			s.Log.Warn("assigned questions not found at the brain; left out", "n", len(picks)-len(kept))
+		}
+		picks = kept
+		if len(picks) == 0 {
+			writeErr(w, http.StatusNotFound, "no_questions", "现在没有符合条件的题（没有未解决的错题或到期复习）")
+			return
+		}
+	}
 	refs := make([]string, 0, len(picks))
 	meta := map[string]pickMeta{}
 	deferred := 0
 	for _, p := range picks {
 		refs = append(refs, p.QRef)
 		if p.Origin != "" || p.Deferred != "" {
-			meta[p.QRef] = pickMeta{Origin: p.Origin, Deferred: p.Deferred}
+			pm := pickMeta{Origin: p.Origin, Deferred: p.Deferred}
+			if src := asgSrc[p.QRef]; src != source {
+				pm.Source = src // "" when it is the set's own source
+			}
+			meta[p.QRef] = pm
 		}
 		if p.Deferred != "" {
 			deferred++

@@ -123,7 +123,7 @@ func TestPickPracticeWireAndParsing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotAuth != "Bearer grade-tok" || gotPath != DefaultPickPath || len(q) != 4 || q["source"][0] != "s.x" || q["n"][0] != "10" || q["mode"][0] != "wrong_only" || q["brain"][0] != "ruyi" {
+	if gotAuth != "Bearer grade-tok" || gotPath != DefaultPickPath || len(q) != 5 || q["assigned"][0] != "1" || q["source"][0] != "s.x" || q["n"][0] != "10" || q["mode"][0] != "wrong_only" || q["brain"][0] != "ruyi" {
 		t.Errorf("auth=%q path=%q q=%v", gotAuth, gotPath, q)
 	}
 	if picks(got) != "a,b,c,d" {

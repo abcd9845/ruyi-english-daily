@@ -159,6 +159,9 @@ func (c *Client) LookupByQrefs(ctx context.Context, source string, qrefs []strin
 	down := c.now().Before(c.lookupDownUntil)
 	c.mu.Unlock()
 	if down {
+		if source == "" { // any-source lookup needs the lookup endpoint
+			return nil, nil, &Error{Kind: KindUnavailable, What: "lookup not deployed"}
+		}
 		return c.listLookup(ctx, source, want)
 	}
 	path := c.lookupPath
@@ -186,6 +189,9 @@ func (c *Client) LookupByQrefs(ctx context.Context, source string, qrefs []strin
 				c.mu.Lock()
 				c.lookupDownUntil = c.now().Add(lookupDownFor)
 				c.mu.Unlock()
+				if source == "" {
+					return nil, nil, &Error{Kind: KindUnavailable, What: "lookup not deployed"}
+				}
 				return c.listLookup(ctx, source, want)
 			}
 			return nil, nil, err
@@ -238,7 +244,7 @@ func alignLookup(chunk []string, items []Question, missing []string, source stri
 			if !used[i] && strings.EqualFold(q.QRef, w) {
 				used[i] = true
 				matched = true
-				if q.Source == nil || *q.Source == source {
+				if source == "" || q.Source == nil || *q.Source == source {
 					out[w] = normalizeQuestion(q)
 				}
 				break
@@ -256,7 +262,7 @@ func alignLookup(chunk []string, items []Question, missing []string, source stri
 	}
 	if len(rest) > 0 && len(rest) == len(left) {
 		for i, w := range rest {
-			if left[i].Source == nil || *left[i].Source == source {
+			if source == "" || left[i].Source == nil || *left[i].Source == source {
 				out[w] = normalizeQuestion(left[i])
 			}
 		}
@@ -318,6 +324,9 @@ func (c *Client) pick(ctx context.Context, source string, n int, o SelectOpts) (
 	}
 	n = max(1, min(n, MaxPickN)) // contract: n is 1..10
 	q := url.Values{"source": {source}, "n": {strconv.Itoa(n)}, "mode": {o.Mode}, "brain": {c.id()}}
+	// 大脑 PR #92: open assignments (parent-assigned questions, possibly of another source)
+	// take the first places; without any the reply is the same as without the flag.
+	q.Set("assigned", "1")
 	ctx, cancel := context.WithTimeout(ctx, pickTimeout)
 	defer cancel()
 	b, err := c.doJSON(ctx, c.gradeToken, http.MethodGet, c.endpoint(path, q), nil, maxPickBytes)
@@ -353,7 +362,7 @@ func (c *Client) pick(ctx context.Context, source string, n int, o SelectOpts) (
 		} else if json.Unmarshal(it.Number, &nn) == nil {
 			p.Number = nn.String()
 		}
-		if it.Origin == "review" || it.Origin == "wrong" {
+		if it.Origin == "review" || it.Origin == "wrong" || it.Origin == OriginAssigned {
 			p.Origin = it.Origin
 		}
 		for _, r := range it.Reasons {
